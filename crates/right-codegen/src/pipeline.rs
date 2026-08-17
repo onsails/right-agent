@@ -280,13 +280,6 @@ pub fn run_agent_codegen(
     write_regenerated(&token_map_path, &token_map_json)?;
     tracing::debug!("wrote agent-tokens.json");
 
-    // Validate policy files exist for all sandboxed agents.
-    for agent in all_agents {
-        if let Some(ref config) = agent.config {
-            config.resolve_policy_path(&agent.path)?;
-        }
-    }
-
     // Generate cloudflared config and wrapper script — only when the operator
     // selected `provider: cloudflared`. For `provider: external`, the operator
     // owns the public HTTPS front (e.g. their own caddy/nginx), so we skip
@@ -609,6 +602,55 @@ pub(crate) mod tests {
         assert!(home.join("run/process-compose.yaml").exists());
         // state.json should exist
         assert!(home.join("run/state.json").exists());
+    }
+
+    #[tokio::test]
+    async fn run_agent_codegen_accepts_legacy_openshell_agent_without_policy() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+        write_minimal_global_config(home);
+
+        let agent_dir = home.join("agents").join("legacy");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            "restart: never\nnetwork_policy: permissive\ntelegram_token: 123:test\n",
+        )
+        .unwrap();
+        assert!(!agent_dir.join("policy.yaml").exists());
+
+        let agent = agent_fixture(&agent_dir);
+        let self_exe = std::path::PathBuf::from("/usr/bin/right");
+        run_agent_codegen(home, std::slice::from_ref(&agent), &self_exe, false).unwrap();
+        assert!(
+            !agent_dir.join("policy.yaml").exists(),
+            "cross-agent codegen must leave per-agent policy generation to the bot"
+        );
+
+        let pc_yaml = std::fs::read_to_string(home.join("run/process-compose.yaml")).unwrap();
+        let expected_policy = format!(
+            "RC_SANDBOX_POLICY={}",
+            agent_dir.join("policy.yaml").display()
+        );
+        assert!(
+            pc_yaml.contains(&expected_policy),
+            "legacy OpenShell agent must use default generated policy path: {pc_yaml}"
+        );
+        // Bot startup per-agent codegen generates the missing default policy.
+        run_single_agent_codegen(home, &agent, &self_exe, false)
+            .await
+            .unwrap();
+        assert!(
+            agent_dir.join("policy.yaml").exists(),
+            "per-agent codegen must generate the default policy for a legacy agent"
+        );
+
+        // Bot startup then resolves that generated default policy path.
+        let config = agent.config.as_ref().expect("agent.yaml must parse");
+        let resolved = config
+            .resolve_policy_path(&agent_dir)
+            .expect("default policy path must resolve after generation");
+        assert_eq!(resolved, Some(agent_dir.join("policy.yaml")));
     }
 
     #[tokio::test]

@@ -1,6 +1,8 @@
 { pkgs, lib, config, inputs, ... }:
 
 {
+  dotenv.enable = true;
+
   packages = with pkgs; [
     process-compose
     socat

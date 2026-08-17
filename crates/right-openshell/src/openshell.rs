@@ -1579,40 +1579,63 @@ pub async fn download_file(
     Ok(())
 }
 
-/// Delete a sandbox. Best-effort — logs a warning on failure but does not
-/// propagate the error (stale sandboxes that don't exist shouldn't block callers).
+/// Request sandbox deletion through the OpenShell CLI and propagate any
+/// spawn, wait, or non-zero-exit error.
+async fn delete_sandbox_checked_with_command(
+    name: &str,
+    mut command: Command,
+) -> miette::Result<()> {
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = right_process::ProcessGroupChild::spawn(command)
+        .map_err(|e| miette::miette!("failed to spawn openshell delete for '{name}': {e:#}"))?;
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| miette::miette!("failed to wait for openshell delete for '{name}': {e:#}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(miette::miette!(
+            "openshell sandbox delete '{name}' failed with {}: {stderr}",
+            output.status
+        ));
+    }
+
+    tracing::info!(sandbox = name, "sandbox deletion requested");
+    Ok(())
+}
+
+/// Delete a sandbox and return only after gRPC confirms it no longer exists.
+///
+/// Unlike [`delete_sandbox`], this is a transactional cleanup primitive: CLI
+/// failures and inability to observe `NotFound` are returned to the caller.
+pub async fn delete_sandbox_confirmed(
+    client: &mut OpenShellClient<Channel>,
+    name: &str,
+    timeout_secs: u64,
+    poll_interval_secs: u64,
+) -> miette::Result<()> {
+    let mut command = Command::new("openshell");
+    command.args(["sandbox", "delete", name]);
+    delete_sandbox_checked_with_command(name, command).await?;
+    wait_for_deleted(client, name, timeout_secs, poll_interval_secs).await
+}
+
+/// Delete a sandbox on a best-effort basis.
+///
+/// Use [`delete_sandbox_confirmed`] when local recovery state must not be
+/// removed until remote deletion is known to have completed.
 pub async fn delete_sandbox(name: &str) {
-    let mut cmd = Command::new("openshell");
-    cmd.args(["sandbox", "delete", name]);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(sandbox = name, "failed to spawn openshell delete: {e:#}");
-            return;
-        }
-    };
-
-    let result = child.wait_with_output().await;
-
-    match result {
-        Ok(output) if output.status.success() => {
-            tracing::info!(sandbox = name, "deleted sandbox");
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(
-                sandbox = name,
-                exit = %output.status,
-                %stderr,
-                "failed to delete sandbox (best-effort)"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(sandbox = name, "failed to wait for openshell delete: {e:#}");
-        }
+    let mut command = Command::new("openshell");
+    command.args(["sandbox", "delete", name]);
+    if let Err(error) = delete_sandbox_checked_with_command(name, command).await {
+        tracing::warn!(
+            sandbox = name,
+            error = format!("{error:#}"),
+            "failed to delete sandbox (best-effort)"
+        );
     }
 }
 

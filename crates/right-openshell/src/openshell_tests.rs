@@ -934,6 +934,35 @@ async fn wait_for_deleted_succeeds_when_sandbox_disappears() {
     );
 }
 
+#[tokio::test]
+async fn checked_delete_propagates_cli_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("openshell");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\nprintf '%s\\n' 'delete failed' >&2\nexit 23\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut command = tokio::process::Command::new(&executable);
+    command.args(["sandbox", "delete", "broken"]);
+    let error = super::delete_sandbox_checked_with_command("broken", command)
+        .await
+        .expect_err("non-zero delete must propagate");
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("delete failed"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("exit status: 23"),
+        "unexpected error: {message}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Live sandbox integration tests (require running OpenShell)
 // ---------------------------------------------------------------------------

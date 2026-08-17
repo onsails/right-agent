@@ -17,6 +17,7 @@ use right_config::{TunnelConfig, read_global_config, write_global_config};
 pub(crate) const PROMPT_LABELS: &[&str] = &[
     // tunnel_setup: hostname
     "tunnel hostname (e.g. right.example.com):",
+    "repair configured tunnel now?",
     // handle_existing_tunnel — label + TunnelExistingAction::Display options
     "existing tunnel — choose:",
     "reuse",
@@ -107,7 +108,7 @@ impl fmt::Display for TunnelExistingAction {
 }
 
 /// A single entry from `cloudflared tunnel list -o json`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 struct TunnelListEntry {
     id: String,
     name: String,
@@ -210,6 +211,349 @@ fn route_dns(cf_bin: &Path, uuid: &str, hostname: &str) {
         }
         _ => {}
     }
+}
+
+trait TunnelRepairExecutor {
+    fn list(&mut self) -> miette::Result<Vec<TunnelListEntry>>;
+    fn create(&mut self, name: &str) -> miette::Result<TunnelListEntry>;
+    fn route_dns(&mut self, uuid: &str, hostname: &str) -> miette::Result<()>;
+    fn delete(&mut self, uuid: &str) -> miette::Result<()>;
+    fn credentials_path(&self, uuid: &str) -> miette::Result<PathBuf>;
+}
+
+struct CloudflaredTunnelRepair {
+    binary: PathBuf,
+}
+
+impl TunnelRepairExecutor for CloudflaredTunnelRepair {
+    fn list(&mut self) -> miette::Result<Vec<TunnelListEntry>> {
+        let output = Command::new(&self.binary)
+            .args(["tunnel", "--loglevel", "error", "list", "-o", "json"])
+            .output()
+            .map_err(|error| miette::miette!("failed to run cloudflared tunnel list: {error:#}"))?;
+        if !output.status.success() {
+            return Err(miette::miette!(
+                "cloudflared tunnel list failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            miette::miette!("failed to parse cloudflared tunnel list JSON: {error:#}")
+        })
+    }
+
+    fn create(&mut self, name: &str) -> miette::Result<TunnelListEntry> {
+        create_tunnel(&self.binary, name)
+    }
+
+    fn route_dns(&mut self, uuid: &str, hostname: &str) -> miette::Result<()> {
+        let output = Command::new(&self.binary)
+            .args([
+                "tunnel",
+                "--loglevel",
+                "error",
+                "route",
+                "dns",
+                "--overwrite-dns",
+                uuid,
+                hostname,
+            ])
+            .output()
+            .map_err(|error| miette::miette!("failed to run cloudflared route dns: {error:#}"))?;
+        if !output.status.success() {
+            return Err(miette::miette!(
+                "cloudflared route dns failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(())
+    }
+
+    fn delete(&mut self, uuid: &str) -> miette::Result<()> {
+        delete_tunnel(&self.binary, uuid)
+    }
+
+    fn credentials_path(&self, uuid: &str) -> miette::Result<PathBuf> {
+        cloudflared_credentials_path(uuid)
+    }
+}
+
+fn tunnel_account_tag(credentials: &Path, expected_uuid: &str) -> miette::Result<String> {
+    let content = std::fs::read(credentials).map_err(|error| {
+        miette::miette!(
+            "read tunnel credentials {}: {error:#}",
+            credentials.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(&content).map_err(|error| {
+        miette::miette!(
+            "parse tunnel credentials {}: {error:#}",
+            credentials.display()
+        )
+    })?;
+    let tunnel_id = value.get("TunnelID").and_then(serde_json::Value::as_str);
+    if tunnel_id != Some(expected_uuid) {
+        return Err(miette::miette!(
+            "replacement credentials TunnelID does not match created tunnel {expected_uuid}"
+        ));
+    }
+    value
+        .get("AccountTag")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| miette::miette!("replacement credentials are missing AccountTag"))
+}
+
+trait TunnelConfigCutover {
+    fn stage(&mut self, home: &Path, config: &right_config::GlobalConfig) -> miette::Result<()>;
+    fn commit(&mut self, home: &Path) -> miette::Result<()>;
+    fn cleanup(&mut self) -> miette::Result<()>;
+    fn pending_path(&self) -> Option<&Path>;
+}
+
+struct FilesystemTunnelConfigCutover {
+    staging: PathBuf,
+    pending_target: PathBuf,
+    pending: Option<PathBuf>,
+}
+
+impl FilesystemTunnelConfigCutover {
+    fn new(home: &Path) -> Self {
+        let suffix = std::process::id();
+        Self {
+            staging: home.join(format!(".tunnel-repair-{suffix}")),
+            pending_target: home.join(format!(".config-tunnel-repair-{suffix}.yaml")),
+            pending: None,
+        }
+    }
+}
+
+impl TunnelConfigCutover for FilesystemTunnelConfigCutover {
+    fn stage(&mut self, _home: &Path, config: &right_config::GlobalConfig) -> miette::Result<()> {
+        std::fs::create_dir(&self.staging).map_err(|error| {
+            miette::miette!("create tunnel repair staging directory: {error:#}")
+        })?;
+        write_global_config(&self.staging, config)?;
+        std::fs::rename(self.staging.join("config.yaml"), &self.pending_target)
+            .map_err(|error| miette::miette!("stage replacement config.yaml: {error:#}"))?;
+        self.pending = Some(self.pending_target.clone());
+        std::fs::remove_dir(&self.staging).map_err(|error| {
+            miette::miette!("remove tunnel repair staging directory: {error:#}")
+        })?;
+        Ok(())
+    }
+
+    fn commit(&mut self, home: &Path) -> miette::Result<()> {
+        let pending = self
+            .pending
+            .as_ref()
+            .ok_or_else(|| miette::miette!("replacement config was not staged"))?;
+        std::fs::rename(pending, home.join("config.yaml"))
+            .map_err(|error| miette::miette!("atomically replace config.yaml: {error:#}"))?;
+        self.pending = None;
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> miette::Result<()> {
+        let mut failures = Vec::new();
+        if let Some(pending) = self.pending.as_ref() {
+            match std::fs::remove_file(pending) {
+                Ok(()) => self.pending = None,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.pending = None,
+                Err(error) => failures.push(format!(
+                    "remove pending config {}: {error:#}",
+                    pending.display()
+                )),
+            }
+        }
+        match std::fs::remove_dir_all(&self.staging) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failures.push(format!(
+                "remove staging directory {}: {error:#}",
+                self.staging.display()
+            )),
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(miette::miette!(failures.join("; ")))
+        }
+    }
+
+    fn pending_path(&self) -> Option<&Path> {
+        self.pending.as_deref()
+    }
+}
+
+fn cleanup_inactive_replacement<E: TunnelRepairExecutor, C: TunnelConfigCutover>(
+    executor: &mut E,
+    replacement_uuid: &str,
+    cutover: &mut C,
+    primary: miette::Report,
+) -> miette::Report {
+    let pending_cleanup = cutover.cleanup().err();
+    let tunnel_cleanup = executor.delete(replacement_uuid).err();
+    if pending_cleanup.is_none() && tunnel_cleanup.is_none() {
+        return primary;
+    }
+    let mut message = format!("{primary:#}");
+    if let Some(error) = pending_cleanup {
+        message.push_str(&format!("; failed to clean staged config: {error:#}"));
+    }
+    if let Some(error) = tunnel_cleanup {
+        message.push_str(&format!(
+            "; failed to delete inactive replacement tunnel: {error:#}"
+        ));
+    }
+    miette::miette!(message)
+}
+
+fn execute_tunnel_replacement<E: TunnelRepairExecutor>(
+    home: &Path,
+    current: &right_config::GlobalConfig,
+    executor: &mut E,
+) -> miette::Result<()> {
+    execute_tunnel_replacement_with_cutover(
+        home,
+        current,
+        executor,
+        &mut FilesystemTunnelConfigCutover::new(home),
+    )
+}
+
+fn execute_tunnel_replacement_with_cutover<E: TunnelRepairExecutor, C: TunnelConfigCutover>(
+    home: &Path,
+    current: &right_config::GlobalConfig,
+    executor: &mut E,
+    cutover: &mut C,
+) -> miette::Result<()> {
+    let right_config::TunnelProvider::Cloudflared {
+        tunnel_uuid: configured_uuid,
+        credentials_file: configured_credentials,
+    } = &current.tunnel.provider
+    else {
+        return Err(miette::miette!(
+            "external tunnels are operator-managed and cannot be repaired"
+        ));
+    };
+    let account_tag = tunnel_account_tag(configured_credentials, configured_uuid)?;
+    let configured = executor
+        .list()?
+        .into_iter()
+        .find(|entry| entry.id == *configured_uuid);
+    let replacement_name = format!(
+        "{}-repair-{}",
+        configured
+            .as_ref()
+            .map_or("right", |entry| entry.name.as_str()),
+        std::process::id()
+    );
+    let replacement = executor.create(&replacement_name)?;
+    if replacement.name != replacement_name {
+        let primary = miette::miette!("cloudflared created an unexpected tunnel name");
+        let cleanup = executor.delete(&replacement.id);
+        return match cleanup {
+            Ok(()) => Err(primary),
+            Err(error) => Err(miette::miette!(
+                "{primary:#}; failed to delete inactive replacement tunnel: {error:#}"
+            )),
+        };
+    }
+
+    let replacement_credentials = match executor.credentials_path(&replacement.id) {
+        Ok(path) => path,
+        Err(primary) => {
+            return Err(cleanup_inactive_replacement(
+                executor,
+                &replacement.id,
+                cutover,
+                primary,
+            ));
+        }
+    };
+    let replacement_account = match tunnel_account_tag(&replacement_credentials, &replacement.id) {
+        Ok(account) => account,
+        Err(primary) => {
+            return Err(cleanup_inactive_replacement(
+                executor,
+                &replacement.id,
+                cutover,
+                primary,
+            ));
+        }
+    };
+    if replacement_account != account_tag {
+        return Err(cleanup_inactive_replacement(
+            executor,
+            &replacement.id,
+            cutover,
+            miette::miette!("replacement tunnel belongs to a different Cloudflare account"),
+        ));
+    }
+    let repaired = right_config::GlobalConfig {
+        tunnel: TunnelConfig {
+            hostname: current.tunnel.hostname.clone(),
+            provider: right_config::TunnelProvider::Cloudflared {
+                tunnel_uuid: replacement.id.clone(),
+                credentials_file: replacement_credentials,
+            },
+        },
+        aggregator: current.aggregator.clone(),
+    };
+    if let Err(primary) = cutover.stage(home, &repaired) {
+        return Err(cleanup_inactive_replacement(
+            executor,
+            &replacement.id,
+            cutover,
+            primary,
+        ));
+    }
+    if let Err(primary) = executor.route_dns(&replacement.id, &current.tunnel.hostname) {
+        return Err(cleanup_inactive_replacement(
+            executor,
+            &replacement.id,
+            cutover,
+            primary,
+        ));
+    }
+    if let Err(commit_error) = cutover.commit(home) {
+        let Some(configured) = configured.as_ref() else {
+            let pending = cutover
+                .pending_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "unavailable".to_owned());
+            return Err(miette::miette!(
+                "config commit failed after DNS routed to replacement: {commit_error:#}; \
+                 configured tunnel {configured_uuid} no longer exists, so DNS cannot be rolled back; \
+                 replacement tunnel {} retained as the active DNS target; pending replacement config retained at {pending} for operator recovery",
+                replacement.id
+            ));
+        };
+        if let Err(rollback_error) = executor.route_dns(&configured.id, &current.tunnel.hostname) {
+            let pending = cutover
+                .pending_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "unavailable".to_owned());
+            return Err(miette::miette!(
+                "config commit failed after DNS routed to replacement: {commit_error:#}; \
+                 DNS rollback to configured tunnel {configured_uuid} failed: {rollback_error:#}; \
+                 replacement tunnel {} retained as the active DNS target; pending replacement config retained at {pending} for operator recovery",
+                replacement.id
+            ));
+        }
+        return Err(cleanup_inactive_replacement(
+            executor,
+            &replacement.id,
+            cutover,
+            commit_error,
+        ));
+    }
+    if let Some(configured) = configured {
+        executor.delete(&configured.id)?;
+    }
+    Ok(())
 }
 
 /// Check whether the cloudflared login certificate exists at `~/.cloudflared/cert.pem`.
@@ -385,6 +729,32 @@ pub fn external_tunnel_setup(
         hostname,
         provider: right_config::TunnelProvider::External,
     })
+}
+
+/// Interactively replace a broken Right-owned tunnel while retaining the public hostname
+/// and unrelated global settings. Agent state is never touched.
+pub fn repair_configured_tunnel(
+    home: &Path,
+    current: &right_config::GlobalConfig,
+) -> miette::Result<()> {
+    let repair = inquire::Confirm::new("repair configured tunnel now?")
+        .with_default(true)
+        .prompt()
+        .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+    if !repair {
+        return Err(miette::miette!("tunnel repair declined"));
+    }
+    let binary = which::which("cloudflared")
+        .map_err(|_| miette::miette!("cloudflared binary not found in PATH"))?;
+    execute_tunnel_replacement(home, current, &mut CloudflaredTunnelRepair { binary })
+}
+
+/// Replace only the top-level Telegram token with a safely quoted YAML scalar.
+pub fn set_agent_telegram_token(path: &Path, token: &str) -> miette::Result<()> {
+    validate_telegram_token(token)?;
+    let quoted = serde_json::to_string(token)
+        .map_err(|e| miette::miette!("serialize Telegram token: {e:#}"))?;
+    update_agent_yaml_field(path, "telegram_token", &quoted)
 }
 
 // ---------------------------------------------------------------------------
@@ -2457,6 +2827,334 @@ mod memory_yaml_tests {
         assert!(
             content.contains("recall_budget: low"),
             "non-default budget emitted"
+        );
+    }
+}
+
+#[cfg(test)]
+mod up_repair_tests {
+    use super::{
+        FilesystemTunnelConfigCutover, TunnelConfigCutover, TunnelListEntry, TunnelRepairExecutor,
+        execute_tunnel_replacement, execute_tunnel_replacement_with_cutover,
+        set_agent_telegram_token,
+    };
+    use std::path::{Path, PathBuf};
+
+    struct RecordingTunnelExecutor {
+        configured: TunnelListEntry,
+        configured_remote_exists: bool,
+        replacement: TunnelListEntry,
+        configured_credentials: PathBuf,
+        replacement_credentials: PathBuf,
+        failed_routes: Vec<String>,
+        routed: Vec<String>,
+        deleted: Vec<String>,
+    }
+
+    impl TunnelRepairExecutor for RecordingTunnelExecutor {
+        fn list(&mut self) -> miette::Result<Vec<TunnelListEntry>> {
+            Ok(if self.configured_remote_exists {
+                vec![self.configured.clone()]
+            } else {
+                Vec::new()
+            })
+        }
+
+        fn create(&mut self, name: &str) -> miette::Result<TunnelListEntry> {
+            self.replacement.name = name.to_owned();
+            Ok(self.replacement.clone())
+        }
+
+        fn route_dns(&mut self, uuid: &str, _hostname: &str) -> miette::Result<()> {
+            self.routed.push(uuid.to_owned());
+            if self.failed_routes.iter().any(|failed| failed == uuid) {
+                Err(miette::miette!("route failed for {uuid}"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn delete(&mut self, uuid: &str) -> miette::Result<()> {
+            self.deleted.push(uuid.to_owned());
+            Ok(())
+        }
+
+        fn credentials_path(&self, uuid: &str) -> miette::Result<PathBuf> {
+            if uuid == self.configured.id {
+                Ok(self.configured_credentials.clone())
+            } else {
+                Ok(self.replacement_credentials.clone())
+            }
+        }
+    }
+
+    fn tunnel_config(credentials: &Path) -> right_config::GlobalConfig {
+        right_config::GlobalConfig {
+            tunnel: right_config::TunnelConfig {
+                hostname: "right.example.com".to_owned(),
+                provider: right_config::TunnelProvider::Cloudflared {
+                    tunnel_uuid: "old-uuid".to_owned(),
+                    credentials_file: credentials.to_owned(),
+                },
+            },
+            aggregator: right_config::AggregatorConfig {
+                allowed_hosts: vec!["aggregator.internal".to_owned()],
+            },
+        }
+    }
+
+    fn tunnel_executor(dir: &Path, failed_routes: &[&str]) -> RecordingTunnelExecutor {
+        let old = dir.join("old.json");
+        let new = dir.join("new.json");
+        std::fs::write(&old, r#"{"TunnelID":"old-uuid","AccountTag":"account"}"#).unwrap();
+        std::fs::write(&new, r#"{"TunnelID":"new-uuid","AccountTag":"account"}"#).unwrap();
+        RecordingTunnelExecutor {
+            configured: TunnelListEntry {
+                id: "old-uuid".to_owned(),
+                name: "configured-name".to_owned(),
+            },
+            configured_remote_exists: true,
+            replacement: TunnelListEntry {
+                id: "new-uuid".to_owned(),
+                name: String::new(),
+            },
+            configured_credentials: old,
+            replacement_credentials: new,
+            failed_routes: failed_routes
+                .iter()
+                .map(|uuid| (*uuid).to_owned())
+                .collect(),
+            routed: Vec::new(),
+            deleted: Vec::new(),
+        }
+    }
+
+    struct FailingCommitCutover {
+        filesystem: FilesystemTunnelConfigCutover,
+    }
+
+    impl FailingCommitCutover {
+        fn new(home: &Path) -> Self {
+            Self {
+                filesystem: FilesystemTunnelConfigCutover::new(home),
+            }
+        }
+    }
+
+    impl TunnelConfigCutover for FailingCommitCutover {
+        fn stage(
+            &mut self,
+            home: &Path,
+            config: &right_config::GlobalConfig,
+        ) -> miette::Result<()> {
+            self.filesystem.stage(home, config)
+        }
+
+        fn commit(&mut self, _home: &Path) -> miette::Result<()> {
+            Err(miette::miette!("injected config commit failure"))
+        }
+
+        fn cleanup(&mut self) -> miette::Result<()> {
+            self.filesystem.cleanup()
+        }
+
+        fn pending_path(&self) -> Option<&Path> {
+            self.filesystem.pending_path()
+        }
+    }
+
+    #[test]
+    fn telegram_token_setter_preserves_yaml_and_quotes_scalar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(
+            &path,
+            "# keep\nmodel: sonnet\ntelegram_token: \"1:old\"\nsandbox:\n  mode: none\n",
+        )
+        .unwrap();
+
+        set_agent_telegram_token(&path, "123:new_token").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# keep"));
+        assert!(content.contains("sandbox:\n  mode: none"));
+        assert!(content.contains("telegram_token: \"123:new_token\""));
+        let parsed: right_agent_config::AgentConfig = serde_saphyr::from_str(&content).unwrap();
+        assert_eq!(parsed.telegram_token.as_deref(), Some("123:new_token"));
+    }
+
+    #[test]
+    fn telegram_token_setter_rejects_invalid_token_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        let original = "model: sonnet\n";
+        std::fs::write(&path, original).unwrap();
+
+        assert!(set_agent_telegram_token(&path, "not-a-token").is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn tunnel_repair_route_failure_preserves_old_config_and_tunnel() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = tunnel_config(&dir.path().join("old.json"));
+        right_config::write_global_config(dir.path(), &config).unwrap();
+        let original = std::fs::read(dir.path().join("config.yaml")).unwrap();
+        let mut executor = tunnel_executor(dir.path(), &["new-uuid"]);
+
+        let error = execute_tunnel_replacement(dir.path(), &config, &mut executor).unwrap_err();
+
+        assert!(format!("{error:#}").contains("route failed"));
+        assert_eq!(
+            std::fs::read(dir.path().join("config.yaml")).unwrap(),
+            original
+        );
+        assert_eq!(executor.deleted, ["new-uuid"]);
+        assert_eq!(executor.routed, ["new-uuid"]);
+    }
+
+    #[test]
+    fn tunnel_repair_cuts_over_before_deleting_configured_tunnel() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = tunnel_config(&dir.path().join("old.json"));
+        right_config::write_global_config(dir.path(), &config).unwrap();
+        let mut executor = tunnel_executor(dir.path(), &[]);
+
+        execute_tunnel_replacement(dir.path(), &config, &mut executor).unwrap();
+
+        let repaired = right_config::read_global_config(dir.path()).unwrap();
+        assert_eq!(repaired.tunnel.hostname, "right.example.com");
+        assert_eq!(repaired.aggregator.allowed_hosts, ["aggregator.internal"]);
+        assert!(matches!(
+            repaired.tunnel.provider,
+            right_config::TunnelProvider::Cloudflared { ref tunnel_uuid, .. }
+                if tunnel_uuid == "new-uuid"
+        ));
+        assert_eq!(executor.deleted, ["old-uuid"]);
+        assert_eq!(executor.routed, ["new-uuid"]);
+    }
+
+    #[test]
+    fn tunnel_repair_replaces_configured_tunnel_missing_from_remote_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = tunnel_config(&dir.path().join("old.json"));
+        right_config::write_global_config(dir.path(), &config).unwrap();
+        let mut executor = tunnel_executor(dir.path(), &[]);
+        executor.configured_remote_exists = false;
+
+        execute_tunnel_replacement(dir.path(), &config, &mut executor).unwrap();
+
+        let repaired = right_config::read_global_config(dir.path()).unwrap();
+        assert!(matches!(
+            repaired.tunnel.provider,
+            right_config::TunnelProvider::Cloudflared { ref tunnel_uuid, .. }
+                if tunnel_uuid == "new-uuid"
+        ));
+        assert_eq!(
+            executor.replacement.name,
+            format!("right-repair-{}", std::process::id())
+        );
+        assert_eq!(executor.routed, ["new-uuid"]);
+        assert!(executor.deleted.is_empty());
+    }
+
+    #[test]
+    fn tunnel_repair_commit_failure_rolls_dns_back_before_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = tunnel_config(&dir.path().join("old.json"));
+        right_config::write_global_config(dir.path(), &config).unwrap();
+        let original = std::fs::read(dir.path().join("config.yaml")).unwrap();
+        let mut executor = tunnel_executor(dir.path(), &[]);
+        let mut cutover = FailingCommitCutover::new(dir.path());
+
+        let error = execute_tunnel_replacement_with_cutover(
+            dir.path(),
+            &config,
+            &mut executor,
+            &mut cutover,
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("injected config commit failure"));
+        assert_eq!(executor.routed, ["new-uuid", "old-uuid"]);
+        assert_eq!(executor.deleted, ["new-uuid"]);
+        assert_eq!(
+            std::fs::read(dir.path().join("config.yaml")).unwrap(),
+            original
+        );
+        assert!(cutover.pending_path().is_none());
+    }
+
+    #[test]
+    fn tunnel_repair_commit_failure_without_old_remote_retains_active_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = tunnel_config(&dir.path().join("old.json"));
+        right_config::write_global_config(dir.path(), &config).unwrap();
+        let original = std::fs::read(dir.path().join("config.yaml")).unwrap();
+        let mut executor = tunnel_executor(dir.path(), &[]);
+        executor.configured_remote_exists = false;
+        let mut cutover = FailingCommitCutover::new(dir.path());
+
+        let error = execute_tunnel_replacement_with_cutover(
+            dir.path(),
+            &config,
+            &mut executor,
+            &mut cutover,
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("injected config commit failure"));
+        assert!(message.contains("configured tunnel old-uuid no longer exists"));
+        assert!(message.contains("replacement tunnel new-uuid retained"));
+        assert_eq!(executor.routed, ["new-uuid"]);
+        assert!(executor.deleted.is_empty());
+        assert_eq!(
+            std::fs::read(dir.path().join("config.yaml")).unwrap(),
+            original
+        );
+        let pending = cutover.pending_path().expect("pending recovery config");
+        assert!(pending.exists());
+        assert!(
+            std::fs::read_to_string(pending)
+                .unwrap()
+                .contains("new-uuid")
+        );
+    }
+
+    #[test]
+    fn tunnel_repair_failed_dns_rollback_retains_replacement_and_pending_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = tunnel_config(&dir.path().join("old.json"));
+        right_config::write_global_config(dir.path(), &config).unwrap();
+        let original = std::fs::read(dir.path().join("config.yaml")).unwrap();
+        let mut executor = tunnel_executor(dir.path(), &["old-uuid"]);
+        let mut cutover = FailingCommitCutover::new(dir.path());
+
+        let error = execute_tunnel_replacement_with_cutover(
+            dir.path(),
+            &config,
+            &mut executor,
+            &mut cutover,
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("injected config commit failure"));
+        assert!(message.contains("route failed for old-uuid"));
+        assert!(message.contains("replacement tunnel new-uuid retained"));
+        assert_eq!(executor.routed, ["new-uuid", "old-uuid"]);
+        assert!(executor.deleted.is_empty());
+        assert_eq!(
+            std::fs::read(dir.path().join("config.yaml")).unwrap(),
+            original
+        );
+        let pending = cutover.pending_path().expect("pending recovery config");
+        assert!(pending.exists());
+        assert!(
+            std::fs::read_to_string(pending)
+                .unwrap()
+                .contains("new-uuid")
         );
     }
 }

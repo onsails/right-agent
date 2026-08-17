@@ -1,6 +1,8 @@
 use std::fs;
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
+use std::sync::LazyLock;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -10,16 +12,468 @@ fn right() -> Command {
     Command::cargo_bin("right").unwrap()
 }
 
-/// Minimal valid global config — tunnel is mandatory after the webhooks cutover,
-/// so any test that creates a home + config.yaml manually must include a tunnel
-/// block. Used by tests that don't go through `right init`.
-fn minimal_config_yaml(home: &std::path::Path) -> String {
-    let creds = home.join("test-creds.json");
-    fs::write(&creds, "{}").unwrap();
-    format!(
-        "tunnel:\n  tunnel_uuid: \"00000000-0000-0000-0000-000000000000\"\n  credentials_file: \"{}\"\n  hostname: \"test.example.com\"\n",
-        creds.display()
+fn right_with_init_auth() -> Command {
+    let mut command = right();
+    command.env("RIGHT_CLAUDE_SETUP_TOKEN", TEST_CLAUDE_SETUP_TOKEN);
+    prepend_path(&mut command, successful_claude_probe_dir());
+    command
+}
+
+const TEST_CLAUDE_SETUP_TOKEN: &str = "test-claude-setup-token";
+
+static SUCCESSFUL_CLAUDE_PROBE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    let dir = std::env::temp_dir().join(format!("right-cli-probe-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let executable = dir.join("claude");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then printf '%s\\n' '2.1.0 (Claude Code)'; exit 0; fi\nprintf '%s\\n' \"$@\" > \"${RIGHT_TEST_CLAUDE_INVOCATION_LOG:-/dev/null}\"\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"apiKeySource\":\"none\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"OK\"}'\n",
     )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    dir
+});
+
+fn successful_claude_probe_dir() -> &'static Path {
+    SUCCESSFUL_CLAUDE_PROBE_DIR.as_path()
+}
+
+fn prepend_path(command: &mut Command, dir: &Path) {
+    let mut paths = vec![dir.to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    command.env("PATH", std::env::join_paths(paths).unwrap());
+}
+
+fn write_fake_claude_probe(dir: &Path, stdout: &str, exit_code: i32) {
+    let executable = dir.join("claude");
+    fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nif [ \"${{1:-}}\" = \"--version\" ]; then printf '%s\\n' '2.1.0 (Claude Code)'; exit 0; fi\nprintf '%s\\n' '{}'\nexit {exit_code}\n",
+            stdout.replace('\'', "'\\\\''")
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+}
+
+/// Minimal valid external-tunnel config for tests that do not exercise
+/// Right-owned cloudflared ingress.
+fn minimal_config_yaml(_home: &std::path::Path) -> String {
+    "tunnel:\n  provider: \"external\"\n  hostname: \"test.example.com\"\n".to_string()
+}
+
+fn write_fake_cloudflared(dir: &Path, invocation_log: &Path, exit_code: i32) {
+    let executable = dir.join("cloudflared");
+    fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nexit {exit_code}\n",
+            invocation_log.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(executable, permissions).unwrap();
+}
+#[test]
+fn agent_init_non_interactive_without_claude_token_leaves_no_agent_directory() {
+    let home = tempdir().unwrap();
+    fs::create_dir_all(home.path().join("agents")).unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        minimal_config_yaml(home.path()),
+    )
+    .unwrap();
+
+    right()
+        .env_remove("RIGHT_CLAUDE_SETUP_TOKEN")
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "agent",
+            "init",
+            "missing-auth",
+            "-y",
+            "--sandbox-mode",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("claude setup-token"));
+
+    assert!(!home.path().join("agents/missing-auth").exists());
+}
+
+#[tokio::test]
+async fn agent_init_persists_claude_token_supplied_via_env() {
+    let home = tempdir().unwrap();
+    fs::create_dir_all(home.path().join("agents")).unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        minimal_config_yaml(home.path()),
+    )
+    .unwrap();
+
+    let assertion = right_with_init_auth()
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "agent",
+            "init",
+            "env-auth",
+            "-y",
+            "--sandbox-mode",
+            "none",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude"))
+        .stdout(predicate::str::contains(TEST_CLAUDE_SETUP_TOKEN).not())
+        .stderr(predicate::str::contains(TEST_CLAUDE_SETUP_TOKEN).not());
+    drop(assertion);
+
+    let agent_dir = home.path().join("agents/env-auth");
+    let conn = right_db::open_connection(&agent_dir, false).await.unwrap();
+    let stored = right_mcp::credentials::get_auth_token(&conn).await.unwrap();
+    assert_eq!(stored.as_deref(), Some(TEST_CLAUDE_SETUP_TOKEN));
+}
+
+#[test]
+fn agent_init_missing_cloudflared_tunnel_leaves_no_agent_directory() {
+    let home = tempdir().unwrap();
+    let fake_bin = tempdir().unwrap();
+    fs::create_dir_all(home.path().join("agents")).unwrap();
+    let invocation_log = home.path().join("cloudflared-invocation.txt");
+    let credentials = home.path().join("missing-tunnel.json");
+    fs::write(
+        &credentials,
+        r#"{"TunnelID":"00000000-0000-0000-0000-000000000000"}"#,
+    )
+    .unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        format!(
+            "tunnel:\n  provider: \"cloudflared\"\n  tunnel_uuid: \"00000000-0000-0000-0000-000000000000\"\n  credentials_file: \"{}\"\n  hostname: \"test.example.com\"\n",
+            credentials.display()
+        ),
+    )
+    .unwrap();
+    write_fake_cloudflared(fake_bin.path(), &invocation_log, 1);
+    let path = format!(
+        "{}:{}",
+        fake_bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    right_with_init_auth()
+        .env("PATH", path)
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "agent",
+            "init",
+            "dead-ingress",
+            "-y",
+            "--sandbox-mode",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot access configured tunnel"));
+
+    assert!(!home.path().join("agents/dead-ingress").exists());
+    assert_eq!(
+        fs::read_to_string(invocation_log).unwrap(),
+        "tunnel\n--loglevel\nerror\ninfo\n--output\njson\n00000000-0000-0000-0000-000000000000\n"
+    );
+}
+
+#[test]
+fn agent_init_malformed_cloudflare_credentials_leaves_no_agent_directory() {
+    let home = tempdir().unwrap();
+    fs::create_dir_all(home.path().join("agents")).unwrap();
+    let credentials = home.path().join("tunnel.json");
+    fs::write(&credentials, "not-json").unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        format!(
+            "tunnel:\n  provider: \"cloudflared\"\n  tunnel_uuid: \"00000000-0000-0000-0000-000000000000\"\n  credentials_file: \"{}\"\n  hostname: \"test.example.com\"\n",
+            credentials.display()
+        ),
+    )
+    .unwrap();
+
+    right_with_init_auth()
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "agent",
+            "init",
+            "bad-creds",
+            "-y",
+            "--sandbox-mode",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not valid"));
+    assert!(!home.path().join("agents/bad-creds").exists());
+}
+
+#[test]
+fn agent_init_mismatched_cloudflare_tunnel_id_leaves_no_agent_directory() {
+    let home = tempdir().unwrap();
+    fs::create_dir_all(home.path().join("agents")).unwrap();
+    let credentials = home.path().join("tunnel.json");
+    fs::write(
+        &credentials,
+        r#"{"TunnelID":"11111111-1111-1111-1111-111111111111"}"#,
+    )
+    .unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        format!(
+            "tunnel:\n  provider: \"cloudflared\"\n  tunnel_uuid: \"00000000-0000-0000-0000-000000000000\"\n  credentials_file: \"{}\"\n  hostname: \"test.example.com\"\n",
+            credentials.display()
+        ),
+    )
+    .unwrap();
+
+    right_with_init_auth()
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "agent",
+            "init",
+            "wrong-tunnel",
+            "-y",
+            "--sandbox-mode",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("credentials identify"));
+    assert!(!home.path().join("agents/wrong-tunnel").exists());
+}
+#[test]
+fn top_level_init_tunnel_failure_leaves_no_agent_state() {
+    let home = tempdir().unwrap();
+
+    right_with_init_auth()
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "init",
+            "-y",
+            "--tunnel-provider",
+            "external",
+            "--tunnel-hostname",
+            "https://invalid.example.com",
+            "--sandbox-mode",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bare domain"));
+
+    assert!(!home.path().join("agents/right").exists());
+}
+
+#[test]
+fn agent_init_invalid_claude_probe_does_not_render_ready() {
+    let home = tempdir().unwrap();
+    let fake_bin = tempdir().unwrap();
+    fs::create_dir_all(home.path().join("agents")).unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        minimal_config_yaml(home.path()),
+    )
+    .unwrap();
+    write_fake_claude_probe(
+        fake_bin.path(),
+        r#"{"type":"result","subtype":"error","is_error":true,"result":"invalid token"}"#,
+        1,
+    );
+
+    let mut command = right_with_init_auth();
+    prepend_path(&mut command, fake_bin.path());
+    command
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "agent",
+            "init",
+            "invalid-auth",
+            "-y",
+            "--sandbox-mode",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("ready").not())
+        .stderr(predicate::str::contains(
+            "Claude authentication validation failed",
+        ))
+        .stderr(predicate::str::contains(TEST_CLAUDE_SETUP_TOKEN).not());
+
+    assert!(
+        home.path().join("agents/invalid-auth").exists(),
+        "post-creation auth probe failure leaves inspectable agent state"
+    );
+}
+
+fn write_minimal_no_sandbox_backup(home: &Path) -> PathBuf {
+    let backup = home.join("backup");
+    let source = home.join("source");
+    fs::create_dir_all(&backup).unwrap();
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        backup.join("agent.yaml"),
+        "sandbox:\n  mode: none\nnetwork_policy: permissive\n",
+    )
+    .unwrap();
+    fs::write(source.join("marker"), "backup").unwrap();
+    assert!(
+        StdCommand::new("tar")
+            .args([
+                "czpf",
+                backup.join("sandbox.tar.gz").to_str().unwrap(),
+                "-C",
+                source.to_str().unwrap(),
+                "marker",
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    backup
+}
+
+#[test]
+fn agent_restore_tunnel_preflight_failure_leaves_no_agent_state() {
+    let home = tempdir().unwrap();
+    let fake_bin = tempdir().unwrap();
+    fs::create_dir_all(home.path().join("agents")).unwrap();
+    let backup = write_minimal_no_sandbox_backup(home.path());
+    let invocation_log = home.path().join("cloudflared-restore-invocation.txt");
+    let credentials = home.path().join("tunnel.json");
+    fs::write(
+        &credentials,
+        r#"{"TunnelID":"00000000-0000-0000-0000-000000000000"}"#,
+    )
+    .unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        format!(
+            "tunnel:\n  provider: \"cloudflared\"\n  tunnel_uuid: \"00000000-0000-0000-0000-000000000000\"\n  credentials_file: \"{}\"\n  hostname: \"test.example.com\"\n",
+            credentials.display()
+        ),
+    )
+    .unwrap();
+    write_fake_cloudflared(fake_bin.path(), &invocation_log, 1);
+    fs::copy(
+        successful_claude_probe_dir().join("claude"),
+        fake_bin.path().join("claude"),
+    )
+    .unwrap();
+
+    let mut command = right_with_init_auth();
+    prepend_path(&mut command, fake_bin.path());
+    command
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "agent",
+            "init",
+            "restore-dead-ingress",
+            "-y",
+            "--from-backup",
+            backup.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot access configured tunnel"));
+
+    assert!(!home.path().join("agents/restore-dead-ingress").exists());
+}
+
+#[test]
+fn agent_restore_invalid_claude_probe_does_not_render_restored() {
+    let home = tempdir().unwrap();
+    let fake_bin = tempdir().unwrap();
+    fs::create_dir_all(home.path().join("agents")).unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        minimal_config_yaml(home.path()),
+    )
+    .unwrap();
+    let backup = write_minimal_no_sandbox_backup(home.path());
+    write_fake_claude_probe(
+        fake_bin.path(),
+        r#"{"type":"result","subtype":"error","is_error":true,"result":"invalid token"}"#,
+        1,
+    );
+
+    let mut command = right_with_init_auth();
+    prepend_path(&mut command, fake_bin.path());
+    command
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "agent",
+            "init",
+            "invalid-restore-auth",
+            "-y",
+            "--from-backup",
+            backup.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("| restored ").not())
+        .stderr(predicate::str::contains(
+            "Claude authentication validation failed",
+        ))
+        .stderr(predicate::str::contains(TEST_CLAUDE_SETUP_TOKEN).not());
+
+    assert!(!home.path().join("agents/invalid-restore-auth").exists());
+}
+
+#[test]
+fn agent_restore_without_target_claude_token_leaves_no_agent_state() {
+    let home = tempdir().unwrap();
+    let backup = write_minimal_no_sandbox_backup(home.path());
+    fs::create_dir_all(home.path().join("agents")).unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        minimal_config_yaml(home.path()),
+    )
+    .unwrap();
+
+    right()
+        .env_remove("RIGHT_CLAUDE_SETUP_TOKEN")
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "agent",
+            "init",
+            "restored-without-auth",
+            "-y",
+            "--from-backup",
+            backup.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("claude setup-token"));
+
+    assert!(!home.path().join("agents/restored-without-auth").exists());
 }
 
 fn tar_entries(path: &Path) -> Vec<String> {
@@ -50,12 +504,12 @@ fn test_help_output() {
         .stdout(predicate::str::contains("list"));
 }
 
-#[test]
-fn test_init_smoke_generates_codegen_list_and_doctor() {
+#[tokio::test]
+async fn test_init_smoke_generates_codegen_list_and_doctor() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -100,7 +554,7 @@ fn test_init_smoke_generates_codegen_list_and_doctor() {
         "missing .claude/bootstrap-schema.json"
     );
 
-    // MCP config and memory database
+    // MCP config, memory database, and Claude authentication.
     assert!(
         dir.path().join("agents/right/mcp.json").exists(),
         "missing mcp.json"
@@ -109,6 +563,11 @@ fn test_init_smoke_generates_codegen_list_and_doctor() {
         dir.path().join("agents/right/data.db").exists(),
         "missing data.db"
     );
+    let conn = right_db::open_connection(&dir.path().join("agents/right"), false)
+        .await
+        .unwrap();
+    let stored = right_mcp::credentials::get_auth_token(&conn).await.unwrap();
+    assert_eq!(stored.as_deref(), Some(TEST_CLAUDE_SETUP_TOKEN));
 
     right()
         .args(["--home", home, "list"])
@@ -130,7 +589,7 @@ fn test_init_twice_fails() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -144,7 +603,7 @@ fn test_init_twice_fails() {
         .assert()
         .success();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -213,7 +672,7 @@ fn test_init_with_telegram_token() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -248,7 +707,7 @@ fn test_init_with_invalid_telegram_token() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
-    right()
+    right_with_init_auth()
         .args(["--home", home, "init", "--telegram-token", "invalid"])
         .assert()
         .failure()
@@ -369,7 +828,7 @@ fn test_init_yes_no_telegram_prompt() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -391,7 +850,7 @@ fn test_init_always_writes_config() {
     let home = dir.path().to_str().unwrap();
 
     // Use -y to avoid interactive prompts (inquire requires TTY).
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -450,7 +909,7 @@ fn agent_init_recap_suggests_right_up() {
     )
     .unwrap();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -482,7 +941,7 @@ fn test_agent_init_force_recreates_agent() {
     .unwrap();
 
     // Create agent.
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -500,9 +959,10 @@ fn test_agent_init_force_recreates_agent() {
     let marker = dir.path().join("agents/test-agent/MARKER.txt");
     fs::write(&marker, "canary").unwrap();
     assert!(marker.exists());
+    let _ = fs::remove_file(dir.path().join("run/state.json"));
 
     // Re-init with --force-recreate.
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -557,7 +1017,7 @@ fn test_agent_init_force_recreate_preserves_config() {
     .unwrap();
 
     // Create agent with specific config.
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -573,8 +1033,9 @@ fn test_agent_init_force_recreate_preserves_config() {
         .assert()
         .success();
 
+    let _ = fs::remove_file(dir.path().join("run/state.json"));
     // Re-init with --force-recreate (no --fresh) — should preserve config.
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -608,7 +1069,7 @@ fn test_agent_init_force_recreate_on_nonexistent_agent() {
     .unwrap();
 
     // --force-recreate on non-existent agent should just create it.
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -624,6 +1085,71 @@ fn test_agent_init_force_recreate_on_nonexistent_agent() {
         .success();
 
     assert!(dir.path().join("agents/new-agent/agent.yaml").exists());
+}
+fn assert_force_recreate_rejects_bot_status(status: &str) {
+    let dir = tempdir().unwrap();
+    let home = dir.path();
+    fs::create_dir_all(home.join("agents/test-agent")).unwrap();
+    fs::write(
+        home.join("agents/test-agent/agent.yaml"),
+        "sandbox:\n  mode: none\n",
+    )
+    .unwrap();
+    fs::write(home.join("config.yaml"), minimal_config_yaml(home)).unwrap();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    fs::create_dir_all(home.join("run")).unwrap();
+    fs::write(
+        home.join("run/state.json"),
+        format!(
+            r#"{{"agents":[{{"name":"test-agent"}}],"socket_path":"/tmp/test.sock","started_at":"2026-01-01T00:00:00Z","pc_port":{port},"pc_api_token":null}}"#
+        ),
+    )
+    .unwrap();
+    let status_for_server = status.to_owned();
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        let body = format!(
+            r#"{{"data":[{{"name":"test-agent-bot","status":"{status_for_server}","pid":42,"system_time":"0s","exit_code":0}}]}}"#
+        );
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+
+    right_with_init_auth()
+        .args([
+            "--home",
+            home.to_str().unwrap(),
+            "agent",
+            "init",
+            "test-agent",
+            "--force-recreate",
+            "-y",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(format!("currently {status}")));
+    server.join().unwrap();
+    assert!(home.join("agents/test-agent/agent.yaml").exists());
+}
+
+#[test]
+fn agent_init_force_recreate_refuses_active_bot_states() {
+    for status in ["Running", "Restarting", "Pending"] {
+        assert_force_recreate_rejects_bot_status(status);
+    }
 }
 
 // --- Agent SSH regression tests ---
@@ -798,11 +1324,15 @@ groups:
     fs::write(agent_dir.join("test-file.txt"), "hello world\n").unwrap();
 
     // Create a data.db with a test table.
+    right_db::open_db(&agent_dir, true).await.unwrap();
     let conn = right_db::open_connection(&agent_dir, false).await.unwrap();
     conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)", ())
         .await
         .unwrap();
     conn.execute("INSERT INTO test (val) VALUES ('backup-test')", ())
+        .await
+        .unwrap();
+    right_mcp::credentials::save_auth_token(&conn, "source-backup-token")
         .await
         .unwrap();
     let _: i64 = conn
@@ -883,7 +1413,7 @@ groups:
     )
     .unwrap();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home_str,
@@ -920,17 +1450,10 @@ groups:
         "hello world\n"
     );
 
-    for sidecar in [
-        "data.db-wal",
-        "data.db-shm",
-        "data.db-tshm",
-        "data.db-future",
-    ] {
-        assert!(
-            !restored_dir.join(sidecar).exists(),
-            "restored agent must not contain database sidecar {sidecar}"
-        );
-    }
+    assert!(
+        !restored_dir.join("data.db-future").exists(),
+        "restore must remove copied unknown sidecars before database open"
+    );
 
     // Verify restored database.
     let restored_db = right_db::open_database_path_readonly(restored_dir.join("data.db"))
@@ -941,6 +1464,10 @@ groups:
         .await
         .unwrap();
     assert_eq!(val, "backup-test");
+    let restored_token = right_mcp::credentials::get_auth_token(&restored_db)
+        .await
+        .unwrap();
+    assert_eq!(restored_token.as_deref(), Some(TEST_CLAUDE_SETUP_TOKEN));
 }
 
 #[tokio::test]
@@ -1022,7 +1549,7 @@ async fn test_agent_restore_no_sandbox_removes_legacy_db_sidecars() {
         .unwrap();
     assert!(status.success(), "test tar creation must succeed");
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home_str,
@@ -1041,17 +1568,10 @@ async fn test_agent_restore_no_sandbox_removes_legacy_db_sidecars() {
         fs::read_to_string(restored_dir.join("notes.txt")).unwrap(),
         "from tar\n"
     );
-    for sidecar in [
-        "data.db-wal",
-        "data.db-shm",
-        "data.db-tshm",
-        "data.db-future",
-    ] {
-        assert!(
-            !restored_dir.join(sidecar).exists(),
-            "restore must remove stale database sidecar {sidecar}"
-        );
-    }
+    assert!(
+        !restored_dir.join("data.db-future").exists(),
+        "restore must remove stale copied sidecars before database open"
+    );
 
     let restored_db = right_db::open_database_path_readonly(restored_dir.join("data.db"))
         .await
@@ -1114,7 +1634,7 @@ async fn test_agent_restore_no_sandbox_ignores_tar_db_without_canonical_snapshot
         .unwrap();
     assert!(status.success(), "test tar creation must succeed");
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home_str,
@@ -1133,8 +1653,19 @@ async fn test_agent_restore_no_sandbox_ignores_tar_db_without_canonical_snapshot
         fs::read_to_string(restored_dir.join("notes.txt")).unwrap(),
         "from tar\n"
     );
-    assert!(
-        !restored_dir.join("data.db").exists(),
+    let restored_db = right_db::open_database_path_readonly(restored_dir.join("data.db"))
+        .await
+        .unwrap();
+    let tar_table_count: i64 = restored_db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'tar_only_probe'",
+            (),
+            |row| row.get(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tar_table_count, 0,
         "restore must not accept data.db from sandbox.tar.gz when backup root has no canonical data.db"
     );
 }
@@ -1156,7 +1687,7 @@ fn test_agent_restore_fails_before_partial_agent_for_missing_binding_mode() {
     )
     .unwrap();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home_str,
@@ -1212,7 +1743,7 @@ fn test_agent_backup_and_restore_no_sandbox_preserves_source_hindsight_bank() {
     )
     .unwrap();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home_str,
@@ -1228,9 +1759,15 @@ fn test_agent_backup_and_restore_no_sandbox_preserves_source_hindsight_bank() {
 
     let restored_yaml =
         fs::read_to_string(home.path().join("agents/restored-agent/agent.yaml")).unwrap();
-    assert!(
-        restored_yaml.contains("bank_id: \"source-agent\""),
-        "restored agent.yaml must preserve the source Hindsight bank after tar extraction, got:\n{restored_yaml}"
+    let restored_config = right_agent::agent::discovery::parse_agent_config(
+        &home.path().join("agents/restored-agent"),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        restored_config.memory.unwrap().bank_id.as_deref(),
+        Some("source-agent"),
+        "restored agent config must preserve the source Hindsight bank; yaml:\n{restored_yaml}"
     );
 }
 
@@ -1396,7 +1933,7 @@ fn test_agent_restore_fails_if_agent_exists() {
     fs::write(backup_dir.join("sandbox.tar.gz"), "fake").unwrap();
     fs::write(backup_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home_str,
@@ -1434,7 +1971,7 @@ fn test_destroy_agent_force() {
     let home = dir.path().to_str().unwrap();
 
     // Create an agent via init first
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -1467,7 +2004,7 @@ fn test_destroy_agent_force_with_backup() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,

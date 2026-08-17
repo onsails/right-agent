@@ -40,7 +40,12 @@ fn right_up_errors_when_global_config_missing() {
         .unwrap()
         .env("PATH", path_without_openshell())
         .env("OPENSHELL_MTLS_DIR", home.path().join("missing-mtls"))
-        .args(["--home", home.path().to_str().unwrap(), "up"])
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "up",
+            "--non-interactive",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("tunnel").or(predicate::str::contains("right init")));
@@ -61,7 +66,12 @@ fn right_up_errors_when_tunnel_block_missing_from_config() {
         .unwrap()
         .env("PATH", path_without_openshell())
         .env("OPENSHELL_MTLS_DIR", home.path().join("missing-mtls"))
-        .args(["--home", home.path().to_str().unwrap(), "up"])
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "up",
+            "--non-interactive",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("tunnel"));

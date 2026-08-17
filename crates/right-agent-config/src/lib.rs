@@ -3,7 +3,7 @@
 #![warn(unreachable_pub)]
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -378,8 +378,8 @@ pub struct SandboxConfig {
     /// Execution mode: openshell (sandboxed) or none (direct host).
     #[serde(default)]
     pub mode: SandboxMode,
-    /// Path to OpenShell policy file, relative to agent directory.
-    /// Required when mode is openshell.
+    /// Path to the OpenShell policy file, relative to the agent directory.
+    /// Defaults to `policy.yaml` when omitted.
     pub policy_file: Option<PathBuf>,
     /// Explicit sandbox name. When set, overrides the deterministic
     /// `right_openshell::openshell::sandbox_name(agent)` derivation
@@ -820,8 +820,12 @@ impl AgentConfig {
             .unwrap_or(&[])
     }
 
-    /// Resolved policy file path (absolute), or None if mode is None.
-    /// Returns Err if mode is Openshell but policy_file is missing.
+    /// Resolves the effective policy file path, or `None` for sandbox mode `none`.
+    ///
+    /// OpenShell mode defaults a missing `sandbox.policy_file` (including a
+    /// missing `sandbox` section) to `policy.yaml`. Absolute paths and paths
+    /// containing `..` are rejected. Returns an error if the effective policy
+    /// file does not exist.
     pub fn resolve_policy_path(&self, agent_dir: &Path) -> miette::Result<Option<PathBuf>> {
         match self.sandbox_mode() {
             SandboxMode::None => Ok(Option::None),
@@ -829,13 +833,23 @@ impl AgentConfig {
                 let rel = self
                     .sandbox
                     .as_ref()
-                    .and_then(|s| s.policy_file.as_ref())
-                    .ok_or_else(|| {
-                        miette::miette!(
-                            help = "Add `sandbox:\\n  policy_file: policy.yaml` to agent.yaml, or set `sandbox:\\n  mode: none`",
-                            "agent.yaml has sandbox mode 'openshell' but no policy_file specified"
-                        )
-                    })?;
+                    .and_then(|sandbox| sandbox.policy_file.as_deref())
+                    .unwrap_or_else(|| Path::new("policy.yaml"));
+                if rel.is_absolute() {
+                    return Err(miette::miette!(
+                        "sandbox.policy_file must be relative to agent dir: {}",
+                        rel.display()
+                    ));
+                }
+                if rel
+                    .components()
+                    .any(|component| matches!(component, Component::ParentDir))
+                {
+                    return Err(miette::miette!(
+                        "sandbox.policy_file must not contain '..': {}",
+                        rel.display()
+                    ));
+                }
                 let abs = agent_dir.join(rel);
                 if !abs.exists() {
                     return Err(miette::miette!(
@@ -917,6 +931,145 @@ impl AgentDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn policy_test_agent_dir(test_name: &str) -> PathBuf {
+        let agent_dir = std::env::temp_dir().join(format!(
+            "right-agent-config-{}-{test_name}",
+            std::process::id()
+        ));
+        if agent_dir.exists() {
+            std::fs::remove_dir_all(&agent_dir).unwrap();
+        }
+        std::fs::create_dir(&agent_dir).unwrap();
+        agent_dir
+    }
+
+    fn remove_policy_test_agent_dir(agent_dir: &Path) {
+        std::fs::remove_dir_all(agent_dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_policy_path_legacy_config_uses_existing_default_policy() {
+        let config: AgentConfig = serde_saphyr::from_str("{}").unwrap();
+        let agent_dir = policy_test_agent_dir("legacy-default");
+        let policy_path = agent_dir.join("policy.yaml");
+        std::fs::write(&policy_path, "filesystem: {}\n").unwrap();
+
+        let resolved = config.resolve_policy_path(&agent_dir).unwrap();
+
+        assert_eq!(resolved, Some(policy_path));
+        remove_policy_test_agent_dir(&agent_dir);
+    }
+
+    #[test]
+    fn resolve_policy_path_explicit_openshell_uses_existing_default_policy() {
+        let config: AgentConfig = serde_saphyr::from_str("sandbox: { mode: openshell }").unwrap();
+        let agent_dir = policy_test_agent_dir("explicit-openshell-default");
+        let policy_path = agent_dir.join("policy.yaml");
+        std::fs::write(&policy_path, "filesystem: {}\n").unwrap();
+
+        let resolved = config.resolve_policy_path(&agent_dir).unwrap();
+
+        assert_eq!(resolved, Some(policy_path));
+        remove_policy_test_agent_dir(&agent_dir);
+    }
+
+    #[test]
+    fn resolve_policy_path_none_does_not_require_policy_file() {
+        let config: AgentConfig = serde_saphyr::from_str("sandbox: { mode: none }").unwrap();
+        let agent_dir = policy_test_agent_dir("none");
+
+        let resolved = config.resolve_policy_path(&agent_dir).unwrap();
+
+        assert_eq!(resolved, None);
+        remove_policy_test_agent_dir(&agent_dir);
+    }
+
+    #[test]
+    fn resolve_policy_path_missing_default_policy_errors() {
+        let config: AgentConfig = serde_saphyr::from_str("{}").unwrap();
+        let agent_dir = policy_test_agent_dir("missing-default");
+        let expected_path = agent_dir.join("policy.yaml");
+
+        let error = config.resolve_policy_path(&agent_dir).unwrap_err();
+
+        assert!(
+            error.to_string().contains(&format!(
+                "policy file not found: {}",
+                expected_path.display()
+            )),
+            "unexpected error: {error:?}"
+        );
+        remove_policy_test_agent_dir(&agent_dir);
+    }
+
+    #[test]
+    fn resolve_policy_path_preserves_explicit_custom_policy() {
+        let config: AgentConfig = serde_saphyr::from_str(
+            "sandbox:\n  mode: openshell\n  policy_file: custom-policy.yaml\n",
+        )
+        .unwrap();
+        let agent_dir = policy_test_agent_dir("explicit-custom");
+        let policy_path = agent_dir.join("custom-policy.yaml");
+        std::fs::write(&policy_path, "filesystem: {}\n").unwrap();
+
+        let resolved = config.resolve_policy_path(&agent_dir).unwrap();
+
+        assert_eq!(resolved, Some(policy_path));
+        remove_policy_test_agent_dir(&agent_dir);
+    }
+
+    #[test]
+    fn resolve_policy_path_rejects_absolute_policy_file() {
+        let agent_dir = policy_test_agent_dir("absolute-policy");
+        let policy_path = agent_dir.join("absolute-policy.yaml");
+        std::fs::write(&policy_path, "filesystem: {}\n").unwrap();
+        let config: AgentConfig = serde_saphyr::from_str(&format!(
+            "sandbox:\n  mode: openshell\n  policy_file: {}\n",
+            policy_path.display()
+        ))
+        .unwrap();
+
+        let error = config.resolve_policy_path(&agent_dir).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "sandbox.policy_file must be relative to agent dir: {}",
+                policy_path.display()
+            )
+        );
+        remove_policy_test_agent_dir(&agent_dir);
+    }
+
+    #[test]
+    fn resolve_policy_path_rejects_parent_directory_policy_file() {
+        let agent_dir = policy_test_agent_dir("parent-policy");
+        let policy_name = format!(
+            "right-agent-config-parent-policy-{}.yaml",
+            std::process::id()
+        );
+        let policy_path = agent_dir.parent().unwrap().join(&policy_name);
+        std::fs::write(&policy_path, "filesystem: {}\n").unwrap();
+        let configured_path = PathBuf::from("..").join(&policy_name);
+        let config: AgentConfig = serde_saphyr::from_str(&format!(
+            "sandbox:\n  mode: openshell\n  policy_file: {}\n",
+            configured_path.display()
+        ))
+        .unwrap();
+
+        let error = config.resolve_policy_path(&agent_dir).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "sandbox.policy_file must not contain '..': {}",
+                configured_path.display()
+            )
+        );
+        std::fs::remove_file(policy_path).unwrap();
+        remove_policy_test_agent_dir(&agent_dir);
+    }
 
     #[test]
     fn agent_config_debug_field_defaults_to_none() {

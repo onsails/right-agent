@@ -1,6 +1,11 @@
 //! Integration tests for brand-conformant CLI surfaces.
 //! See docs/superpowers/specs/2026-04-28-init-wizard-brand-redesign-design.md.
 
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::sync::LazyLock;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::tempdir;
@@ -8,6 +13,32 @@ use tempfile::tempdir;
 fn right() -> Command {
     Command::cargo_bin("right").unwrap()
 }
+
+fn right_with_init_auth() -> Command {
+    let mut command = right();
+    command.env("RIGHT_CLAUDE_SETUP_TOKEN", "test-claude-setup-token");
+    let mut paths = vec![FAKE_CLAUDE_DIR.clone()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    command.env("PATH", std::env::join_paths(paths).unwrap());
+    command
+}
+
+static FAKE_CLAUDE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    let dir = std::env::temp_dir().join(format!("right-wizard-probe-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let executable = dir.join("claude");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo '2.1.0 (Claude Code)'; exit 0; fi\necho '{\"type\":\"system\",\"subtype\":\"init\",\"apiKeySource\":\"none\"}'\necho '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"OK\"}'\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(executable, permissions).unwrap();
+    dir
+});
 
 fn isolated_home() -> tempfile::TempDir {
     tempdir().unwrap()
@@ -90,7 +121,7 @@ fn status_no_pc_running_renders_err_with_fix() {
 #[test]
 fn init_first_run_splash_and_recap() {
     let home = isolated_home();
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home.path().to_str().unwrap(),
@@ -120,7 +151,7 @@ fn init_rerun_writes_recap_again() {
     // this test focuses on recap being present on any fresh run.)
     for _ in 0..2 {
         let home = isolated_home();
-        right()
+        right_with_init_auth()
             .args([
                 "--home",
                 home.path().to_str().unwrap(),
@@ -142,7 +173,7 @@ fn agent_init_recap_renders_block() {
     let home = isolated_home();
 
     // Bootstrap a global config first so agent init has somewhere to land.
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home.path().to_str().unwrap(),
@@ -156,7 +187,7 @@ fn agent_init_recap_renders_block() {
         .assert()
         .success();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home.path().to_str().unwrap(),
@@ -178,7 +209,7 @@ fn agent_init_recap_renders_block() {
 #[test]
 fn init_ascii_fallback() {
     let home = isolated_home();
-    let assert = right()
+    let assert = right_with_init_auth()
         .env("TERM", "dumb")
         .env_remove("NO_COLOR")
         .args([

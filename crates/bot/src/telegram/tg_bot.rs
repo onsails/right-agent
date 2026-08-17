@@ -79,6 +79,52 @@ const TELEGRAM_TEXT_TIMEOUT: Duration = Duration::from_secs(30);
 /// single send indefinitely.
 const MAX_429_RETRIES: u32 = 3;
 
+/// Telegram Bot API origin used for live token authentication checks.
+const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
+
+/// Maximum time init waits for Telegram `getMe` readiness validation.
+const TELEGRAM_AUTH_VALIDATION_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Validate a Telegram bot token with a live `getMe` request.
+///
+/// The underlying client URL contains the token, so failures are deliberately
+/// collapsed to a stable diagnostic before crossing the crate boundary.
+pub async fn validate_telegram_token_live(token: &str) -> anyhow::Result<()> {
+    validate_telegram_token_live_with_api_base_and_timeout(
+        token,
+        TELEGRAM_API_BASE,
+        TELEGRAM_AUTH_VALIDATION_TIMEOUT,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn validate_telegram_token_live_with_api_base(
+    token: &str,
+    api_base: &str,
+) -> anyhow::Result<()> {
+    validate_telegram_token_live_with_api_base_and_timeout(
+        token,
+        api_base,
+        TELEGRAM_AUTH_VALIDATION_TIMEOUT,
+    )
+    .await
+}
+
+async fn validate_telegram_token_live_with_api_base_and_timeout(
+    token: &str,
+    api_base: &str,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let api_url = format!("{}/bot{token}", api_base.trim_end_matches('/'));
+    let bot = FBot::builder().api_url(api_url).build();
+    match tokio::time::timeout(timeout, bot.get_me()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) => anyhow::bail!("Telegram authentication failed"),
+        Err(_) => anyhow::bail!("Telegram authentication validation timed out"),
+    }
+}
+
 /// True when `chat_id` is a Telegram channel or supergroup (encoded `-100…`).
 fn is_channel_or_supergroup_id(chat_id: i64) -> bool {
     chat_id < SUPERGROUP_CHANNEL_ID_THRESHOLD
@@ -1377,5 +1423,113 @@ mod download_tests {
             !format!("{tg}").contains(FAKE_TOKEN),
             "token leaked through TgError::Download Display"
         );
+    }
+}
+
+#[cfg(test)]
+mod telegram_token_validation_tests {
+    use super::*;
+    use axum::Router;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+
+    const TEST_TOKEN: &str = "123456:FAKE_SENTINEL_TOKEN_DO_NOT_LEAK";
+
+    async fn mock_telegram_api(status: StatusCode, body: &'static str) -> String {
+        let path = format!("/bot{TEST_TOKEN}/getMe");
+        let app = Router::new().route(
+            &path,
+            post(move || async move { (status, body).into_response() }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Telegram API");
+        let address = listener.local_addr().expect("read mock API address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock Telegram API");
+        });
+        format!("http://{address}")
+    }
+    async fn stalled_mock_telegram_api() -> String {
+        let path = format!("/bot{TEST_TOKEN}/getMe");
+        let app = Router::new().route(
+            &path,
+            post(|| async { std::future::pending::<StatusCode>().await }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stalled mock Telegram API");
+        let address = listener.local_addr().expect("read mock API address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve stalled mock Telegram API");
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn telegram_token_live_validation_accepts_get_me_success() {
+        let base = mock_telegram_api(
+            StatusCode::OK,
+            r#"{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"Right","username":"right_test_bot"}}"#,
+        )
+        .await;
+
+        validate_telegram_token_live_with_api_base(TEST_TOKEN, &base)
+            .await
+            .expect("valid getMe response must pass authentication validation");
+    }
+
+    #[tokio::test]
+    async fn telegram_token_live_validation_redacts_unauthorized_response() {
+        const SECRET_BODY: &str = "SECRET_UPSTREAM_BODY_DO_NOT_LEAK";
+        let base = mock_telegram_api(
+            StatusCode::UNAUTHORIZED,
+            r#"{"ok":false,"error_code":401,"description":"SECRET_UPSTREAM_BODY_DO_NOT_LEAK"}"#,
+        )
+        .await;
+
+        let error = validate_telegram_token_live_with_api_base(TEST_TOKEN, &base)
+            .await
+            .expect_err("Telegram 401 must fail authentication validation");
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("Telegram authentication failed"));
+        assert!(!diagnostic.contains(TEST_TOKEN));
+        assert!(!diagnostic.contains(SECRET_BODY));
+    }
+
+    #[tokio::test]
+    async fn telegram_token_live_validation_debug_never_contains_token_or_response_body() {
+        const SECRET_BODY: &str = "SECRET_SERVER_FAILURE_DO_NOT_LEAK";
+        let base = mock_telegram_api(StatusCode::INTERNAL_SERVER_ERROR, SECRET_BODY).await;
+
+        let error = validate_telegram_token_live_with_api_base(TEST_TOKEN, &base)
+            .await
+            .expect_err("Telegram server failure must fail authentication validation");
+        let debug = format!("{error:?}");
+        assert!(debug.contains("Telegram authentication failed"));
+        assert!(!debug.contains(TEST_TOKEN));
+        assert!(!debug.contains(SECRET_BODY));
+    }
+
+    #[tokio::test]
+    async fn telegram_token_live_validation_times_out_with_redacted_error() {
+        let base = stalled_mock_telegram_api().await;
+
+        let error = validate_telegram_token_live_with_api_base_and_timeout(
+            TEST_TOKEN,
+            &base,
+            Duration::from_millis(10),
+        )
+        .await
+        .expect_err("stalled Telegram getMe must time out");
+        let diagnostic = format!("{error:#}");
+        assert_eq!(diagnostic, "Telegram authentication validation timed out");
+        assert!(!diagnostic.contains(TEST_TOKEN));
+        assert!(!format!("{error:?}").contains(TEST_TOKEN));
     }
 }

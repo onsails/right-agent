@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use clap::{Parser, Subcommand};
 
@@ -31,6 +32,8 @@ pub(crate) const MAIN_PROMPT_LABELS: &[&str] = &[
     "rebind to target",
     "set memory bank id",
     "memory bank id:",
+    // resolve_claude_setup_token
+    "claude setup token:",
     // prompt_dependencies: missing-binary install confirms
     "install openshell now?",
     "start openshell gateway now?",
@@ -133,6 +136,42 @@ mod cli_parse_tests {
             .expect_err("restore binding flags must be mutually exclusive");
 
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn claude_setup_token_is_not_an_init_argument() {
+        for args in [
+            vec!["right", "init", "--claude-setup-token", "secret"],
+            vec![
+                "right",
+                "agent",
+                "init",
+                "agent-a",
+                "--claude-setup-token",
+                "secret",
+            ],
+        ] {
+            let err = match Cli::try_parse_from(args) {
+                Ok(_) => panic!("Claude setup token must never be accepted on argv"),
+                Err(error) => error,
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+    }
+
+    #[test]
+    fn claude_setup_token_is_absent_from_init_help() {
+        let mut command = Cli::command();
+        for args in [
+            ["right", "init", "--help"].as_slice(),
+            ["right", "agent", "init", "agent-a", "--help"].as_slice(),
+        ] {
+            let err = command
+                .try_get_matches_from_mut(args)
+                .expect_err("help must exit through clap");
+            assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+            assert!(!err.to_string().contains("claude-setup-token"));
+        }
     }
 
     #[test]
@@ -306,6 +345,22 @@ mod cli_parse_tests {
         assert!(help.contains("--group"));
         assert!(help.contains("<VALUE>"));
         assert!(help.contains("One of: addressed | all | clear"));
+    }
+
+    #[test]
+    fn up_accepts_non_interactive_flag() {
+        let cli = Cli::try_parse_from(["right", "up", "--non-interactive", "--agents", "a,b"])
+            .expect("up readiness flags must parse");
+        let Commands::Up {
+            agents,
+            non_interactive,
+            ..
+        } = cli.command
+        else {
+            panic!("expected up command");
+        };
+        assert!(non_interactive);
+        assert_eq!(agents, Some(vec!["a".to_owned(), "b".to_owned()]));
     }
 }
 
@@ -700,6 +755,9 @@ pub enum Commands {
         /// Enable debug logging (writes to $RIGHT_HOME/run/<agent>-debug.log)
         #[arg(long)]
         debug: bool,
+        /// Validate readiness without prompting or changing configuration
+        #[arg(long)]
+        non_interactive: bool,
     },
     /// Stop all agents
     Down,
@@ -977,9 +1035,11 @@ async fn main() -> miette::Result<()> {
             sandbox_mode,
             force,
         } => {
+            let claude_setup_token = std::env::var("RIGHT_CLAUDE_SETUP_TOKEN").ok();
             cmd_init(
                 &home,
                 telegram_token.as_deref(),
+                claude_setup_token.as_deref(),
                 &telegram_allowed_chat_ids,
                 &tunnel_name,
                 tunnel_hostname.as_deref(),
@@ -998,7 +1058,8 @@ async fn main() -> miette::Result<()> {
             agents,
             detach,
             debug,
-        } => cmd_up(&home, agents, detach, debug).await,
+            non_interactive,
+        } => cmd_up(&home, agents, detach, debug, non_interactive).await,
         Commands::Down => cmd_down(&home).await,
         Commands::Stt { command } => match command {
             SttCommands::Preload { model } => cmd_stt_preload(&home, &model).await,
@@ -1067,14 +1128,25 @@ async fn main() -> miette::Result<()> {
                 telegram_token,
                 telegram_allowed_chat_ids,
             } => {
+                let supplied_claude_setup_token = std::env::var("RIGHT_CLAUDE_SETUP_TOKEN").ok();
+                let claude_setup_token =
+                    resolve_claude_setup_token(supplied_claude_setup_token.as_deref(), !yes)?;
                 if let Some(backup_path) = from_backup {
                     let restore_binding_mode = restore_binding_mode_from_flags(
                         preserve_source_bindings,
                         rebind_to_target,
                         memory_bank_id,
                     );
-                    cmd_agent_restore(&home, &name, &backup_path, restore_binding_mode).await
+                    cmd_agent_restore(
+                        &home,
+                        &name,
+                        &backup_path,
+                        restore_binding_mode,
+                        &claude_setup_token,
+                    )
+                    .await
                 } else {
+                    preflight_agent_init_tunnel(&home)?;
                     cmd_agent_init(
                         &home,
                         &name,
@@ -1084,6 +1156,7 @@ async fn main() -> miette::Result<()> {
                         network_policy,
                         sandbox_mode,
                         telegram_token.as_deref(),
+                        &claude_setup_token,
                         &telegram_allowed_chat_ids,
                     )
                     .await
@@ -1791,37 +1864,194 @@ async fn main() -> miette::Result<()> {
     handle_dispatch(result)
 }
 
-/// Filter agents by name, or clone all if no filter provided.
-fn filter_agents(
-    all_agents: &[right_agent::agent::AgentDef],
-    filter: Option<&[String]>,
-) -> miette::Result<Vec<right_agent::agent::AgentDef>> {
-    let Some(names) = filter else {
-        return Ok(all_agents.to_vec());
-    };
-    let mut filtered = Vec::new();
-    for name in names {
-        let found = all_agents
-            .iter()
-            .find(|a| a.name == *name)
-            .cloned()
-            .ok_or_else(|| {
-                let available: Vec<&str> = all_agents.iter().map(|a| a.name.as_str()).collect();
-                miette::miette!(
-                    "agent '{}' not found. Available agents: {}",
-                    name,
-                    available.join(", ")
-                )
-            })?;
-        filtered.push(found);
+fn resolve_claude_setup_token(supplied: Option<&str>, interactive: bool) -> miette::Result<String> {
+    if let Some(token) = supplied.filter(|token| !token.trim().is_empty()) {
+        return Ok(token.to_string());
     }
-    Ok(filtered)
+    if !interactive {
+        return Err(miette::miette!(
+            help = "Run `claude setup-token`, then set RIGHT_CLAUDE_SETUP_TOKEN to its output",
+            "Claude setup token is required in non-interactive mode"
+        ));
+    }
+
+    println!("Run `claude setup-token` in another terminal, then paste the token below.");
+    inquire::Password::new("claude setup token:")
+        .without_confirmation()
+        .with_display_mode(inquire::PasswordDisplayMode::Hidden)
+        .with_validator(|token: &str| {
+            if token.trim().is_empty() {
+                Ok(inquire::validator::Validation::Invalid(
+                    "token cannot be empty".into(),
+                ))
+            } else {
+                Ok(inquire::validator::Validation::Valid)
+            }
+        })
+        .prompt()
+        .map_err(|error| miette::miette!("Claude setup-token prompt failed: {error:#}"))
+}
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+enum ConfiguredTunnelError {
+    #[error("cannot read Cloudflare tunnel credentials at {path}")]
+    CredentialsRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Cloudflare tunnel credentials at {path} are not valid JSON")]
+    CredentialsJson {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error(
+        "Cloudflare tunnel credentials identify {actual:?}, but config.yaml selects {configured}"
+    )]
+    TunnelIdMismatch {
+        configured: String,
+        actual: Option<String>,
+    },
+    #[error("cannot run cloudflared to inspect configured tunnel {tunnel_uuid}")]
+    InfoCommand {
+        tunnel_uuid: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "Cloudflare account cannot access configured tunnel {tunnel_uuid} (cloudflared exited {status})"
+    )]
+    InfoFailed {
+        tunnel_uuid: String,
+        status: std::process::ExitStatus,
+    },
+}
+
+#[derive(Debug)]
+struct ConfiguredTunnelFailure {
+    config: right_config::GlobalConfig,
+    error: ConfiguredTunnelError,
+}
+
+fn validate_configured_tunnel_with(
+    config: &right_config::GlobalConfig,
+    cloudflared: &Path,
+) -> Result<(), ConfiguredTunnelError> {
+    let right_config::TunnelProvider::Cloudflared {
+        tunnel_uuid,
+        credentials_file,
+    } = &config.tunnel.provider
+    else {
+        return Ok(());
+    };
+
+    let credentials_json = std::fs::read(credentials_file).map_err(|source| {
+        ConfiguredTunnelError::CredentialsRead {
+            path: credentials_file.clone(),
+            source,
+        }
+    })?;
+    let credentials: serde_json::Value =
+        serde_json::from_slice(&credentials_json).map_err(|source| {
+            ConfiguredTunnelError::CredentialsJson {
+                path: credentials_file.clone(),
+                source,
+            }
+        })?;
+    let actual = credentials
+        .get("TunnelID")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    if actual.as_deref() != Some(tunnel_uuid.as_str()) {
+        return Err(ConfiguredTunnelError::TunnelIdMismatch {
+            configured: tunnel_uuid.clone(),
+            actual,
+        });
+    }
+
+    let status = std::process::Command::new(cloudflared)
+        .args(["tunnel", "--loglevel", "error", "info", "--output", "json"])
+        .arg(tunnel_uuid)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|source| ConfiguredTunnelError::InfoCommand {
+            tunnel_uuid: tunnel_uuid.clone(),
+            source,
+        })?;
+    if !status.success() {
+        return Err(ConfiguredTunnelError::InfoFailed {
+            tunnel_uuid: tunnel_uuid.clone(),
+            status,
+        });
+    }
+    Ok(())
+}
+
+fn validate_configured_tunnel(home: &Path) -> miette::Result<right_config::GlobalConfig> {
+    let config = right_config::read_global_config(home)?;
+    validate_configured_tunnel_with(&config, Path::new("cloudflared"))
+        .map_err(miette::Report::new)?;
+    Ok(config)
+}
+
+fn configured_tunnel_failure(home: &Path) -> miette::Result<Option<ConfiguredTunnelFailure>> {
+    let config = right_config::read_global_config(home)?;
+    Ok(
+        validate_configured_tunnel_with(&config, Path::new("cloudflared"))
+            .err()
+            .map(|error| ConfiguredTunnelFailure { config, error }),
+    )
+}
+
+fn preflight_agent_init_tunnel(home: &Path) -> miette::Result<()> {
+    validate_configured_tunnel(home).map(|_| ())
+}
+
+fn validate_no_sandbox_claude() -> miette::Result<PathBuf> {
+    for binary_name in ["claude", "claude-bun"] {
+        let Ok(binary) = which::which(binary_name) else {
+            continue;
+        };
+        let Ok(output) = std::process::Command::new(&binary)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .output()
+        else {
+            continue;
+        };
+        let identifies_claude = String::from_utf8_lossy(&output.stdout).contains("Claude Code")
+            || String::from_utf8_lossy(&output.stderr).contains("Claude Code");
+        if output.status.success() && identifies_claude {
+            return Ok(binary);
+        }
+    }
+
+    Err(miette::miette!(
+        help = "Install Claude Code and ensure a working `claude` or `claude-bun` is in PATH: https://docs.anthropic.com/en/docs/claude-code",
+        "Claude Code is required for agents with sandbox mode `none`, but no usable executable was found"
+    ))
+}
+
+async fn persist_claude_setup_token(agent_dir: &Path, token: &str) -> miette::Result<()> {
+    let conn = right_db::open_connection(agent_dir, false)
+        .await
+        .map_err(|error| {
+            miette::miette!("failed to open data.db for Claude authentication: {error:#}")
+        })?;
+    right_mcp::credentials::save_auth_token(&conn, token)
+        .await
+        .map_err(|error| miette::miette!("failed to save Claude setup token: {error:#}"))?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn cmd_init(
     home: &Path,
     telegram_token: Option<&str>,
+    claude_setup_token: Option<&str>,
     telegram_allowed_chat_ids: &[i64],
     tunnel_name: &str,
     tunnel_hostname: Option<&str>,
@@ -1832,6 +2062,7 @@ async fn cmd_init(
     force: bool,
 ) -> miette::Result<()> {
     let interactive = !yes;
+    let claude_setup_token = resolve_claude_setup_token(claude_setup_token, interactive)?;
 
     // Brand: splash + dependency probe.
     {
@@ -1865,19 +2096,19 @@ async fn cmd_init(
             }
         }
 
-        // claude (fatal)
-        match which::which("claude") {
-            Ok(_) => block.push(
+        match validate_no_sandbox_claude() {
+            Ok(path) => block.push(
                 right_ui::status(right_ui::Glyph::Ok)
                     .noun("claude")
-                    .verb("in PATH"),
+                    .verb("executable")
+                    .detail(path.display().to_string()),
             ),
             Err(_) => {
                 fatal = true;
                 block.push(
                     right_ui::status(right_ui::Glyph::Err)
                         .noun("claude")
-                        .verb("not in PATH")
+                        .verb("not usable (tried claude, claude-bun)")
                         .fix("https://docs.anthropic.com/en/docs/claude-code"),
                 );
             }
@@ -2091,21 +2322,20 @@ async fn cmd_init(
         right_agent::agent::types::MemoryProvider::File => "file".to_string(),
     };
 
-    right_agent::init::init_right_home(
-        home,
-        token.as_deref(),
-        &chat_ids,
-        &network_policy_val,
-        &sandbox,
-        memory_provider,
-        memory_api_key,
-        memory_bank_id,
-        memory_recall_budget,
-        memory_recall_max_tokens,
-    )?;
+    if home.join("agents/right").exists() {
+        return Err(miette::miette!(
+            "Right Agent home already initialized at {}. Use `right config` to change settings.",
+            home.join("agents/right").display()
+        ));
+    }
 
-    // Tunnel setup BEFORE codegen — codegen reads config.yaml (mandatory tunnel),
-    // so we must write it first.
+    if matches!(sandbox, right_agent::agent::types::SandboxMode::None) {
+        validate_no_sandbox_claude()?;
+    }
+
+    // Tunnel setup and global config must succeed before the default agent is
+    // created. A failed pre-creation tunnel boundary therefore leaves no
+    // `agents/right` state behind.
     {
         let theme = right_ui::detect();
         println!("{}", right_ui::section(theme, "tunnel"));
@@ -2132,6 +2362,19 @@ async fn cmd_init(
     };
     right_config::write_global_config(home, &global_config)?;
 
+    right_agent::init::init_right_home(
+        home,
+        token.as_deref(),
+        &chat_ids,
+        &network_policy_val,
+        &sandbox,
+        memory_provider,
+        memory_api_key,
+        memory_bank_id,
+        memory_recall_budget,
+        memory_recall_max_tokens,
+    )?;
+
     // Run codegen for the default "right" agent.
     // Per-agent codegen was moved to bot startup (59243d0) but init needs it
     // for schemas and settings before sandbox staging upload.
@@ -2156,6 +2399,10 @@ async fn cmd_init(
         };
         right_codegen::run_agent_codegen(home, std::slice::from_ref(&agent_def), &self_exe, false)?;
         right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false).await?;
+        right_db::open_db(&agent_dir, true)
+            .await
+            .map_err(|error| miette::miette!("failed to migrate data.db: {error:#}"))?;
+        persist_claude_setup_token(&agent_dir, &claude_setup_token).await?;
 
         // Create sandbox if openshell mode.
         if matches!(sandbox, right_agent::agent::types::SandboxMode::Openshell) {
@@ -2212,6 +2459,7 @@ async fn cmd_init(
                 )
             })?;
         }
+        validate_agent_init_auth(home, &agent_def).await?;
     }
 
     let theme = right_ui::detect();
@@ -2229,7 +2477,8 @@ async fn cmd_init(
 
     let mut recap = right_ui::Recap::new("ready")
         .ok("agent", &format!("right ({mode})"))
-        .ok("tunnel", &global_config.tunnel.hostname);
+        .ok("tunnel", &global_config.tunnel.hostname)
+        .ok("claude", "authenticated");
     recap = if token.is_some() {
         recap.ok("telegram", &telegram_detail)
     } else {
@@ -2254,6 +2503,7 @@ async fn cmd_agent_init(
     network_policy: Option<right_agent::agent::types::NetworkPolicy>,
     sandbox_mode: Option<right_agent::agent::types::SandboxMode>,
     telegram_token: Option<&str>,
+    claude_setup_token: &str,
     telegram_allowed_chat_ids: &[i64],
 ) -> miette::Result<()> {
     if let Some(t) = telegram_token {
@@ -2296,18 +2546,21 @@ async fn cmd_agent_init(
             Some(config)
         };
 
-        // Check agent is not running.
-        // NOTE: This check uses `runtime-state.json` (not `state.json`) and is
-        // a no-op in practice — the file never exists under that name.
-        // Pre-existing bug unrelated to the runtime-isolation fix; touching it
-        // breaks `test_agent_init_force_*` which depend on the no-op path.
-        let state_path = home.join("run/runtime-state.json");
-        if state_path.exists() {
-            let state = right_runtime_state::read_state(&state_path)?;
-            if state.agents.iter().any(|a| a.name == name) {
+        if let Some(pc_client) = right_agent::runtime::PcClient::from_home(home)? {
+            let process_name = format!("{name}-bot");
+            let processes = pc_client.list_processes().await?;
+            if let Some(process) = processes
+                .iter()
+                .find(|process| process.name == process_name)
+                && !matches!(
+                    process.status.to_ascii_lowercase().as_str(),
+                    "stopped" | "completed" | "disabled"
+                )
+            {
                 return Err(miette::miette!(
                     help = "Run `right down` first",
-                    "Agent '{name}' is currently running"
+                    "Agent '{name}' is currently {}; it cannot be recreated",
+                    process.status
                 ));
             }
         }
@@ -2446,6 +2699,7 @@ async fn cmd_agent_init(
                         name,
                         &backup_path,
                         restore::RestoreBindingMode::Interactive,
+                        claude_setup_token,
                     ))
                 });
             }
@@ -2637,6 +2891,12 @@ async fn cmd_agent_init(
         }
     };
 
+    if matches!(
+        overrides.sandbox_mode,
+        right_agent::agent::types::SandboxMode::None
+    ) {
+        validate_no_sandbox_claude()?;
+    }
     let agent_dir = right_agent::init::init_agent(&agents_parent, name, Some(&overrides))?;
 
     // Run codegen so settings, schemas, skills are generated.
@@ -2662,6 +2922,10 @@ async fn cmd_agent_init(
         };
         right_codegen::run_agent_codegen(home, std::slice::from_ref(&agent_def), &self_exe, false)?;
         right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false).await?;
+        right_db::open_db(&agent_dir, true)
+            .await
+            .map_err(|error| miette::miette!("failed to migrate data.db: {error:#}"))?;
+        persist_claude_setup_token(&agent_dir, claude_setup_token).await?;
     }
 
     // Create sandbox for openshell agents.
@@ -2724,6 +2988,19 @@ async fn cmd_agent_init(
         })?;
     }
 
+    let probe_agent = right_agent::agent::AgentDef {
+        name: name.to_owned(),
+        path: agent_dir.clone(),
+        identity_path: agent_dir.join("IDENTITY.md"),
+        config: right_agent::agent::discovery::parse_agent_config(&agent_dir)?,
+        soul_path: None,
+        user_path: None,
+        tools_path: None,
+        bootstrap_path: None,
+        heartbeat_path: None,
+    };
+    validate_agent_init_auth(home, &probe_agent).await?;
+
     let cfg = right_agent::agent::discovery::parse_agent_config(&agent_dir)?
         .ok_or_else(|| miette::miette!("agent.yaml missing after init"))?;
 
@@ -2772,6 +3049,7 @@ async fn cmd_agent_init(
     let mut recap = right_ui::Recap::new("ready")
         .ok("agent", &format!("{name} created"))
         .ok("sandbox", &sandbox_with_policy)
+        .ok("claude", "authenticated")
         .ok(
             "telegram",
             if cfg.telegram_token.is_some() {
@@ -3178,11 +3456,440 @@ async fn heal_drifted_managed_profiles(
     Ok(())
 }
 
+struct UpAgentDiscovery {
+    agents: Vec<right_agent::agent::AgentDef>,
+    issues: Vec<String>,
+}
+
+fn discover_up_agents(
+    agents_dir: &Path,
+    filter: Option<&[String]>,
+) -> miette::Result<UpAgentDiscovery> {
+    let paths = if let Some(names) = filter {
+        names
+            .iter()
+            .map(|name| agents_dir.join(name))
+            .collect::<Vec<_>>()
+    } else {
+        let entries = std::fs::read_dir(agents_dir)
+            .map_err(|error| miette::miette!("cannot read {}: {error:#}", agents_dir.display()))?;
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                miette::miette!(
+                    "cannot read an entry in {}: {error:#}",
+                    agents_dir.display()
+                )
+            })?;
+            if entry
+                .file_type()
+                .map_err(|error| {
+                    miette::miette!("cannot inspect {}: {error:#}", entry.path().display())
+                })?
+                .is_dir()
+            {
+                paths.push(entry.path());
+            }
+        }
+        paths.sort();
+        paths
+    };
+
+    let mut agents = Vec::new();
+    let mut issues = Vec::new();
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("<invalid>");
+        match right_agent::agent::discover_single_agent(&path) {
+            Ok(agent) => agents.push(agent),
+            Err(error) => issues.push(format!("{name}: configuration failed: {error:#}")),
+        }
+    }
+    Ok(UpAgentDiscovery { agents, issues })
+}
+
+fn readiness_error(issues: &[String]) -> miette::Report {
+    miette::miette!(
+        help = "Fix every item below, then rerun `right up --non-interactive`; run `right up` without the flag for targeted interactive repair",
+        "right up readiness failed:\n  - {}",
+        issues.join("\n  - ")
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessRepair {
+    Telegram,
+    Claude,
+}
+
+async fn run_up_preflight<G, GuardFuture, R, ReadinessFuture>(
+    guard: G,
+    readiness: R,
+) -> miette::Result<()>
+where
+    G: FnOnce() -> GuardFuture,
+    GuardFuture: Future<Output = miette::Result<()>>,
+    R: FnOnce() -> ReadinessFuture,
+    ReadinessFuture: Future<Output = miette::Result<()>>,
+{
+    guard().await?;
+    readiness().await
+}
+
+async fn ensure_up_runtime_available(home: &Path) -> miette::Result<()> {
+    if let Some(client) = right_agent::runtime::PcClient::from_home(home)?
+        && client.health_check().await.is_ok()
+    {
+        return Err(miette::miette!(
+            "right is already running. Use `right down` first or `right attach` to connect."
+        ));
+    }
+    check_port_available(right_runtime_state::MCP_HTTP_PORT).await
+}
+
+fn non_interactive_readiness_result(issues: Vec<String>) -> miette::Result<()> {
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(readiness_error(&issues))
+    }
+}
+
+fn ensure_openshell_ready(interactive: bool) -> miette::Result<PathBuf> {
+    match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => Ok(dir),
+        right_openshell::openshell::OpenShellStatus::NotInstalled if interactive => {
+            println!("OpenShell is not installed. Sandbox mode requires OpenShell.\n");
+            let install = inquire::Confirm::new("install openshell now?")
+                .with_default(true)
+                .prompt()
+                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            if !install {
+                return Err(openshell_status_error(
+                    right_openshell::openshell::OpenShellStatus::NotInstalled,
+                ));
+            }
+            println!("Installing OpenShell...");
+            let status = std::process::Command::new("sh")
+                .args(["-c", "curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh"])
+                .status()
+                .map_err(|e| miette::miette!("failed to run installer: {e:#}"))?;
+            if !status.success() {
+                return Err(miette::miette!(
+                    help = "Install manually: https://github.com/NVIDIA/OpenShell",
+                    "OpenShell installer failed"
+                ));
+            }
+            match right_openshell::openshell::preflight_check() {
+                right_openshell::openshell::OpenShellStatus::Ready(dir) => Ok(dir),
+                other => Err(openshell_status_error(other)),
+            }
+        }
+        status => Err(openshell_status_error(status)),
+    }
+}
+
+async fn ensure_agent_probe_transport(
+    home: &Path,
+    agent: &right_agent::agent::AgentDef,
+    mtls_dir: &Path,
+    interactive: bool,
+) -> miette::Result<()> {
+    let config = agent
+        .config
+        .as_ref()
+        .ok_or_else(|| miette::miette!("agent.yaml is missing"))?;
+    if !config.is_sandboxed() {
+        return Ok(());
+    }
+    let sandbox_name = right_openshell::openshell::resolve_sandbox_name(
+        &agent.name,
+        config
+            .sandbox
+            .as_ref()
+            .and_then(|sandbox| sandbox.name.as_deref()),
+    );
+    let mut client = right_openshell::openshell::connect_grpc(mtls_dir)
+        .await
+        .map_err(|e| miette::miette!("connect to OpenShell gateway: {e:#}"))?;
+    if !right_openshell::openshell::sandbox_exists(&mut client, &sandbox_name).await? {
+        return Err(miette::miette!(
+            help = "Start the existing sandbox through OpenShell; `right up` will not recreate it",
+            "configured sandbox `{sandbox_name}` does not exist"
+        ));
+    }
+    let ssh_dir = home.join("run/ssh");
+    let ssh_config = ssh_dir.join(format!("{sandbox_name}.ssh-config"));
+    if ssh_config.exists() {
+        return Ok(());
+    }
+    if !interactive {
+        return Err(miette::miette!(
+            help = "Run `right up` interactively once to generate SSH transport configuration",
+            "SSH config is missing at {}",
+            ssh_config.display()
+        ));
+    }
+    std::fs::create_dir_all(&ssh_dir)
+        .map_err(|e| miette::miette!("create {}: {e:#}", ssh_dir.display()))?;
+    right_openshell::openshell::generate_ssh_config(&sandbox_name, &ssh_dir).await?;
+    Ok(())
+}
+
+async fn repair_telegram_token(agent: &right_agent::agent::AgentDef) -> miette::Result<()> {
+    let existing = agent
+        .config
+        .as_ref()
+        .and_then(|config| config.telegram_token.as_deref());
+    loop {
+        let token = match crate::wizard::telegram_setup(existing, true, true)? {
+            crate::wizard::TelegramSetupOutcome::Token(token) => token,
+            crate::wizard::TelegramSetupOutcome::Skipped
+            | crate::wizard::TelegramSetupOutcome::Back => {
+                return Err(miette::miette!("Telegram token repair cancelled"));
+            }
+        };
+        match right_bot::validate_telegram_token_live(&token).await {
+            Ok(()) => {
+                crate::wizard::set_agent_telegram_token(&agent.path.join("agent.yaml"), &token)?;
+                return Ok(());
+            }
+            Err(error) => eprintln!("Telegram rejected the replacement token: {error:#}"),
+        }
+    }
+}
+
+async fn validate_then_persist_claude_candidate<V, VF, P, PF>(
+    token: &str,
+    validate: V,
+    persist: P,
+) -> miette::Result<()>
+where
+    V: FnOnce(String) -> VF,
+    VF: Future<Output = miette::Result<()>>,
+    P: FnOnce(String) -> PF,
+    PF: Future<Output = miette::Result<()>>,
+{
+    validate(token.to_owned()).await?;
+    persist(token.to_owned()).await
+}
+
+async fn repair_claude_auth(
+    home: &Path,
+    agent: &right_agent::agent::AgentDef,
+) -> miette::Result<()> {
+    let mut supplied = std::env::var("RIGHT_CLAUDE_SETUP_TOKEN").ok();
+    loop {
+        let token = resolve_claude_setup_token(supplied.take().as_deref(), true)?;
+        match validate_then_persist_claude_candidate(
+            &token,
+            |candidate| validate_agent_init_auth_candidate(home, agent, candidate),
+            |candidate| async move { persist_claude_setup_token(&agent.path, &candidate).await },
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                eprintln!("Claude rejected the replacement credential: {error:#}");
+                eprintln!("Generate a fresh credential with `claude setup-token` and try again.");
+            }
+        }
+    }
+}
+
+trait AgentReadinessBackend {
+    async fn validate_telegram(
+        &mut self,
+        agent: &right_agent::agent::AgentDef,
+    ) -> miette::Result<()>;
+    async fn ensure_transport(
+        &mut self,
+        agent: &right_agent::agent::AgentDef,
+        interactive: bool,
+    ) -> miette::Result<()>;
+    async fn validate_claude(&mut self, agent: &right_agent::agent::AgentDef)
+    -> miette::Result<()>;
+    async fn repair(
+        &mut self,
+        action: ReadinessRepair,
+        agent: &right_agent::agent::AgentDef,
+    ) -> miette::Result<()>;
+}
+
+struct LiveAgentReadiness<'a> {
+    home: &'a Path,
+    mtls_dir: Option<&'a Path>,
+}
+
+impl AgentReadinessBackend for LiveAgentReadiness<'_> {
+    async fn validate_telegram(
+        &mut self,
+        agent: &right_agent::agent::AgentDef,
+    ) -> miette::Result<()> {
+        let token = agent
+            .config
+            .as_ref()
+            .and_then(|config| config.telegram_token.as_deref())
+            .ok_or_else(|| miette::miette!("Telegram token is missing"))?;
+        right_bot::validate_telegram_token_live(token)
+            .await
+            .map_err(|error| miette::miette!("{error:#}"))
+    }
+
+    async fn ensure_transport(
+        &mut self,
+        agent: &right_agent::agent::AgentDef,
+        interactive: bool,
+    ) -> miette::Result<()> {
+        let Some(config) = agent.config.as_ref() else {
+            return Err(miette::miette!("agent.yaml is missing"));
+        };
+        if !config.is_sandboxed() {
+            return Ok(());
+        }
+        let mtls_dir = self
+            .mtls_dir
+            .ok_or_else(|| miette::miette!("OpenShell is not ready"))?;
+        ensure_agent_probe_transport(self.home, agent, mtls_dir, interactive).await
+    }
+
+    async fn validate_claude(
+        &mut self,
+        agent: &right_agent::agent::AgentDef,
+    ) -> miette::Result<()> {
+        validate_agent_init_auth(self.home, agent).await
+    }
+
+    async fn repair(
+        &mut self,
+        action: ReadinessRepair,
+        agent: &right_agent::agent::AgentDef,
+    ) -> miette::Result<()> {
+        match action {
+            ReadinessRepair::Telegram => repair_telegram_token(agent).await,
+            ReadinessRepair::Claude => repair_claude_auth(self.home, agent).await,
+        }
+    }
+}
+
+async fn validate_agent_readiness_with<B: AgentReadinessBackend>(
+    agents: &[right_agent::agent::AgentDef],
+    interactive: bool,
+    backend: &mut B,
+    issues: &mut Vec<String>,
+) -> miette::Result<()> {
+    for agent in agents {
+        if agent.config.is_none() {
+            issues.push(format!("{}: agent.yaml is missing", agent.name));
+            continue;
+        }
+
+        if let Err(error) = backend.validate_telegram(agent).await {
+            if interactive {
+                eprintln!(
+                    "Agent `{}` Telegram readiness failed: {error:#}",
+                    agent.name
+                );
+                backend.repair(ReadinessRepair::Telegram, agent).await?;
+            } else {
+                issues.push(format!(
+                    "{}: Telegram validation failed: {error:#}. Repair: run `right up` interactively or set telegram-token through `right config {}`",
+                    agent.name, agent.name
+                ));
+            }
+        }
+
+        let transport_ready = match backend.ensure_transport(agent, interactive).await {
+            Ok(()) => true,
+            Err(error) => {
+                issues.push(format!(
+                    "{}: sandbox transport failed: {error:#}",
+                    agent.name
+                ));
+                false
+            }
+        };
+        if transport_ready && let Err(error) = backend.validate_claude(agent).await {
+            if interactive {
+                eprintln!("Agent `{}` Claude readiness failed: {error:#}", agent.name);
+                backend.repair(ReadinessRepair::Claude, agent).await?;
+            } else {
+                issues.push(format!(
+                    "{}: Claude authentication failed: {error:#}. Repair: run `claude setup-token`, set RIGHT_CLAUDE_SETUP_TOKEN, then run `right up` interactively",
+                    agent.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn validate_up_readiness(
+    home: &Path,
+    agents: &[right_agent::agent::AgentDef],
+    non_interactive: bool,
+    mut issues: Vec<String>,
+) -> miette::Result<()> {
+    let interactive = !non_interactive;
+    if interactive && let Some(issue) = issues.first() {
+        return Err(miette::miette!(
+            help = "Repair the selected agent configuration, then rerun `right up`",
+            "selected agent configuration is invalid: {issue}"
+        ));
+    }
+
+    if let Some(failure) = configured_tunnel_failure(home)? {
+        if interactive {
+            eprintln!("Configured tunnel is not ready: {}", failure.error);
+            crate::wizard::repair_configured_tunnel(home, &failure.config)?;
+            validate_configured_tunnel(home)?;
+        } else {
+            issues.push(format!(
+                "global tunnel: {}. Repair: run `right up` interactively or `right config`",
+                failure.error
+            ));
+        }
+    }
+
+    let any_sandboxed = agents.iter().any(|agent| {
+        agent
+            .config
+            .as_ref()
+            .map(|config| config.is_sandboxed())
+            .unwrap_or(true)
+    });
+    let mtls_dir = if any_sandboxed {
+        match ensure_openshell_ready(interactive) {
+            Ok(dir) => Some(dir),
+            Err(error) if non_interactive => {
+                issues.push(format!(
+                    "OpenShell: {error:#}. Repair: install/start OpenShell, then rerun"
+                ));
+                None
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+
+    let mut backend = LiveAgentReadiness {
+        home,
+        mtls_dir: mtls_dir.as_deref(),
+    };
+    validate_agent_readiness_with(agents, interactive, &mut backend, &mut issues).await?;
+
+    non_interactive_readiness_result(issues)
+}
+
 async fn cmd_up(
     home: &Path,
     agents_filter: Option<Vec<String>>,
     detach: bool,
     debug: bool,
+    non_interactive: bool,
 ) -> miette::Result<()> {
     let t_total = std::time::Instant::now();
     let mut t_phase = std::time::Instant::now();
@@ -3197,113 +3904,51 @@ async fn cmd_up(
 
     let run_dir = home.join("run");
 
-    // Pre-flight: check for stale processes holding required ports.
-    // `from_home` returns None with an isolated --home tempdir, skipping the
-    // probe. `check_port_available` below still catches a PC started by
-    // another home that happens to bind the port we need.
-    if let Some(client) = right_agent::runtime::PcClient::from_home(home)?
-        && client.health_check().await.is_ok()
-    {
-        return Err(miette::miette!(
-            "right is already running. Use `right down` first or `right attach` to connect."
-        ));
-    }
-    check_port_available(right_runtime_state::MCP_HTTP_PORT).await?;
-    tracing::info!(
-        elapsed_ms = t_phase.elapsed().as_millis() as u64,
-        "up: pc_health + port_check"
-    );
-    t_phase = std::time::Instant::now();
-
-    // Discover agents.
+    // Enumerate the selected raw directories before parsing so invalid entries
+    // become readiness issues instead of being silently skipped or preventing
+    // checks of other selected agents.
     let agents_dir = right_config::agents_dir(home);
-    let all_agents = right_agent::agent::discover_agents(&agents_dir)?;
-
-    let agents = filter_agents(&all_agents, agents_filter.as_deref())?;
-
-    if agents.is_empty() {
+    let discovery = discover_up_agents(&agents_dir, agents_filter.as_deref())?;
+    if discovery.agents.is_empty() && discovery.issues.is_empty() {
         return Err(miette::miette!(
             "no agents found. Run `right agent init <name>` to create one."
         ));
     }
+    let mut agents = discovery.agents;
 
-    // Validate mandatory tunnel config before optional sandbox dependency
-    // prompts. Otherwise a missing OpenShell install can hide the config error
-    // and prompt in non-interactive CI/test runs.
-    let _global_cfg = right_config::read_global_config(home)?;
+    // An existing process or occupied runtime port must short-circuit before
+    // readiness performs network probes, prompts, or repair mutations.
+    run_up_preflight(
+        || ensure_up_runtime_available(home),
+        || validate_up_readiness(home, &agents, non_interactive, discovery.issues),
+    )
+    .await?;
+    // Interactive readiness repair may have changed an agent token in YAML.
+    // Reload before codegen so the launched configuration is the validated one.
+    if !non_interactive {
+        let refreshed = discover_up_agents(&agents_dir, agents_filter.as_deref())?;
+        if let Some(issue) = refreshed.issues.first() {
+            return Err(miette::miette!(
+                "selected agent configuration is invalid: {issue}"
+            ));
+        }
+        agents = refreshed.agents;
+    }
 
     tracing::info!(
         elapsed_ms = t_phase.elapsed().as_millis() as u64,
         agents = agents.len(),
-        "up: discover_agents"
+        "up: readiness"
     );
     t_phase = std::time::Instant::now();
 
-    // Pre-flight: when any agent needs sandbox, verify OpenShell is ready.
-    // The bot process needs mTLS certs to connect to the gateway's gRPC API —
-    // without them it will crash in a loop. Diagnose the specific issue and
-    // offer to fix it interactively.
-    let any_sandboxed = agents.iter().any(|a| {
-        a.config
+    let any_sandboxed = agents.iter().any(|agent| {
+        agent
+            .config
             .as_ref()
-            .map(|c| {
-                matches!(
-                    c.sandbox_mode(),
-                    right_agent::agent::types::SandboxMode::Openshell
-                )
-            })
-            .unwrap_or(true) // default is openshell
+            .map(|config| config.is_sandboxed())
+            .unwrap_or(true)
     });
-    tracing::info!(
-        elapsed_ms = t_phase.elapsed().as_millis() as u64,
-        any_sandboxed,
-        "up: sandbox_mode_scan"
-    );
-    t_phase = std::time::Instant::now();
-
-    if any_sandboxed {
-        match right_openshell::openshell::preflight_check() {
-            right_openshell::openshell::OpenShellStatus::Ready(_) => {}
-            right_openshell::openshell::OpenShellStatus::NotInstalled => {
-                println!("OpenShell is not installed. Sandbox mode requires OpenShell.");
-                println!();
-                let install = inquire::Confirm::new("install openshell now?")
-                    .with_default(true)
-                    .prompt()
-                    .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
-                if install {
-                    println!("Installing OpenShell...");
-                    let status = std::process::Command::new("sh")
-                        .args(["-c", "curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh"])
-                        .status()
-                        .map_err(|e| miette::miette!("failed to run installer: {e:#}"))?;
-                    if !status.success() {
-                        return Err(miette::miette!(
-                            help = "Install manually: https://github.com/NVIDIA/OpenShell",
-                            "OpenShell installer failed"
-                        ));
-                    }
-                    // After install, still need a gateway — fall through to gateway check.
-                    println!();
-                    match right_openshell::openshell::preflight_check() {
-                        right_openshell::openshell::OpenShellStatus::Ready(_) => {}
-                        other => return Err(openshell_status_error(other)),
-                    }
-                } else {
-                    return Err(miette::miette!(
-                        help = "Install from https://github.com/NVIDIA/OpenShell, or set `sandbox: mode: none` in agent.yaml",
-                        "OpenShell is required for sandbox mode"
-                    ));
-                }
-            }
-            status => return Err(openshell_status_error(status)),
-        }
-    }
-    tracing::info!(
-        elapsed_ms = t_phase.elapsed().as_millis() as u64,
-        "up: openshell_preflight"
-    );
-    t_phase = std::time::Instant::now();
 
     // Provision RightClaw-owned provider profiles (right-*) to the gateway,
     // once per gateway, before bots start. Only when sandboxed agents exist —
@@ -3401,8 +4046,8 @@ async fn cmd_up(
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
 
-    // Run cross-agent codegen: token map, policy validation,
-    // cloudflared config, process-compose.yaml, and runtime state.
+    // Run cross-agent codegen: token map, cloudflared config,
+    // process-compose.yaml, and runtime state.
     right_codegen::run_agent_codegen(home, &agents, &self_exe, debug)?;
     tracing::info!(
         elapsed_ms = t_phase.elapsed().as_millis() as u64,
@@ -3784,12 +4429,83 @@ fn cmd_attach(home: &Path) -> miette::Result<()> {
 
     Err(miette::miette!("Failed to attach: {err}"))
 }
+#[derive(Debug)]
+struct RestoreCleanupPlan {
+    agent_dir: PathBuf,
+    sandbox_name: Option<String>,
+    ssh_config_path: Option<PathBuf>,
+}
+
+impl RestoreCleanupPlan {
+    fn new(agent_dir: PathBuf) -> Self {
+        Self {
+            agent_dir,
+            sandbox_name: None,
+            ssh_config_path: None,
+        }
+    }
+
+    fn track_sandbox(&mut self, sandbox_name: String) {
+        self.sandbox_name = Some(sandbox_name);
+    }
+
+    fn track_ssh_config(&mut self, ssh_config_path: PathBuf) {
+        self.ssh_config_path = Some(ssh_config_path);
+    }
+}
+
+async fn cleanup_failed_restore(plan: &RestoreCleanupPlan) -> miette::Result<()> {
+    if let Some(sandbox_name) = &plan.sandbox_name {
+        let mtls_dir = match right_openshell::openshell::preflight_check() {
+            right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+            status => {
+                return Err(miette::miette!(
+                    "cannot confirm deletion of restore sandbox '{sandbox_name}' ({status:?}); retaining recovery state at {}",
+                    plan.agent_dir.display()
+                ));
+            }
+        };
+        let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
+            .await
+            .map_err(|error| {
+                miette::miette!(
+                    "cannot connect to confirm deletion of restore sandbox '{sandbox_name}': {error:#}; retaining recovery state at {}",
+                    plan.agent_dir.display()
+                )
+            })?;
+        right_openshell::openshell::delete_sandbox_confirmed(
+            &mut client,
+            sandbox_name,
+            60,
+            2,
+        )
+        .await
+        .map_err(|error| {
+            miette::miette!(
+                "failed to confirm deletion of restore sandbox '{sandbox_name}': {error:#}; retaining recovery state at {}",
+                plan.agent_dir.display()
+            )
+        })?;
+    }
+    if let Some(ssh_config_path) = &plan.ssh_config_path
+        && ssh_config_path.exists()
+    {
+        std::fs::remove_file(ssh_config_path).map_err(|error| {
+            miette::miette!(
+                "failed to remove restore SSH config {}: {error:#}",
+                ssh_config_path.display()
+            )
+        })?;
+    }
+    cleanup_failed_restore_agent_dir(&plan.agent_dir)
+}
 
 async fn cmd_agent_restore(
     home: &Path,
     agent_name: &str,
     backup_path: &Path,
     restore_binding_mode: restore::RestoreBindingMode,
+    claude_setup_token: &str,
 ) -> miette::Result<()> {
     use miette::IntoDiagnostic;
 
@@ -3834,6 +4550,9 @@ async fn cmd_agent_restore(
         )
     })?;
     let is_sandboxed = backup_config.is_sandboxed();
+    if !is_sandboxed {
+        validate_no_sandbox_claude()?;
+    }
 
     let effective_restore_binding_mode = if matches!(
         restore_binding_mode,
@@ -3857,6 +4576,11 @@ async fn cmd_agent_restore(
         effective_restore_binding_mode,
     )
     .await?;
+
+    // Tunnel configuration is the last pre-creation boundary after validating
+    // the restore request itself. External providers receive shape validation
+    // only; Right cannot probe operator-owned ingress reachability here.
+    preflight_agent_init_tunnel(home)?;
 
     let theme = right_ui::detect();
     println!(
@@ -3885,6 +4609,7 @@ async fn cmd_agent_restore(
         .map_err(|e| {
             miette::miette!("failed to create agent dir {}: {e:#}", agent_dir.display())
         })?;
+    let mut cleanup_plan = RestoreCleanupPlan::new(agent_dir.clone());
 
     // Wrap the rest of the function in an inner async block so any intermediate
     // failure between here and the success return unifies cleanup of the
@@ -3987,6 +4712,7 @@ async fn cmd_agent_restore(
                 Some(&staging),
                 &[],
             )?;
+            cleanup_plan.track_sandbox(new_sandbox_name.clone());
 
             let mut grpc = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
 
@@ -4029,6 +4755,7 @@ async fn cmd_agent_restore(
                 &ssh_config_dir,
             )
             .await?;
+            cleanup_plan.track_ssh_config(ssh_config_path.clone());
 
             let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&new_sandbox_name);
 
@@ -4040,38 +4767,20 @@ async fn cmd_agent_restore(
                     .verb("uploading")
                     .render(theme)
             );
-            if let Err(e) = right_openshell::openshell::ssh_tar_upload(
+            right_openshell::openshell::ssh_tar_upload(
                 &ssh_config_path,
                 &ssh_host,
                 &tar_path,
                 600,
             )
             .await
-            {
-                right_ui::stderr(
-                    theme,
-                    &right_ui::status(right_ui::Glyph::Err)
-                        .noun("rollback")
-                        .verb("restore failed")
-                        .detail(format!("deleting new sandbox '{new_sandbox_name}'"))
-                        .render(theme),
-                );
-                right_openshell::openshell::delete_sandbox(&new_sandbox_name).await;
-                let _ = right_openshell::openshell::wait_for_deleted(
-                    &mut grpc,
-                    &new_sandbox_name,
-                    60,
-                    2,
-                )
-                .await;
-                let _ = std::fs::remove_file(&ssh_config_path);
-                return Err(miette::miette!(
-                    "Sandbox restore failed; removed partial agent '{}' at {} and requested deletion of new sandbox '{}': {e:#}",
+            .map_err(|error| {
+                miette::miette!(
+                    "Sandbox restore failed for agent '{}' in new sandbox '{}': {error:#}",
                     agent_name,
-                    agent_dir.display(),
                     new_sandbox_name,
-                ));
-            }
+                )
+            })?;
             println!(
                 "{}",
                 right_ui::status(right_ui::Glyph::Ok)
@@ -4169,30 +4878,127 @@ async fn cmd_agent_restore(
             );
         }
 
+        right_db::open_db(&agent_dir, true)
+            .await
+            .map_err(|error| miette::miette!("failed to migrate restored data.db: {error:#}"))?;
+        persist_claude_setup_token(&agent_dir, claude_setup_token).await?;
+        let restored_agent = right_agent::agent::discover_single_agent(&agent_dir)?;
+        let self_exe = std::env::current_exe()
+            .map_err(|error| miette::miette!("failed to resolve self exe: {error:#}"))?;
+        right_codegen::run_agent_codegen(
+            home,
+            std::slice::from_ref(&restored_agent),
+            &self_exe,
+            false,
+        )?;
+        right_codegen::run_single_agent_codegen(home, &restored_agent, &self_exe, false).await?;
+        validate_agent_init_auth(home, &restored_agent).await?;
+
         Ok(())
     }
     .await;
 
-    if result.is_err() {
-        if let Err(cleanup_err) = cleanup_failed_restore_agent_dir(&agent_dir) {
-            tracing::warn!(
-                error = format!("{cleanup_err:#}"),
-                "agent dir cleanup after failed restore failed"
-            );
-        }
-        return result;
+    if let Err(error) = result {
+        cleanup_failed_restore(&cleanup_plan)
+            .await
+            .map_err(|cleanup_error| {
+                miette::miette!("restore failed: {error:#}; cleanup also failed: {cleanup_error:#}")
+            })?;
+        return Err(error);
     }
 
-    println!(
-        "{}",
-        right_ui::Recap::new("restored")
-            .ok("agent", agent_name)
-            .ok("path", &agent_dir.display().to_string())
-            .render(theme)
-    );
+    let register_outcome = right_agent::agent::register_with_running_pc(
+        home,
+        right_agent::agent::RegisterOptions {
+            agent_name: agent_name.to_string(),
+            recreated: false,
+        },
+    )
+    .await;
+    let recap = restore_recap(agent_name, &agent_dir, register_outcome);
+    println!("{}", recap.render(theme));
     Ok(())
 }
+fn restore_recap(
+    agent_name: &str,
+    agent_dir: &Path,
+    register_outcome: miette::Result<right_agent::agent::RegisterResult>,
+) -> right_ui::Recap {
+    let recap = right_ui::Recap::new("restored")
+        .ok("agent", agent_name)
+        .ok("path", &agent_dir.display().to_string());
+    match register_outcome {
+        Ok(right_agent::agent::RegisterResult { pc_running: true }) => {
+            recap.next("send /start to your bot in Telegram")
+        }
+        Ok(right_agent::agent::RegisterResult { pc_running: false }) => recap.next("right up"),
+        Err(error) => {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "PC reload failed after agent restore"
+            );
+            recap
+                .warn("reload", "failed; restored state is retained")
+                .next("run `right reload`, or restart right")
+        }
+    }
+}
 
+async fn validate_agent_init_auth(
+    home: &Path,
+    agent: &right_agent::agent::AgentDef,
+) -> miette::Result<()> {
+    validate_agent_init_auth_with_candidate(home, agent, None).await
+}
+
+async fn validate_agent_init_auth_candidate(
+    home: &Path,
+    agent: &right_agent::agent::AgentDef,
+    candidate: String,
+) -> miette::Result<()> {
+    validate_agent_init_auth_with_candidate(home, agent, Some(candidate)).await
+}
+
+async fn validate_agent_init_auth_with_candidate(
+    home: &Path,
+    agent: &right_agent::agent::AgentDef,
+    candidate: Option<String>,
+) -> miette::Result<()> {
+    let config = agent.config.as_ref().ok_or_else(|| {
+        miette::miette!("agent.yaml missing before Claude authentication validation")
+    })?;
+    let (ssh_config_path, resolved_sandbox) = if config.is_sandboxed() {
+        let sandbox_name = right_openshell::openshell::resolve_sandbox_name(
+            &agent.name,
+            config
+                .sandbox
+                .as_ref()
+                .and_then(|sandbox| sandbox.name.as_deref()),
+        );
+        (
+            Some(
+                home.join("run")
+                    .join("ssh")
+                    .join(format!("{sandbox_name}.ssh-config")),
+            ),
+            Some(sandbox_name),
+        )
+    } else {
+        (None, None)
+    };
+    let mut probe = right_bot::InitAuthProbe::new(
+        agent.path.clone(),
+        ssh_config_path,
+        resolved_sandbox,
+        config.model.clone(),
+    );
+    if let Some(token) = candidate {
+        probe = probe.with_candidate_token(token);
+    }
+    right_bot::validate_init_auth(probe)
+        .await
+        .map_err(|error| miette::miette!("{error:#}"))
+}
 fn prompt_restore_binding_mode() -> miette::Result<restore::RestoreBindingMode> {
     let options = vec![
         "preserve source bindings",
@@ -5320,19 +6126,248 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigCommands, MemoryCommands, build_agent_ssh_command, cleanup_failed_restore_agent_dir,
+        AgentReadinessBackend, ConfigCommands, MemoryCommands, ReadinessRepair, RestoreCleanupPlan,
+        build_agent_ssh_command, cleanup_failed_restore, cleanup_failed_restore_agent_dir,
         copy_agent_backup_config_files, copy_agent_restore_config_files,
-        copy_database_snapshot_for_restore, generic_provider_profiles, managed_profile_attachments,
-        remove_database_sidecars, resolve_agent_db, resolve_restored_policy_path,
-        restored_mcp_auth_method, truncate_content, write_bootstrap_right_mcp_policy,
-        write_managed_settings,
+        copy_database_snapshot_for_restore, discover_up_agents, generic_provider_profiles,
+        managed_profile_attachments, non_interactive_readiness_result, remove_database_sidecars,
+        resolve_agent_db, resolve_restored_policy_path, restore_recap, restored_mcp_auth_method,
+        run_up_preflight, truncate_content, validate_agent_readiness_with,
+        validate_configured_tunnel_with, validate_then_persist_claude_candidate,
+        write_bootstrap_right_mcp_policy, write_managed_settings,
     };
+
     use right_agent_config::{
         AgentConfig, GenericProvider, ProviderEntry, ProviderType, SandboxConfig, SandboxMode,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    fn readiness_agent(name: &str) -> right_agent::agent::AgentDef {
+        let path = PathBuf::from(name);
+        right_agent::agent::AgentDef {
+            name: name.to_owned(),
+            path: path.clone(),
+            identity_path: path.join("IDENTITY.md"),
+            config: Some(AgentConfig {
+                sandbox: Some(SandboxConfig {
+                    mode: SandboxMode::None,
+                    policy_file: None,
+                    name: None,
+                    providers: Vec::new(),
+                }),
+                telegram_token: Some("redacted-test-token".to_owned()),
+                ..AgentConfig::default()
+            }),
+            soul_path: None,
+            user_path: None,
+            tools_path: None,
+            bootstrap_path: None,
+            heartbeat_path: None,
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingReadinessBackend {
+        telegram_checks: Vec<String>,
+        transport_checks: Vec<String>,
+        claude_checks: Vec<String>,
+        repairs: Vec<ReadinessRepair>,
+    }
+
+    impl AgentReadinessBackend for RecordingReadinessBackend {
+        async fn validate_telegram(
+            &mut self,
+            agent: &right_agent::agent::AgentDef,
+        ) -> miette::Result<()> {
+            self.telegram_checks.push(agent.name.clone());
+            Err(miette::miette!("telegram unavailable"))
+        }
+
+        async fn ensure_transport(
+            &mut self,
+            agent: &right_agent::agent::AgentDef,
+            _interactive: bool,
+        ) -> miette::Result<()> {
+            self.transport_checks.push(agent.name.clone());
+            Ok(())
+        }
+
+        async fn validate_claude(
+            &mut self,
+            agent: &right_agent::agent::AgentDef,
+        ) -> miette::Result<()> {
+            self.claude_checks.push(agent.name.clone());
+            Err(miette::miette!("claude unavailable"))
+        }
+
+        async fn repair(
+            &mut self,
+            action: ReadinessRepair,
+            _agent: &right_agent::agent::AgentDef,
+        ) -> miette::Result<()> {
+            self.repairs.push(action);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn up_runtime_guard_precedes_readiness() {
+        let events = std::cell::RefCell::new(Vec::new());
+        run_up_preflight(
+            || async {
+                events.borrow_mut().push("guard");
+                Ok(())
+            },
+            || async {
+                events.borrow_mut().push("readiness");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*events.borrow(), ["guard", "readiness"]);
+    }
+
+    #[tokio::test]
+    async fn up_runtime_guard_failure_skips_readiness() {
+        let readiness_calls = std::cell::Cell::new(0_u8);
+        let error = run_up_preflight(
+            || async { Err(miette::miette!("already running")) },
+            || async {
+                readiness_calls.set(readiness_calls.get() + 1);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("already running"));
+        assert_eq!(readiness_calls.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn noninteractive_readiness_checks_all_selected_agents_and_never_repairs() {
+        let agents = [readiness_agent("alpha"), readiness_agent("beta")];
+        let mut backend = RecordingReadinessBackend::default();
+        let mut issues = Vec::new();
+        validate_agent_readiness_with(&agents, false, &mut backend, &mut issues)
+            .await
+            .unwrap();
+
+        assert_eq!(backend.telegram_checks, ["alpha", "beta"]);
+        assert_eq!(backend.transport_checks, ["alpha", "beta"]);
+        assert_eq!(backend.claude_checks, ["alpha", "beta"]);
+        assert!(backend.repairs.is_empty());
+        let error = non_interactive_readiness_result(issues).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("alpha: Telegram validation failed"));
+        assert!(message.contains("alpha: Claude authentication failed"));
+        assert!(message.contains("beta: Telegram validation failed"));
+        assert!(message.contains("beta: Claude authentication failed"));
+    }
+
+    #[tokio::test]
+    async fn noninteractive_discovery_and_live_failures_aggregate_without_downstream_work() {
+        let tmp = TempDir::new().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        fs::create_dir_all(agents_dir.join("valid")).unwrap();
+        fs::create_dir_all(agents_dir.join("missing")).unwrap();
+        fs::create_dir_all(agents_dir.join("malformed")).unwrap();
+        fs::write(
+            agents_dir.join("valid/agent.yaml"),
+            "telegram_token: \"123:test\"\nsandbox:\n  mode: none\n",
+        )
+        .unwrap();
+        fs::write(agents_dir.join("malformed/agent.yaml"), "sandbox: [").unwrap();
+        let discovery = discover_up_agents(&agents_dir, None).unwrap();
+        let mut backend = RecordingReadinessBackend::default();
+        let mut issues = discovery.issues;
+        validate_agent_readiness_with(&discovery.agents, false, &mut backend, &mut issues)
+            .await
+            .unwrap();
+        let downstream_calls = std::cell::Cell::new(0_u8);
+        let result: miette::Result<()> = async {
+            non_interactive_readiness_result(issues)?;
+            downstream_calls.set(downstream_calls.get() + 1);
+            Ok(())
+        }
+        .await;
+
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(message.contains("missing: configuration failed"));
+        assert!(message.contains("malformed: configuration failed"));
+        assert!(message.contains("valid: Telegram validation failed"));
+        assert!(message.contains("valid: Claude authentication failed"));
+        assert_eq!(backend.telegram_checks, ["valid"]);
+        assert_eq!(backend.claude_checks, ["valid"]);
+        assert!(backend.repairs.is_empty());
+        assert_eq!(downstream_calls.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn readiness_failure_prevents_downstream_up_work() {
+        let downstream_calls = std::cell::Cell::new(0_u8);
+        let result: miette::Result<()> = async {
+            run_up_preflight(
+                || async { Ok(()) },
+                || async { Err(miette::miette!("readiness failed")) },
+            )
+            .await?;
+            downstream_calls.set(downstream_calls.get() + 1);
+            Ok(())
+        }
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(downstream_calls.get(), 0);
+    }
+
+    #[test]
+    fn readiness_repairs_only_agent_credentials() {
+        assert_eq!(
+            [ReadinessRepair::Telegram, ReadinessRepair::Claude].len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_candidate_failure_does_not_persist() {
+        let persisted = std::cell::Cell::new(false);
+        let error = validate_then_persist_claude_candidate(
+            "candidate-secret",
+            |_| async { Err(miette::miette!("candidate rejected")) },
+            |_| async {
+                persisted.set(true);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("candidate rejected"));
+        assert!(!persisted.get());
+    }
+
+    #[tokio::test]
+    async fn claude_candidate_persists_only_after_validation() {
+        let events = std::cell::RefCell::new(Vec::new());
+        validate_then_persist_claude_candidate(
+            "candidate-secret",
+            |_| async {
+                events.borrow_mut().push("validate");
+                Ok(())
+            },
+            |_| async {
+                events.borrow_mut().push("persist");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*events.borrow(), ["validate", "persist"]);
+    }
 
     fn config_with_provider(provider: ProviderEntry) -> AgentConfig {
         AgentConfig {
@@ -5358,6 +6393,121 @@ mod tests {
             }),
             shared_from: None,
         }
+    }
+
+    #[test]
+    fn up_selection_aggregates_invalid_selected_agents_and_keeps_valid_ones() {
+        let tmp = TempDir::new().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        fs::create_dir_all(agents_dir.join("valid")).unwrap();
+        fs::create_dir_all(agents_dir.join("missing")).unwrap();
+        fs::create_dir_all(agents_dir.join("malformed")).unwrap();
+        fs::write(
+            agents_dir.join("valid/agent.yaml"),
+            "sandbox:\n  mode: none\n",
+        )
+        .unwrap();
+        fs::write(agents_dir.join("malformed/agent.yaml"), "sandbox: [").unwrap();
+
+        let selected = discover_up_agents(
+            &agents_dir,
+            Some(&[
+                "valid".to_owned(),
+                "missing".to_owned(),
+                "malformed".to_owned(),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(selected.agents.len(), 1);
+        assert_eq!(selected.agents[0].name, "valid");
+        assert_eq!(selected.issues.len(), 2);
+        assert!(
+            selected
+                .issues
+                .iter()
+                .any(|issue| issue.starts_with("missing:"))
+        );
+        assert!(
+            selected
+                .issues
+                .iter()
+                .any(|issue| issue.starts_with("malformed:"))
+        );
+
+        let all = discover_up_agents(&agents_dir, None).unwrap();
+        assert_eq!(all.agents.len(), 1);
+        assert_eq!(all.issues.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_tunnel_validator_checks_credentials_and_account() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let credentials = tmp.path().join("credentials.json");
+        fs::write(&credentials, r#"{"TunnelID":"expected"}"#).unwrap();
+        let cloudflared = tmp.path().join("cloudflared");
+        fs::write(&cloudflared, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = fs::metadata(&cloudflared).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&cloudflared, permissions).unwrap();
+        let config = right_config::GlobalConfig {
+            tunnel: right_config::TunnelConfig {
+                hostname: "right.example.com".to_owned(),
+                provider: right_config::TunnelProvider::Cloudflared {
+                    tunnel_uuid: "expected".to_owned(),
+                    credentials_file: credentials.clone(),
+                },
+            },
+            aggregator: right_config::AggregatorConfig::default(),
+        };
+
+        validate_configured_tunnel_with(&config, &cloudflared).unwrap();
+        fs::write(&credentials, r#"{"TunnelID":"wrong"}"#).unwrap();
+        let error = validate_configured_tunnel_with(&config, &cloudflared).unwrap_err();
+        assert!(format!("{error}").contains("wrong"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_tunnel_validator_rejects_inaccessible_account_tunnel() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let credentials = tmp.path().join("credentials.json");
+        fs::write(&credentials, r#"{"TunnelID":"expected"}"#).unwrap();
+        let cloudflared = tmp.path().join("cloudflared");
+        fs::write(&cloudflared, "#!/bin/sh\nexit 7\n").unwrap();
+        let mut permissions = fs::metadata(&cloudflared).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&cloudflared, permissions).unwrap();
+        let config = right_config::GlobalConfig {
+            tunnel: right_config::TunnelConfig {
+                hostname: "right.example.com".to_owned(),
+                provider: right_config::TunnelProvider::Cloudflared {
+                    tunnel_uuid: "expected".to_owned(),
+                    credentials_file: credentials,
+                },
+            },
+            aggregator: right_config::AggregatorConfig::default(),
+        };
+
+        let error = validate_configured_tunnel_with(&config, &cloudflared).unwrap_err();
+        assert!(format!("{error}").contains("cannot access"));
+    }
+
+    #[test]
+    fn external_tunnel_validation_is_shape_only() {
+        let config = right_config::GlobalConfig {
+            tunnel: right_config::TunnelConfig {
+                hostname: "right.example.com".to_owned(),
+                provider: right_config::TunnelProvider::External,
+            },
+            aggregator: right_config::AggregatorConfig::default(),
+        };
+
+        validate_configured_tunnel_with(&config, Path::new("definitely-absent")).unwrap();
     }
 
     #[test]
@@ -5623,6 +6773,63 @@ mod tests {
             !agent_dir.exists(),
             "failed restore cleanup must remove the partial agent directory"
         );
+    }
+
+    #[tokio::test]
+    async fn cleanup_failed_restore_removes_tracked_ssh_config_and_agent_state() {
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = tmp.path().join("agents").join("right-drill");
+        let ssh_config = tmp.path().join("run/ssh/right-drill.ssh-config");
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::create_dir_all(ssh_config.parent().unwrap()).unwrap();
+        fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+        fs::write(&ssh_config, "Host test\n").unwrap();
+        let mut plan = RestoreCleanupPlan::new(agent_dir.clone());
+        plan.track_ssh_config(ssh_config.clone());
+
+        cleanup_failed_restore(&plan).await.unwrap();
+
+        assert!(!agent_dir.exists());
+        assert!(!ssh_config.exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_failed_restore_retains_local_handles_when_remote_unavailable() {
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = tmp.path().join("agents").join("right-drill");
+        let ssh_config = tmp.path().join("run/ssh/right-drill.ssh-config");
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::create_dir_all(ssh_config.parent().unwrap()).unwrap();
+        fs::write(
+            agent_dir.join("agent.yaml"),
+            "sandbox:\n  mode: openshell\n",
+        )
+        .unwrap();
+        fs::write(&ssh_config, "Host test\n").unwrap();
+        let mut plan = RestoreCleanupPlan::new(agent_dir.clone());
+        plan.track_sandbox("right-drill".to_string());
+        plan.track_ssh_config(ssh_config.clone());
+
+        cleanup_failed_restore(&plan)
+            .await
+            .expect_err("unavailable OpenShell must keep recovery handles");
+
+        assert!(agent_dir.exists());
+        assert!(ssh_config.exists());
+    }
+
+    #[test]
+    fn restore_recap_warns_and_directs_reload_on_registration_error() {
+        let recap = restore_recap(
+            "restored-agent",
+            Path::new("/tmp/restored-agent"),
+            Err(miette::miette!("reload failed")),
+        )
+        .render(right_ui::Theme::Ascii);
+
+        assert!(recap.contains("restored"));
+        assert!(recap.contains("failed; restored state is retained"));
+        assert!(recap.contains("right reload"));
     }
 
     #[test]

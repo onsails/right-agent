@@ -21,6 +21,8 @@ mod stt;
 pub(crate) mod sync;
 pub mod telegram;
 mod upgrade;
+pub use keepalive::{InitAuthProbe, validate_init_auth};
+pub use telegram::tg_bot::validate_telegram_token_live;
 
 use right_agent::agent::allowlist::{self, AllowlistHandle, AllowlistState};
 

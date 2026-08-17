@@ -1,12 +1,40 @@
-use std::fs;
-
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::sync::LazyLock;
 use tempfile::tempdir;
 
 fn right() -> Command {
     Command::cargo_bin("right").unwrap()
 }
+
+fn right_with_init_auth() -> Command {
+    let mut command = right();
+    command.env("RIGHT_CLAUDE_SETUP_TOKEN", "test-claude-setup-token");
+    let mut paths = vec![FAKE_CLAUDE_DIR.clone()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    command.env("PATH", std::env::join_paths(paths).unwrap());
+    command
+}
+
+static FAKE_CLAUDE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    let dir = std::env::temp_dir().join(format!("right-home-probe-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let executable = dir.join("claude");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo '2.1.0 (Claude Code)'; exit 0; fi\necho '{\"type\":\"system\",\"subtype\":\"init\",\"apiKeySource\":\"none\"}'\necho '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"OK\"}'\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(executable, permissions).unwrap();
+    dir
+});
 
 // --- Plan 01 artifact tests (D-11: credential symlink, .claude.json, missing-creds) ---
 
@@ -16,7 +44,7 @@ fn init_agent_claude_json_has_trust() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -60,7 +88,7 @@ fn init_agent_credentials_is_symlink() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
-    right()
+    right_with_init_auth()
         .args([
             "--home",
             home,
@@ -120,7 +148,7 @@ fn init_warns_when_host_creds_missing() {
     fs::create_dir_all(&cf_dir).unwrap();
     fs::write(cf_dir.join("cert.pem"), "stub").unwrap();
 
-    let result = right()
+    let result = right_with_init_auth()
         .args([
             "--home",
             home,
