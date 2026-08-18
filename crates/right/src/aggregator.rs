@@ -939,9 +939,7 @@ mod tests {
             names.contains(&crate::progress::SEND_PROGRESS_TOOL),
             "missing send_progress"
         );
-        assert!(names.contains(&"thread_search"), "missing thread_search");
         assert!(names.contains(&"chat_search"), "missing chat_search");
-        assert!(names.contains(&"bootstrap_done"), "missing bootstrap_done");
         assert!(
             names.contains(&"rightmeta__mcp_list"),
             "missing rightmeta__mcp_list"
@@ -1079,23 +1077,22 @@ mod tests {
     async fn dispatch_unprefixed_goes_to_right() {
         let tmp = tempfile::tempdir().unwrap();
         let dispatcher = make_dispatcher(tmp.path());
+        let conn = right_db::open_connection(&tmp.path().join("agents/test-agent"), true)
+            .await
+            .unwrap();
+        drop(conn);
 
-        // store_record requires valid params and a DB, so we use a tool that
-        // exercises RightBackend dispatch. bootstrap_done checks files — should
-        // return a tool-level error (missing files), not an infrastructure error.
         let result = dispatcher
             .dispatch(
                 "test-agent",
-                "bootstrap_done",
+                "mcp_list",
                 serde_json::json!({}),
                 crate::progress::ToolCallContext::default(),
             )
             .await;
 
         assert!(result.is_ok(), "dispatch should succeed: {result:?}");
-        let ctr = result.unwrap();
-        // bootstrap_done returns error because IDENTITY.md etc. are missing
-        assert_eq!(ctr.is_error, Some(true));
+        assert_ne!(result.unwrap().is_error, Some(true));
     }
 
     #[tokio::test]

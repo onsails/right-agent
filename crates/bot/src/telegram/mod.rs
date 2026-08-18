@@ -239,9 +239,10 @@ pub(crate) fn set_thinking_visibility(
 /// handler was already at the limit — we cannot inject these as separate
 /// top-level deps without pushing the message handler over.
 ///
-/// These shared control maps share bot-process lifetime and are injected together:
+/// These shared controls share bot-process lifetime and are injected together:
 /// - `stop_tokens`: per-(chat, thread) cancellation tokens for in-flight CC subprocesses.
 /// - `session_locks`: per-main-session async mutex map (TOCTOU on session JSONL).
+/// - `bootstrap_lock`: per-agent serialization for bootstrap verification and finalization.
 /// - `bg_requests`: per-(chat, thread) Background-button request flags.
 /// - `bg_handoff_gates`: per-(chat, thread) foreground gate during background fork handoff.
 /// - `thinking_visibility`: per-(chat, thread) Show/Hide thinking state for active runs.
@@ -251,6 +252,7 @@ pub(crate) fn set_thinking_visibility(
 pub struct WorkerControlDeps {
     pub(crate) stop_tokens: StopTokens,
     pub(crate) session_locks: SessionLocks,
+    pub(crate) bootstrap_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) bg_requests: BgRequests,
     pub(crate) bg_handoff_gates: BgHandoffGates,
     pub(crate) thinking_visibility: ThinkingVisibility,

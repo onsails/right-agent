@@ -9,8 +9,10 @@ Session-bearing CC invocations get a **single composite system prompt**
 assembled from multiple files. No `--agent` flag — all composite prompt content
 is in `--system-prompt-file`. Foreground worker prompts use per-session
 prompt-file paths because their `## Current Conversation` block is
-session-scoped; other session-bearing composite callers may omit chat context
-and use their existing prompt paths.
+session-scoped. Bootstrap prompt mode is invoked only once the worker has
+recorded all five fixed interview answers; its suffix contains those
+authoritative answers. Other session-bearing composite callers may omit chat
+context and use their existing prompt paths.
 
 **Why not `--agent`?** Testing proved that `--agent` with `@` file references doesn't work
 reliably when MCP tools are present (~8K+ tokens of tool definitions drown the agent's
@@ -222,12 +224,53 @@ prompt. Repair notices use the same volatile stdin prefix as
 
 ### Bootstrap mode
 
-```
-[Base: Right Agent agent description, sandbox info, MCP reference]
+The Telegram worker owns onboarding. While `BOOTSTRAP.md` exists, it claims one
+`(chat_id, thread_id)` owner before any session preparation. Other scopes receive
+a static conflict reply and never invoke Claude or create a session.
 
+For each durable first-missing stage (`user_name`, `agent_name`, `nature`,
+`vibe`, `emoji`), the worker invokes a tool-less question model with the constant
+stdin `Begin or continue onboarding by asking the required stage question.` The
+system prompt contains the authoritative first-missing stage and recorded
+answers as escaped JSON data. Model, parse, and shape-validation failures retry
+as fresh stateless invocations up to three total attempts. The worker delivers
+only non-empty, single-question content with `bootstrap_complete: false` and the
+exact expected `bootstrap_stage`, then persists the delivered Telegram message
+id; exhausting all attempts delivers and records nothing.
+The triggering message is not consumed as an answer until such an issue exists.
+
+Exactly one later routed message records the answer directly. A multi-message
+batch records none and invokes the model to re-ask the same stage. Delivery
+failure leaves the issue absent or stale, so a later turn retries rather than
+wedging onboarding.
+
+After the emoji answer, the worker invokes `BootstrapFinal` with stage `final`
+and the exact five answers. The constant stdin requests finalization and never
+contains answer text. Question mode passes `--tools ""` and does not configure
+MCP; final mode uses the standard foreground MCP configuration and progress
+behavior, with built-in `Write`, `Read`, and `Bash` available for identity-file
+creation. The model must create `IDENTITY.md`, `SOUL.md`, and
+`USER.md`, then return non-empty content with `bootstrap_stage: "final"` and
+`bootstrap_complete: true`. The worker validates that typed result before
+verifying either the five scoped answers or the three identity files,
+reconciling sandbox copies into the host mirror for OpenShell agents. Only
+verified completion writes and syncs a finalization intent, deactivates the
+matching session, removes and directory-syncs `BOOTSTRAP.md`, then clears the
+intent last. Invalid, incomplete, or unverifiable final output remains pending.
+
+Both question and final prompts render:
+
+````markdown
 ## Bootstrap Instructions
 {compiled-in from templates/right/agent/BOOTSTRAP.md}
+
+## Authoritative Bootstrap State (JSON)
+```json
+{"first_missing_stage":"…","recorded_answers":{"user_name":null,"agent_name":null,"nature":null,"vibe":null,"emoji":null}}
 ```
+````
+Marker-removal failure durably restores the marker before reactivating the exact
+session, and failed rollback retains the intent for startup recovery.
 
 ### Cron mode
 
@@ -278,6 +321,8 @@ Operating instructions, cron-delivery contract, and bootstrap content
 are compiled into the binary via `include_str!()` from
 `templates/right/prompt/` and `templates/right/agent/`.
 Changes to these files take effect on `cargo build` + restart — no file sync needed.
+An existing on-disk `BOOTSTRAP.md` is only the bootstrap-mode existence flag;
+its contents do not override the compiled template.
 This eliminates the stale-template problem where changes to platform instructions
 required manual re-init of existing agents.
 
@@ -378,7 +423,8 @@ Agent-owned files live at `/sandbox/` root. Platform-managed files live in `/pla
 | SOUL.md | `agent_dir/SOUL.md` | identity mirror reconciliation |
 | USER.md | `agent_dir/USER.md` | identity mirror reconciliation |
 | TOOLS.md | `agent_dir/TOOLS.md` | init/forward sync seed; not reverse-synced |
-| BOOTSTRAP.md | `agent_dir/BOOTSTRAP.md` | template (deleted after bootstrap) |
+| BOOTSTRAP.md | `agent_dir/BOOTSTRAP.md` | bootstrap-mode flag (removed only by verified worker finalization; recreated by lifecycle/rebootstrap management) |
+| `.bootstrap-finalization.json` | `agent_dir/.bootstrap-finalization.json` | runtime-owned transient crash-recovery intent; never codegen-managed |
 
 For sandboxed agents, `/sandbox/IDENTITY.md`, `/sandbox/SOUL.md`, and
 `/sandbox/USER.md` are the runtime source of truth for prompt assembly. The
@@ -406,14 +452,14 @@ drive lifecycle usage accounting. Legacy `learning_signal` and
 `skill_issue_signal` reply fields are not in the schema and are ignored if a
 stale client emits them.
 
-### bootstrap-schema.json (bootstrap mode)
-Required: `content` (string|null) and `bootstrap_complete` (boolean).
-Optional: `reply_to_message_id`, `attachments`. Bootstrap mode does not include
-normal-mode learned-skill fields (`used_skill_receipts`).
-Server-side validation: `bootstrap_complete: true` is ignored unless
-IDENTITY.md, SOUL.md, and USER.md are verified. For sandboxed agents, the worker
-first reconciles those files from `/sandbox` into the host mirror; no-sandbox
-agents are checked directly in `agent_dir/`.
+### bootstrap-schema.json (bootstrap modes)
+Required: `content` (string|null), `bootstrap_complete` (boolean), and
+`bootstrap_stage` (`user_name|agent_name|nature|vibe|emoji|final`). Optional:
+`reply_to_message_id`, `attachments`.
+
+Question mode requires non-empty single-question content, completion false, and
+the exact durable first-missing stage. Final mode requires stage `final` and
+completion true before identity verification can succeed.
 
 ### CRON_SCHEMA_JSON (cron jobs)
 
@@ -592,8 +638,8 @@ credential as invalid; for raw HTTP, write auth exactly as the API docs say
 using the injected env var),
 learned-skill metadata/progress/receipt tools
 (`mcp__right__skill_learning_start` and
-`mcp__right__skill_learning_finish`), and bootstrap
-(`mcp__right__bootstrap_done`).
+`mcp__right__skill_learning_finish`). Bootstrap answer recording, verification,
+and finalization are worker-owned and are not exposed as MCP tools.
 
 Update `with_instructions()` in both `memory_server.rs` and `aggregator.rs`
 whenever tools change.
@@ -756,14 +802,25 @@ ARCHITECTURE.md § "Reflection Primitive" for lifecycle details.
 
 ## Bootstrap Completion Flow
 
-1. Agent sends response with `bootstrap_complete: true` in structured output
-2. Sandboxed worker reconciles IDENTITY.md + SOUL.md + USER.md from `/sandbox`
-   into the host mirror
-3. No-sandbox worker checks IDENTITY.md + SOUL.md + USER.md in `agent_dir/`
-4. If all present → delete session, delete BOOTSTRAP.md → normal mode
-5. If missing → ignore bootstrap_complete, continue bootstrap mode
+1. The worker asks and records the five fixed onboarding questions without
+   invoking Claude.
+2. Once all five scoped answers exist, it invokes Claude in Bootstrap mode with
+   those authoritative answers and final identity-file instructions.
+3. Claude creates `IDENTITY.md`, `SOUL.md`, and `USER.md` and returns
+   `bootstrap_complete: true` only after the files exist.
+4. The worker rechecks the scoped answers, then reconciles sandbox identity
+   files into the host mirror (or checks `agent_dir/` in no-sandbox mode).
+5. If both gates pass, it atomically writes and syncs the runtime finalization
+   intent containing `chat_id`, `thread_id`, and `root_session_id`.
+6. It deactivates that exact active session, removes `BOOTSTRAP.md`, then clears
+   the intent last and enters Normal mode.
+7. Before Telegram dispatch on restart, a surviving intent causes answer and
+   identity re-verification and idempotent completion. Missing requirements
+   restore the marker and exact session when possible and fail startup; malformed
+   intent also restores the marker and fails startup.
+8. If live marker removal or its directory sync fails, the worker durably
+   restores `BOOTSTRAP.md`, reactivates the exact session, then clears the intent.
+   A failed restore or reactivation retains the intent for startup recovery.
 
-Bootstrap instructions explicitly tell the agent to write files in CWD (not `.claude/agents/`).
-
-Additionally, `mcp__right__bootstrap_done` MCP tool provides in-session feedback: agent calls it
-after creating files, gets immediate success/error response with missing file list.
+Bootstrap completion has no agent-visible MCP tool. The worker alone verifies
+the scoped answers and identity files, then performs completion cleanup.

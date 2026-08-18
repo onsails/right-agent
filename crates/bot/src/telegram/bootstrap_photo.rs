@@ -19,11 +19,11 @@ fn should_send(bootstrap_mode: bool, first_turn_in_chat: bool) -> bool {
 /// Send the welcome photo, optionally attaching `caption_html` as the photo
 /// caption so image + first reply land as a single Telegram message.
 ///
-/// Returns `true` iff the photo was sent **with** the caption — in which case
-/// the caller must skip that text part in its own message loop. Returns
-/// `false` if the photo was skipped, sent without caption (caption too long
-/// or absent), or if the send failed. Errors are logged at WARN and never
-/// propagate; the text reply is the contract, the photo is presentation.
+/// Returns the delivered Telegram message ID when the photo carried the
+/// caption. The caller must then skip that text part in its own message loop.
+/// Returns `None` if the photo was skipped, sent without a caption (caption too
+/// long or absent), or failed. Errors remain best-effort presentation failures;
+/// the text reply is the contract.
 pub(crate) async fn send_if_needed(
     bot: &super::BotType,
     chat_id: i64,
@@ -32,9 +32,9 @@ pub(crate) async fn send_if_needed(
     first_turn_in_chat: bool,
     caption_html: Option<&str>,
     reply_to: Option<i32>,
-) -> bool {
+) -> Option<i32> {
     if !should_send(bootstrap_mode, first_turn_in_chat) {
-        return false;
+        return None;
     }
 
     // Attach the caption only when it fits Telegram's caption limit; otherwise
@@ -55,7 +55,7 @@ pub(crate) async fn send_if_needed(
         )
         .await
     {
-        Ok(_) => caption_attached,
+        Ok(message) => caption_attached.then_some(message.message_id),
         Err(e) => {
             tracing::warn!(
                 chat_id,
@@ -63,7 +63,7 @@ pub(crate) async fn send_if_needed(
                 "bootstrap welcome photo failed: {:#}",
                 e
             );
-            false
+            None
         }
     }
 }

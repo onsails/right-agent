@@ -116,7 +116,7 @@
 
 - `main.rs` — CLI dispatcher.
 - `aggregator.rs` — MCP Aggregator (Aggregator + ToolDispatcher + BackendRegistry).
-- `right_backend.rs` — built-in MCP tools (memory, cron, mcp_list, bootstrap).
+- `right_backend.rs` — built-in MCP tools (memory, cron, conversation, channels, and provider capabilities).
 - `internal_api.rs` — internal REST API on Unix socket.
 - `memory_server.rs` — deprecated CLI-only MCP stdio server.
 

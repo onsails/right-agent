@@ -306,12 +306,6 @@ impl RightBackend {
                 "Set your standing focus for the CURRENT Telegram conversation (DM, group, or topic). The text is shown to you on every future turn in this conversation. Replaces the previous value; empty string clears it. Scope is server-enforced from the current foreground invocation and is not agent-controlled.",
                 schema_for_type::<ThreadFocusSetParams>(),
             ),
-            // Bootstrap
-            Tool::new(
-                "bootstrap_done",
-                "Signal that bootstrap onboarding is complete. Call this AFTER you have created IDENTITY.md, SOUL.md, and USER.md. The system will verify the files exist. Errors: bootstrap_files_missing (one or more identity files not yet created — see details.missing).",
-                schema_for_type::<CronListParams>(), // empty schema - no params
-            ),
             Tool::new(
                 "provider_capabilities",
                 "List providers attached to your own sandbox, showing env-var placeholder names only, allowed binaries, valid hosts, and usage hints. Scope is server-enforced, and this tool accepts no arguments. On provider/API 401/403, call this before concluding a credential is invalid because a specific binary/host may be required for gateway substitution.",
@@ -398,7 +392,6 @@ impl RightBackend {
             }
             "forum_topic_list" => self.call_forum_topic_list(agent_name, context, &args).await,
             "thread_focus_set" => self.call_thread_focus_set(agent_name, context, &args).await,
-            "bootstrap_done" => self.call_bootstrap_done(agent_name).await,
             "provider_capabilities" => self.call_provider_capabilities(agent_name, &args).await,
             other => bail!("unknown tool: {other}"),
         }
@@ -1962,97 +1955,19 @@ impl RightBackend {
             .map_err(|e| anyhow::anyhow!("forum list failed: {e:#}"))?;
         let json: Vec<serde_json::Value> = rows
             .into_iter()
-            .map(|t| {
+            .map(|topic| {
                 serde_json::json!({
-                    "message_thread_id": t.message_thread_id,
-                    "name": t.name,
-                    "icon_color": t.icon_color,
-                    "icon_custom_emoji_id": t.icon_custom_emoji_id,
-                    "state": t.state,
+                    "message_thread_id": topic.message_thread_id,
+                    "name": topic.name,
+                    "icon_color": topic.icon_color,
+                    "icon_custom_emoji_id": topic.icon_custom_emoji_id,
+                    "state": topic.state,
                 })
             })
             .collect();
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({ "topics": json }).to_string(),
         )]))
-    }
-
-    // ------------------------------------------------------------------
-    // Bootstrap
-    // ------------------------------------------------------------------
-
-    async fn call_bootstrap_done(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
-        let agent_dir = self.agents_dir.join(agent_name);
-        let required = ["IDENTITY.md", "SOUL.md", "USER.md"];
-
-        let missing: Vec<&str> = if let Some(mtls_dir) = &self.mtls_dir {
-            let sandbox_name = match right_agent::agent::parse_agent_config(&agent_dir) {
-                Ok(Some(config)) => {
-                    let explicit_sandbox_name =
-                        config.sandbox.as_ref().and_then(|s| s.name.as_deref());
-                    right_openshell::openshell::resolve_sandbox_name(
-                        agent_name,
-                        explicit_sandbox_name,
-                    )
-                }
-                _ => right_openshell::openshell::resolve_sandbox_name(agent_name, None),
-            };
-            let mut client = right_openshell::openshell::connect_grpc(mtls_dir)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e:#}"))
-                .context("bootstrap_done: failed to connect to OpenShell gRPC")?;
-            let sandbox_id =
-                right_openshell::openshell::resolve_sandbox_id(&mut client, &sandbox_name)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e:#}"))
-                    .context("bootstrap_done: failed to resolve sandbox ID")?;
-
-            let mut missing = Vec::new();
-            for &file in &required {
-                let path = format!("/sandbox/{file}");
-                let (_, exit_code) = right_openshell::openshell::exec_in_sandbox(
-                    &mut client,
-                    &sandbox_id,
-                    &["test", "-f", &path],
-                    right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e:#}"))
-                .with_context(|| format!("bootstrap_done: exec test -f {path} failed"))?;
-                if exit_code != 0 {
-                    missing.push(file);
-                }
-            }
-            missing
-        } else {
-            required
-                .iter()
-                .filter(|f| !agent_dir.join(f).exists())
-                .copied()
-                .collect()
-        };
-
-        if missing.is_empty() {
-            let bootstrap_path = agent_dir.join("BOOTSTRAP.md");
-            if bootstrap_path.exists() {
-                std::fs::remove_file(&bootstrap_path).context("failed to remove BOOTSTRAP.md")?;
-            }
-            Ok(CallToolResult::success(vec![Content::text(
-                "Bootstrap complete! IDENTITY.md, SOUL.md, and USER.md verified. \
-                 Your identity files are now active.",
-            )]))
-        } else {
-            let message = format!(
-                "Cannot complete bootstrap — missing files: {}. \
-                 Create them first, then call bootstrap_done again.",
-                missing.join(", ")
-            );
-            Ok(tool_error(
-                "bootstrap_files_missing",
-                message,
-                Some(serde_json::json!({ "missing": missing })),
-            ))
-        }
     }
 
     async fn call_provider_capabilities(

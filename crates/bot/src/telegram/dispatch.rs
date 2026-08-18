@@ -158,6 +158,7 @@ pub(crate) async fn setup_telegram(
     });
     let thinking_visibility: super::ThinkingVisibility = Arc::new(DashMap::new());
     let bg_handoff_gates: super::BgHandoffGates = Arc::new(DashMap::new());
+    let bootstrap_lock = Arc::new(tokio::sync::Mutex::new(()));
 
     // Spawn memory-alerts watcher (AuthFailed + client-flood) — only when Hindsight is configured.
     // Pass the live allowlist handle; recipients are resolved at broadcast time so
@@ -174,6 +175,7 @@ pub(crate) async fn setup_telegram(
     let worker_ctl = super::WorkerControlDeps {
         stop_tokens: Arc::clone(&stop_tokens),
         session_locks,
+        bootstrap_lock,
         bg_requests: Arc::clone(&bg_requests),
         bg_handoff_gates: Arc::clone(&bg_handoff_gates),
         thinking_visibility,

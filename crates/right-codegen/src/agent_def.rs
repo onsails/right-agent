@@ -64,11 +64,11 @@ pub const REPLY_SCHEMA_JSON: &str = r#"{
   "required": ["content", "used_skill_receipts"]
 }"#;
 
-/// JSON schema for bootstrap mode — adds `bootstrap_complete` field.
+/// JSON schema for bootstrap question and finalization modes.
 ///
-/// `bootstrap_complete` is required but the bot does NOT trust it alone —
-/// server-side file-presence check (`should_accept_bootstrap`) gates completion.
-pub const BOOTSTRAP_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"content":{"type":["string","null"]},"bootstrap_complete":{"type":"boolean"},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content","bootstrap_complete"]}"#;
+/// `bootstrap_stage` is authoritative only after the worker validates it against
+/// the durable first-missing stage. File presence still gates final completion.
+pub const BOOTSTRAP_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"content":{"type":["string","null"]},"bootstrap_complete":{"type":"boolean"},"bootstrap_stage":{"enum":["user_name","agent_name","nature","vibe","emoji","final"]},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content","bootstrap_complete","bootstrap_stage"]}"#;
 
 /// JSON schema for cron job structured output.
 ///

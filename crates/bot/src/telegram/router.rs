@@ -342,6 +342,7 @@ pub(crate) mod test_support {
             worker_ctl: super::super::WorkerControlDeps {
                 stop_tokens: Arc::new(DashMap::new()),
                 session_locks: Arc::new(DashMap::new()),
+                bootstrap_lock: Arc::new(tokio::sync::Mutex::new(())),
                 bg_requests: Arc::new(DashMap::new()),
                 bg_handoff_gates: Arc::new(DashMap::new()),
                 thinking_visibility: Arc::new(DashMap::new()),

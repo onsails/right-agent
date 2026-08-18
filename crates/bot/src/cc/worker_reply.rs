@@ -15,8 +15,9 @@ pub struct ReplyOutput {
     pub reply_to_message_id: Option<i32>,
     pub attachments: Option<Vec<OutboundAttachment>>,
     pub used_skill_receipts: Option<Vec<UsedSkillReceipt>>,
+    /// Bootstrap mode: the stage this structured response claims to handle.
+    pub bootstrap_stage: Option<String>,
     /// Bootstrap mode: `true` signals agent claims onboarding is complete.
-    /// Server-side file check (`should_accept_bootstrap`) gates actual completion.
     pub bootstrap_complete: Option<bool>,
 }
 
@@ -84,6 +85,7 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
             attachments: None,
             used_skill_receipts: None,
             bootstrap_complete: None,
+            bootstrap_stage: None,
         }
     } else {
         serde_json::from_value(result_val.clone())
@@ -351,6 +353,7 @@ mod tests {
             reply_to_message_id: None,
             attachments: None,
             used_skill_receipts: None,
+            bootstrap_stage: None,
             bootstrap_complete: None,
         }
     }

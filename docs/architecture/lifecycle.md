@@ -109,7 +109,15 @@ right bot --agent <name>  (spawned by process-compose)
   │   └─ Generate SSH config for sandbox exec
   ├─ Initial sync (blocking): `right-platform-store` deploys platform files to /sandbox/.platform/ (content-addressed + symlinks)
   ├─ Identity mirror sync: pull IDENTITY.md / SOUL.md / USER.md from /sandbox
-  │   into host agent_dir/ when present
+  │   into host agent_dir/ when present. During bootstrap, the Telegram worker
+  │   asks and records five fixed questions without Claude, then invokes Claude
+  │   once with a constant stdin instruction. The exact answers are serialized
+  │   as an explicitly untrusted JSON data block in the system prompt so answer
+  │   text cannot introduce trusted directives. Claude creates the identity files;
+  │   claimed completion is verified and finalized through a synced intent,
+  │   exact-session deactivation, synced marker removal, and intent clearing.
+  │   Failed marker removal durably restores the marker and session before
+  │   clearing intent; failed rollback leaves intent for startup recovery.
   ├─ Start background sync task (every 5 min — `right-platform-store` re-deploys /sandbox/.platform/, GC stale entries)
   ├─ Start Claude health loop:
   │   ├─ immediate startup Haiku probe with strict MCP config (separate from
@@ -148,7 +156,16 @@ Per message:
   ├─ Check if token request waiting for auth token → forward to intercept slot
   ├─ Route to worker task via DashMap<(chat_id, thread_id), Sender>
   ├─ Worker: debounce 500ms → download attachments → upload to sandbox inbox
-  ├─ Format input: single text → raw string, multi/attachments → YAML
+  ├─ If `BOOTSTRAP.md` exists, claim the onboarding conversation and ask the
+  │   fixed `user_name`, `agent_name`, `nature`, `vibe`, and `emoji` questions
+  │   in order. Record each answer and issued Telegram question atomically;
+  │   greeting-only first answers, absent issues, stale replies, and replays are
+  │   rejected. These interview turns return without invoking Claude.
+  ├─ After the fifth answer, invoke Claude once in Bootstrap mode. Stdin is a
+  │   constant identity-file instruction; all five authoritative values are a
+  │   serialized, explicitly non-instruction JSON block in the system prompt.
+  │   Otherwise format normal input as single text → raw string, multi/attachments
+  │   → YAML.
   ├─ Fail-closed sandbox gate: sandboxed agent + `SandboxHealth::Unavailable` →
   │   send cause-specific HTML message to Telegram, record affected chat, skip CC.
   │   Non-sandboxed agents pass through unconditionally.
@@ -168,7 +185,8 @@ Per message:
   │   │   limit — continuing in background…" / "🌙 Working in background…")
   │   └─ Worker returns; debounce frees, user can send next message
   ├─ Parse reply JSON with typed attachments
-  ├─ Record accepted `used_skill_receipts` into `skill_lifecycle` in data.db
+  ├─ Verify and journal-finalize Bootstrap completion after the final identity
+  │   turn; incomplete or unverifiable output leaves onboarding pending
   ├─ Send text reply to Telegram
   ├─ Download outbound attachments from sandbox outbox → send to Telegram
   └─ Periodic cleanup: hourly, configurable retention (default 7 days)
@@ -204,12 +222,17 @@ right agent backup <name> [--sandbox-only] [--include-rebuildable]
 
 right agent rebootstrap <name> [-y]
   ├─ Confirm (yes/no) unless -y
-  ├─ Stop <name>-bot via process-compose REST API (best-effort)
+  ├─ Stop <name>-bot via process-compose REST API; refuse if a configured
+  │   running process cannot be stopped safely
   ├─ Backup IDENTITY.md / SOUL.md / USER.md (host + sandbox copies)
   │   to ~/.right/backups/<agent>/rebootstrap-<YYYYMMDD-HHMM>/
-  ├─ rm -f the same files from /sandbox/ via `right-openshell` gRPC exec_in_sandbox
+  ├─ For configured sandbox mode, require OpenShell readiness, the named
+  │   sandbox, and successful `/sandbox` identity deletion; any failure returns
+  │   an error without deleting host identity or resetting sessions/answers
   ├─ Remove host copies, write fresh BOOTSTRAP.md from BOOTSTRAP_INSTRUCTIONS
   ├─ UPDATE sessions SET is_active = 0 WHERE is_active = 1 in data.db
+  ├─ Clear recorded bootstrap answers and outstanding question issues after authoritative identity deletion
+  ├─ Clear stale runtime `.bootstrap-finalization.json` after identity/session reset
   └─ Restart <name>-bot if we stopped it
 
 right agent init <name> --from-backup <path>

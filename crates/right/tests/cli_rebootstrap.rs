@@ -88,3 +88,101 @@ fn rebootstrap_errors_when_state_present_but_pc_unreachable() {
         "BOOTSTRAP.md should NOT have been written when PC is unreachable",
     );
 }
+
+#[tokio::test]
+async fn rebootstrap_unavailable_sandbox_preserves_host_sessions_and_answers() {
+    let home = tempfile::tempdir().unwrap();
+    let agent_dir = home.path().join("agents").join("sandboxed");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("agent.yaml"),
+        "sandbox:\n  mode: openshell\n  name: missing-sandbox\n  policy_file: policy.yaml\n",
+    )
+    .unwrap();
+    std::fs::write(agent_dir.join("policy.yaml"), "version: 1\n").unwrap();
+    for name in right_agent::rebootstrap::IDENTITY_FILES {
+        std::fs::write(agent_dir.join(name), format!("original {name}\n")).unwrap();
+    }
+
+    let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
+    conn.execute(
+        "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
+         VALUES (7, 3, 'preserved-session', 1)",
+        [],
+    )
+    .await
+    .unwrap();
+    right_db::bootstrap_answers::claim_owner(&conn, 7, 3)
+        .await
+        .unwrap();
+    right_db::bootstrap_answers::record_question_issue(&conn, "user_name", 7, 3, 98)
+        .await
+        .unwrap();
+    right_db::conversation::archive_message(
+        &conn,
+        right_db::conversation::ConversationMessage {
+            platform: "telegram",
+            chat_id: 7,
+            thread_id: 3,
+            message_id: Some(99),
+            sender_user_id: Some(1),
+            sender_name: Some("Ada"),
+            addressed_to_bot: true,
+            routed_to_agent: true,
+            root_session_id: Some("preserved-session"),
+            turn_id: None,
+            role: right_db::conversation::ConversationRole::User,
+            content: "Ada",
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        right_db::bootstrap_answers::record_answer(&conn, "user_name", "Ada", 7, 3, 99)
+            .await
+            .unwrap(),
+        right_db::bootstrap_answers::RecordAnswerOutcome::Recorded
+    );
+    drop(conn);
+
+    Command::cargo_bin("right")
+        .unwrap()
+        .env("PATH", "")
+        .env("OPENSHELL_MTLS_DIR", home.path().join("missing-mtls"))
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "agent",
+            "rebootstrap",
+            "sandboxed",
+            "-y",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing to reset host state"));
+
+    for name in right_agent::rebootstrap::IDENTITY_FILES {
+        assert_eq!(
+            std::fs::read_to_string(agent_dir.join(name)).unwrap(),
+            format!("original {name}\n")
+        );
+    }
+    assert!(!agent_dir.join("BOOTSTRAP.md").exists());
+
+    let conn = right_db::open_connection(&agent_dir, false).await.unwrap();
+    let active_sessions: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE is_active = 1",
+            [],
+            |row| row.get(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(active_sessions, 1);
+    assert_eq!(
+        right_db::bootstrap_answers::missing_stages(&conn, 7, 3)
+            .await
+            .unwrap(),
+        vec!["agent_name", "nature", "vibe", "emoji"]
+    );
+}

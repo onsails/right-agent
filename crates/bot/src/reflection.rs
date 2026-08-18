@@ -206,7 +206,8 @@ pub(crate) async fn reflect_on_failure(
         ctx.limits.max_turns,
         &notice_token,
     );
-    let (reply_output, _raw) = run_notice_resume(&ctx, input, &notice_token).await?;
+    let (reply_output, _raw) =
+        run_notice_resume(&ctx, input, &notice_token, NoticeResumeMode::Normal).await?;
     reply_output
         .content
         .ok_or_else(|| ReflectionError::Parse("reply content was null".into()))
@@ -263,7 +264,8 @@ pub(crate) async fn repair_null_reply(
 
     let notice_token = fetch_notice_token(&ctx.agent_dir).await?;
     let input = build_null_repair_prompt(last_assistant_text, ctx.limits.max_turns, &notice_token);
-    let (reply_output, _raw) = run_notice_resume(&ctx, input, &notice_token).await?;
+    let (reply_output, _raw) =
+        run_notice_resume(&ctx, input, &notice_token, NoticeResumeMode::Normal).await?;
     Ok(reply_output)
 }
 
@@ -278,7 +280,22 @@ async fn fetch_notice_token(agent_dir: &std::path::Path) -> Result<String, Refle
         .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))
 }
 
-/// Shared `claude -p --resume` plumbing for reflection and null-reply repair:
+#[derive(Debug, Clone)]
+enum NoticeResumeMode {
+    Normal,
+}
+
+impl NoticeResumeMode {
+    const fn schema_filename(&self) -> &'static str {
+        "reply-schema.json"
+    }
+
+    const fn prompt_mode(&self) -> crate::cc::prompt::PromptMode {
+        crate::cc::prompt::PromptMode::Normal
+    }
+}
+
+/// Shared `claude -p --resume` plumbing for reflection and repair passes:
 /// pipes a SYSTEM_NOTICE prompt via stdin, parses the final `result` stream
 /// event, and accounts the usage row. Null-tolerant: returns the parsed reply
 /// as-is together with the raw result line.
@@ -286,9 +303,10 @@ async fn run_notice_resume(
     ctx: &ReflectionContext,
     input: String,
     notice_token: &str,
+    mode: NoticeResumeMode,
 ) -> Result<(crate::cc::worker_reply::ReplyOutput, String), ReflectionError> {
-    // 1. Reply schema (reuse worker's — sandbox vs no-sandbox both read same file).
-    let schema_path = ctx.agent_dir.join(".claude").join("reply-schema.json");
+    // 1. Use the output schema matching the resumed prompt mode.
+    let schema_path = ctx.agent_dir.join(".claude").join(mode.schema_filename());
     let reply_schema = std::fs::read_to_string(&schema_path)?;
 
     // 2. MCP config path (reuse worker's helper).
@@ -349,7 +367,7 @@ async fn run_notice_resume(
         let prompt_path = format!("/tmp/right-reflection-prompt-{}.md", ctx.session_uuid);
         let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
-            crate::cc::prompt::PromptMode::Normal,
+            mode.prompt_mode(),
             "/sandbox",
             &prompt_path,
             "/sandbox",
@@ -380,7 +398,7 @@ async fn run_notice_resume(
         let prompt_path_str = prompt_path.to_string_lossy();
         let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
-            crate::cc::prompt::PromptMode::Normal,
+            mode.prompt_mode(),
             &agent_dir_str,
             &prompt_path_str,
             &agent_dir_str,

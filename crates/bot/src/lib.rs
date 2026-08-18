@@ -614,6 +614,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         None
     };
 
+    // Complete or reject any crash-interrupted bootstrap finalization before
+    // Telegram dispatch is constructed. Recovery verifies authoritative
+    // identity state and fails startup rather than exposing false Normal mode.
+    telegram::worker::recover_bootstrap_finalization(&agent_dir, resolved_sandbox.as_deref())
+        .await
+        .map_err(|error| miette::miette!("failed to recover bootstrap finalization: {error:#}"))?;
+
     // Drain providers-reconcile signals from the config watcher (no restart path).
     {
         // The watcher has already advanced past this change, so there is no

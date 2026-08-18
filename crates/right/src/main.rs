@@ -5970,16 +5970,6 @@ async fn cmd_agent_rebootstrap(home: &Path, agent_name: &str, yes: bool) -> miet
             .noun("sessions")
             .verb(format!("{} deactivated", report.sessions_deactivated)),
     );
-    if let right_agent::rebootstrap::SandboxStatus::Skipped(reason) = &report.sandbox_status {
-        recap_block.push(
-            status(Glyph::Warn)
-                .noun("sandbox cleanup")
-                .verb(format!("skipped ({reason})"))
-                .fix(format!(
-                    "re-run `right agent rebootstrap {agent_name}` once openshell is healthy"
-                )),
-        );
-    }
     println!("{}", recap_block.render(theme));
     println!("{}", Rail::blank(theme));
 

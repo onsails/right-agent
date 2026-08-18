@@ -7,6 +7,7 @@
 
 #![warn(unreachable_pub)]
 
+pub mod bootstrap_answers;
 mod bootstrap_lock;
 pub mod connection;
 pub mod conversation;

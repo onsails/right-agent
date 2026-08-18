@@ -4,6 +4,8 @@
 //! live infrastructure and are covered by code review pattern only.
 
 use std::collections::VecDeque;
+use std::future::Future;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -14,6 +16,8 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use frankenstein::types::ChatAction;
 use right_agent::agent::allowlist::ResponseMode;
+use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
@@ -28,8 +32,7 @@ use crate::cc::worker_reply::{
 use crate::reflection::FailureKind;
 
 use super::session::{
-    SessionRow, create_session, deactivate_current, get_active_session, touch_session,
-    truncate_label,
+    SessionRow, activate_session, create_session, get_active_session, touch_session, truncate_label,
 };
 
 /// Session key: `(chat_id, effective_thread_id)`.
@@ -310,6 +313,8 @@ pub struct WorkerContext {
     /// Per-main-session async mutex map. Worker acquires before `claude -p --resume <main>`;
     /// delivery acquires before its own `--resume`. Closes the TOCTOU race on session JSONL.
     pub session_locks: super::SessionLocks,
+    /// Per-agent gate serializing bootstrap verification and finalization.
+    pub bootstrap_lock: Arc<tokio::sync::Mutex<()>>,
     /// Per-(chat, thread) idle-compaction debounce timers.
     pub compact_timers: super::CompactTimers,
     /// Per-(chat, thread) flag set by the bg callback. Worker checks after kill+wait
@@ -349,42 +354,547 @@ pub struct WorkerContext {
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
-async fn should_accept_bootstrap_for_worker(ctx: &WorkerContext) -> bool {
-    should_accept_bootstrap_for_paths(
+#[derive(Debug)]
+enum BootstrapVerification {
+    Verified,
+    AnswersMissing,
+    IdentityMissing,
+    InfrastructureError(anyhow::Error),
+}
+
+async fn verify_bootstrap_for_worker(
+    ctx: &WorkerContext,
+    chat_id: i64,
+    thread_id: i64,
+) -> BootstrapVerification {
+    let conn = match right_db::open_connection(&ctx.agent_dir, false).await {
+        Ok(conn) => conn,
+        Err(error) => {
+            return BootstrapVerification::InfrastructureError(
+                anyhow::Error::from(error).context("open database to verify bootstrap answers"),
+            );
+        }
+    };
+    verify_bootstrap_for_paths(
+        &conn,
         &ctx.agent_dir,
-        &ctx.agent_name,
-        ctx.ssh_config_path.as_deref(),
         ctx.resolved_sandbox.as_deref(),
+        chat_id,
+        thread_id,
     )
     .await
 }
 
-async fn should_accept_bootstrap_for_paths(
+async fn probe_sandbox_bootstrap_identity(sandbox_name: String) -> miette::Result<(String, i32)> {
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+        status => {
+            return Err(miette::miette!(
+                "OpenShell preflight not ready for bootstrap identity probe: {status:?}"
+            ));
+        }
+    };
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
+    let sandbox_id =
+        right_openshell::openshell::resolve_sandbox_id(&mut client, &sandbox_name).await?;
+    right_openshell::openshell::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &[
+            "sh",
+            "-c",
+            r#"for path do if ! test -f "$path"; then printf missing; exit 0; fi; done; printf verified"#,
+            "bootstrap-identity-probe",
+            "/sandbox/IDENTITY.md",
+            "/sandbox/SOUL.md",
+            "/sandbox/USER.md",
+        ],
+        right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+    )
+    .await
+}
+
+async fn verify_bootstrap_for_paths(
+    conn: &right_db::Connection,
     agent_dir: &Path,
-    agent_name: &str,
-    ssh_config_path: Option<&Path>,
     resolved_sandbox: Option<&str>,
-) -> bool {
-    match (ssh_config_path, resolved_sandbox) {
-        (Some(_), Some(sandbox_name)) => {
-            match right_agent::identity_mirror::sync_identity_mirror_from_sandbox(
+    chat_id: i64,
+    thread_id: i64,
+) -> BootstrapVerification {
+    match right_db::bootstrap_answers::missing_stages(conn, chat_id, thread_id).await {
+        Ok(missing) if !missing.is_empty() => BootstrapVerification::AnswersMissing,
+        Ok(_) => {
+            verify_bootstrap_for_paths_with_probe(
                 agent_dir,
-                sandbox_name,
+                resolved_sandbox,
+                probe_sandbox_bootstrap_identity,
             )
             .await
-            {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::warn!(
-                        agent = %agent_name,
-                        sandbox = %sandbox_name,
-                        "bootstrap identity mirror sync failed: {e:#}"
-                    );
-                    false
+        }
+        Err(error) => BootstrapVerification::InfrastructureError(
+            anyhow::Error::from(error).context("read recorded bootstrap answers"),
+        ),
+    }
+}
+
+async fn verify_bootstrap_for_paths_with_probe<P, Fut>(
+    agent_dir: &Path,
+    resolved_sandbox: Option<&str>,
+    probe: P,
+) -> BootstrapVerification
+where
+    P: FnOnce(String) -> Fut,
+    Fut: Future<Output = miette::Result<(String, i32)>>,
+{
+    match resolved_sandbox {
+        Some(sandbox_name) => match probe(sandbox_name.to_owned()).await {
+            Ok((output, 0)) if output == "missing" => BootstrapVerification::IdentityMissing,
+            Ok((output, 0)) if output == "verified" => {
+                match right_agent::identity_mirror::sync_identity_mirror_from_sandbox(
+                    agent_dir,
+                    sandbox_name,
+                )
+                .await
+                {
+                    Ok(()) if should_accept_bootstrap(agent_dir) => BootstrapVerification::Verified,
+                    Ok(()) => BootstrapVerification::IdentityMissing,
+                    Err(error) => BootstrapVerification::InfrastructureError(anyhow::anyhow!(
+                        "synchronize bootstrap identity mirror from sandbox: {error:#}"
+                    )),
                 }
             }
+            Ok((output, exit_code)) if exit_code != 0 => {
+                BootstrapVerification::InfrastructureError(anyhow::anyhow!(
+                    "sandbox identity probe exited with code {exit_code}: {output:?}"
+                ))
+            }
+            Ok((output, _)) => BootstrapVerification::InfrastructureError(anyhow::anyhow!(
+                "sandbox identity probe returned unexpected output: {output:?}"
+            )),
+            Err(error) => BootstrapVerification::InfrastructureError(anyhow::anyhow!(
+                "probe sandbox bootstrap identity files: {error:#}"
+            )),
+        },
+        None => {
+            for filename in right_agent::identity_mirror::IDENTITY_MIRROR_FILES {
+                match std::fs::metadata(agent_dir.join(filename)) {
+                    Ok(metadata) if metadata.is_file() => {}
+                    Ok(_) => return BootstrapVerification::IdentityMissing,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return BootstrapVerification::IdentityMissing;
+                    }
+                    Err(error) => {
+                        return BootstrapVerification::InfrastructureError(
+                            anyhow::Error::from(error).context(format!(
+                                "inspect bootstrap identity file {}",
+                                agent_dir.join(filename).display()
+                            )),
+                        );
+                    }
+                }
+            }
+            BootstrapVerification::Verified
         }
-        _ => should_accept_bootstrap(agent_dir),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapFinalizationIntent {
+    chat_id: i64,
+    thread_id: i64,
+    root_session_id: String,
+}
+
+impl BootstrapFinalizationIntent {
+    fn new(chat_id: i64, thread_id: i64, root_session_id: &str) -> anyhow::Result<Self> {
+        if root_session_id.is_empty() {
+            anyhow::bail!("bootstrap finalization root session id is empty");
+        }
+        Ok(Self {
+            chat_id,
+            thread_id,
+            root_session_id: root_session_id.to_owned(),
+        })
+    }
+}
+
+fn bootstrap_finalization_intent_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join(right_agent::rebootstrap::BOOTSTRAP_FINALIZATION_INTENT_FILE)
+}
+
+fn sync_agent_directory(agent_dir: &Path, operation: &str) -> anyhow::Result<()> {
+    std::fs::File::open(agent_dir)
+        .with_context(|| {
+            format!(
+                "open agent directory {} to {operation}",
+                agent_dir.display()
+            )
+        })?
+        .sync_all()
+        .with_context(|| {
+            format!(
+                "sync agent directory {} to {operation}",
+                agent_dir.display()
+            )
+        })
+}
+
+#[cfg(test)]
+fn write_bootstrap_finalization_intent(
+    agent_dir: &Path,
+    intent: &BootstrapFinalizationIntent,
+) -> anyhow::Result<()> {
+    write_bootstrap_finalization_intent_with_directory_sync(
+        agent_dir,
+        intent,
+        &mut sync_agent_directory,
+    )
+}
+
+fn write_bootstrap_finalization_intent_with_directory_sync<F>(
+    agent_dir: &Path,
+    intent: &BootstrapFinalizationIntent,
+    directory_sync: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&Path, &str) -> anyhow::Result<()> + ?Sized,
+{
+    let path = bootstrap_finalization_intent_path(agent_dir);
+    let payload = serde_json::to_vec(intent).context("serialize bootstrap finalization intent")?;
+    let mut temporary = NamedTempFile::new_in(agent_dir).with_context(|| {
+        format!(
+            "create bootstrap finalization temp file in {}",
+            agent_dir.display()
+        )
+    })?;
+    temporary
+        .write_all(&payload)
+        .context("write bootstrap finalization intent")?;
+    temporary
+        .as_file()
+        .sync_all()
+        .context("sync bootstrap finalization intent")?;
+    temporary
+        .persist(&path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("publish bootstrap finalization intent {}", path.display()))?;
+    directory_sync(agent_dir, "publish bootstrap finalization intent")
+}
+
+fn clear_bootstrap_finalization_intent(agent_dir: &Path) -> anyhow::Result<()> {
+    clear_bootstrap_finalization_intent_with_directory_sync(agent_dir, &mut sync_agent_directory)
+}
+
+fn clear_bootstrap_finalization_intent_with_directory_sync<F>(
+    agent_dir: &Path,
+    directory_sync: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&Path, &str) -> anyhow::Result<()> + ?Sized,
+{
+    let path = bootstrap_finalization_intent_path(agent_dir);
+    match std::fs::remove_file(&path) {
+        Ok(()) => directory_sync(agent_dir, "clear bootstrap finalization intent"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("clear bootstrap finalization intent {}", path.display())),
+    }
+}
+
+fn read_bootstrap_finalization_intent(
+    agent_dir: &Path,
+) -> anyhow::Result<Option<BootstrapFinalizationIntent>> {
+    let path = bootstrap_finalization_intent_path(agent_dir);
+    let payload = match std::fs::read(&path) {
+        Ok(payload) => payload,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read bootstrap finalization intent {}", path.display()));
+        }
+    };
+    let intent: BootstrapFinalizationIntent = match serde_json::from_slice(&payload) {
+        Ok(intent) => intent,
+        Err(error) => {
+            restore_bootstrap_marker(agent_dir).with_context(|| {
+                format!(
+                    "restore bootstrap marker after malformed finalization intent {}: {error:#}",
+                    path.display()
+                )
+            })?;
+            return Err(error).with_context(|| {
+                format!("parse bootstrap finalization intent {}", path.display())
+            });
+        }
+    };
+    if intent.root_session_id.is_empty() {
+        restore_bootstrap_marker(agent_dir)?;
+        anyhow::bail!(
+            "bootstrap finalization intent {} has an empty root session id",
+            path.display()
+        );
+    }
+    Ok(Some(intent))
+}
+
+fn remove_bootstrap_marker_if_present(agent_dir: &Path) -> anyhow::Result<()> {
+    remove_bootstrap_marker_if_present_with_directory_sync(agent_dir, &mut sync_agent_directory)
+}
+
+fn remove_bootstrap_marker_if_present_with_directory_sync<F>(
+    agent_dir: &Path,
+    directory_sync: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&Path, &str) -> anyhow::Result<()> + ?Sized,
+{
+    let path = agent_dir.join("BOOTSTRAP.md");
+    match std::fs::remove_file(&path) {
+        Ok(()) => directory_sync(agent_dir, "remove bootstrap marker"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+async fn find_bootstrap_session_id(
+    conn: &right_db::Connection,
+    intent: &BootstrapFinalizationIntent,
+) -> anyhow::Result<Option<i64>> {
+    use right_db::OptionalExtension as _;
+    conn.query_row(
+        "SELECT id FROM sessions
+         WHERE chat_id = ?1 AND thread_id = ?2 AND root_session_id = ?3
+         ORDER BY id DESC LIMIT 1",
+        right_db::params![
+            intent.chat_id,
+            intent.thread_id,
+            intent.root_session_id.as_str()
+        ],
+        |row| row.get(0),
+    )
+    .await
+    .optional()
+    .context("find session named by bootstrap finalization intent")
+}
+
+async fn restore_bootstrap_continuity(
+    agent_dir: &Path,
+    conn: &right_db::Connection,
+    intent: &BootstrapFinalizationIntent,
+) -> anyhow::Result<()> {
+    restore_bootstrap_marker(agent_dir)?;
+    let session_id = find_bootstrap_session_id(conn, intent)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("bootstrap finalization intent session row is missing"))?;
+    activate_session(conn, session_id)
+        .await
+        .context("reactivate bootstrap session named by finalization intent")
+}
+
+/// Recover an interrupted verified-bootstrap commit before Telegram message
+/// dispatch begins. The durable intent is authoritative only when the scoped
+/// five-answer interview and identity files still verify; otherwise bootstrap
+/// continuity is restored and startup fails rather than entering Normal mode.
+pub(crate) async fn recover_bootstrap_finalization(
+    agent_dir: &Path,
+    resolved_sandbox: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(intent) = read_bootstrap_finalization_intent(agent_dir)? else {
+        return Ok(());
+    };
+    let conn = right_db::open_connection(agent_dir, false)
+        .await
+        .context("open lifecycle database for bootstrap finalization recovery")?;
+    match verify_bootstrap_for_paths(
+        &conn,
+        agent_dir,
+        resolved_sandbox,
+        intent.chat_id,
+        intent.thread_id,
+    )
+    .await
+    {
+        BootstrapVerification::Verified => {
+            let session_id = match find_bootstrap_session_id(&conn, &intent).await? {
+                Some(session_id) => session_id,
+                None => {
+                    restore_bootstrap_marker(agent_dir)?;
+                    anyhow::bail!(
+                        "bootstrap finalization intent session row is missing; bootstrap marker was restored"
+                    );
+                }
+            };
+            deactivate_session_if_active(
+                &conn,
+                intent.chat_id,
+                intent.thread_id,
+                &intent.root_session_id,
+            )
+            .await
+            .context("deactivate bootstrap session during finalization recovery")?;
+            remove_bootstrap_marker_if_present(agent_dir)?;
+            clear_bootstrap_finalization_intent(agent_dir)?;
+            tracing::info!(
+                chat_id = intent.chat_id,
+                thread_id = intent.thread_id,
+                root_session_id = %intent.root_session_id,
+                session_id,
+                "recovered interrupted bootstrap finalization"
+            );
+            Ok(())
+        }
+        BootstrapVerification::AnswersMissing => {
+            restore_bootstrap_continuity(agent_dir, &conn, &intent).await?;
+            anyhow::bail!(
+                "bootstrap finalization recovery refused completion because interview answers are missing; bootstrap continuity was restored"
+            )
+        }
+        BootstrapVerification::IdentityMissing => {
+            restore_bootstrap_continuity(agent_dir, &conn, &intent).await?;
+            anyhow::bail!(
+                "bootstrap finalization recovery refused completion because identity files are missing; bootstrap continuity was restored"
+            )
+        }
+        BootstrapVerification::InfrastructureError(error) => {
+            restore_bootstrap_continuity(agent_dir, &conn, &intent).await?;
+            Err(error).context(
+                "bootstrap finalization recovery could not verify identity files; bootstrap continuity was restored",
+            )
+        }
+    }
+}
+
+fn restore_bootstrap_marker(agent_dir: &Path) -> anyhow::Result<()> {
+    restore_bootstrap_marker_with_directory_sync(agent_dir, &mut sync_agent_directory)
+}
+
+fn restore_bootstrap_marker_with_directory_sync<F>(
+    agent_dir: &Path,
+    directory_sync: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&Path, &str) -> anyhow::Result<()> + ?Sized,
+{
+    let bootstrap_path = agent_dir.join("BOOTSTRAP.md");
+    match std::fs::metadata(&bootstrap_path) {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => anyhow::bail!(
+            "bootstrap marker path is not a file: {}",
+            bootstrap_path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut marker = std::fs::File::create(&bootstrap_path).with_context(|| {
+                format!("restore bootstrap marker {}", bootstrap_path.display())
+            })?;
+            marker
+                .write_all(right_codegen::BOOTSTRAP_INSTRUCTIONS.as_bytes())
+                .with_context(|| format!("write bootstrap marker {}", bootstrap_path.display()))?;
+            marker
+                .sync_all()
+                .with_context(|| format!("sync bootstrap marker {}", bootstrap_path.display()))?;
+            directory_sync(agent_dir, "restore bootstrap marker")
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("inspect bootstrap marker {}", bootstrap_path.display())),
+    }
+}
+
+async fn finish_verified_bootstrap(
+    ctx: &WorkerContext,
+    chat_id: i64,
+    thread_id: i64,
+    root_session_id: &str,
+) -> anyhow::Result<()> {
+    let conn = right_db::open_connection(&ctx.agent_dir, false)
+        .await
+        .context("open lifecycle database after bootstrap")?;
+    finish_verified_bootstrap_with_connection(
+        &ctx.agent_dir,
+        &conn,
+        chat_id,
+        thread_id,
+        root_session_id,
+    )
+    .await
+}
+
+async fn finish_verified_bootstrap_with_connection(
+    agent_dir: &Path,
+    conn: &right_db::Connection,
+    chat_id: i64,
+    thread_id: i64,
+    root_session_id: &str,
+) -> anyhow::Result<()> {
+    finish_verified_bootstrap_with_connection_and_directory_sync(
+        agent_dir,
+        conn,
+        chat_id,
+        thread_id,
+        root_session_id,
+        &mut sync_agent_directory,
+    )
+    .await
+}
+
+async fn finish_verified_bootstrap_with_connection_and_directory_sync<F>(
+    agent_dir: &Path,
+    conn: &right_db::Connection,
+    chat_id: i64,
+    thread_id: i64,
+    root_session_id: &str,
+    directory_sync: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&Path, &str) -> anyhow::Result<()> + ?Sized,
+{
+    let first_missing_stage =
+        right_db::bootstrap_answers::first_missing_stage(conn, chat_id, thread_id)
+            .await
+            .context("recheck recorded bootstrap answers before finalization")?;
+    if let Some(stage) = first_missing_stage {
+        anyhow::bail!("bootstrap stage `{stage}` is still missing before finalization");
+    }
+
+    let session = get_active_session(conn, chat_id, thread_id)
+        .await
+        .context("read active bootstrap session before finalization")?
+        .filter(|session| session.root_session_id == root_session_id)
+        .ok_or_else(|| anyhow::anyhow!("completed bootstrap session is no longer active"))?;
+    let intent = BootstrapFinalizationIntent::new(chat_id, thread_id, root_session_id)?;
+    write_bootstrap_finalization_intent_with_directory_sync(agent_dir, &intent, directory_sync)?;
+
+    let deactivated = deactivate_session_if_active(conn, chat_id, thread_id, root_session_id)
+        .await
+        .context("deactivate completed bootstrap session")?;
+    if !deactivated {
+        clear_bootstrap_finalization_intent_with_directory_sync(agent_dir, directory_sync)?;
+        anyhow::bail!("completed bootstrap session is no longer active");
+    }
+
+    if let Err(removal_error) =
+        remove_bootstrap_marker_if_present_with_directory_sync(agent_dir, directory_sync)
+    {
+        restore_bootstrap_marker_with_directory_sync(agent_dir, directory_sync).with_context(
+            || format!("restore bootstrap marker after removal failed: {removal_error:#}"),
+        )?;
+        activate_session(conn, session.id).await.with_context(|| {
+            format!("reactivate bootstrap session after marker removal failed: {removal_error:#}")
+        })?;
+        clear_bootstrap_finalization_intent_with_directory_sync(agent_dir, directory_sync)?;
+        return Err(removal_error);
+    }
+    clear_bootstrap_finalization_intent_with_directory_sync(agent_dir, directory_sync)
+}
+
+fn bootstrap_pending_output(message: &str) -> ReplyOutput {
+    ReplyOutput {
+        content: Some(message.to_owned()),
+        reply_to_message_id: None,
+        attachments: None,
+        used_skill_receipts: None,
+        bootstrap_stage: None,
+        bootstrap_complete: Some(false),
     }
 }
 
@@ -1196,8 +1706,367 @@ fn routed_message_ids(batch: &[DebounceMsg]) -> Vec<i32> {
     batch.iter().map(|message| message.message_id).collect()
 }
 
-fn assistant_text_was_delivered(caption_consumed: bool, sent_any_text_message: bool) -> bool {
-    caption_consumed || sent_any_text_message
+const BOOTSTRAP_CONFLICT_MESSAGE: &str =
+    "Onboarding is already in progress in another conversation.";
+const BOOTSTRAP_QUESTION_INPUT: &str =
+    "Begin or continue onboarding by asking the required stage question.";
+const BOOTSTRAP_FINAL_INPUT: &str = "Finalize onboarding from the authoritative bootstrap state.";
+/// Total stateless question invocations allowed per delivery attempt. Each
+/// retry is a fresh single-turn model call; the bootstrap lock and typing
+/// indicator are held for all of them, so the bound stays small.
+const BOOTSTRAP_QUESTION_ATTEMPTS: u32 = 3;
+
+fn bootstrap_prompt_state_from_answers(
+    stage: &'static str,
+    answers: Vec<right_db::bootstrap_answers::RecordedAnswer>,
+) -> crate::cc::prompt::BootstrapPromptState {
+    let mut by_stage = answers
+        .into_iter()
+        .map(|answer| (answer.stage, answer.answer))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    crate::cc::prompt::BootstrapPromptState {
+        stage,
+        user_name: by_stage.remove("user_name"),
+        agent_name: by_stage.remove("agent_name"),
+        nature: by_stage.remove("nature"),
+        vibe: by_stage.remove("vibe"),
+        emoji: by_stage.remove("emoji"),
+    }
+}
+
+fn build_effective_input(
+    prompt_mode: &crate::cc::prompt::PromptMode,
+    input: &str,
+    volatile_prefix: Option<&str>,
+) -> String {
+    match prompt_mode {
+        crate::cc::prompt::PromptMode::BootstrapQuestion(_) => BOOTSTRAP_QUESTION_INPUT.to_owned(),
+        crate::cc::prompt::PromptMode::BootstrapFinal(_) => BOOTSTRAP_FINAL_INPUT.to_owned(),
+        crate::cc::prompt::PromptMode::Normal | crate::cc::prompt::PromptMode::Cron => {
+            match volatile_prefix {
+                Some(prefix) => format!("{prefix}\n\n{input}"),
+                None => input.to_owned(),
+            }
+        }
+    }
+}
+
+fn validate_bootstrap_output(
+    output: &ReplyOutput,
+    expected_stage: &'static str,
+    final_mode: bool,
+) -> anyhow::Result<String> {
+    let actual_stage = output.bootstrap_stage.as_deref();
+    if actual_stage != Some(expected_stage) {
+        anyhow::bail!(
+            "bootstrap model returned stage {:?}; expected `{expected_stage}`",
+            actual_stage
+        );
+    }
+    if output.bootstrap_complete != Some(final_mode) {
+        anyhow::bail!(
+            "bootstrap model returned completion {:?}; expected {final_mode}",
+            output.bootstrap_complete
+        );
+    }
+    let content = output
+        .content
+        .as_deref()
+        .filter(|content| !content.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("bootstrap model returned empty content"))?;
+    Ok(content.to_owned())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BootstrapInterviewOutcome {
+    Handled,
+    Final(crate::cc::prompt::BootstrapPromptState),
+}
+
+const BOOTSTRAP_QUESTION_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Question-mode invocation: single stateless turn with no tools and no MCP
+/// surface.
+fn bootstrap_question_invocation(
+    schema: String,
+    model: Option<String>,
+    debug_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> crate::cc::invocation::ClaudeInvocation {
+    crate::cc::invocation::ClaudeInvocation {
+        mcp_config_path: None,
+        json_schema: Some(schema),
+        output_format: crate::cc::invocation::OutputFormat::Json,
+        model,
+        max_budget_usd: None,
+        max_turns: Some(1),
+        resume_session_id: None,
+        new_session_id: None,
+        fork_session: false,
+        allowed_tools: vec![],
+        disallowed_tools: vec![],
+        extra_args: {
+            let mut args = crate::cc::invocation::disable_all_tools_args();
+            args.push("--no-session-persistence".to_owned());
+            args
+        },
+        prompt: Some(BOOTSTRAP_QUESTION_INPUT.to_owned()),
+        debug_flag,
+    }
+}
+
+async fn invoke_bootstrap_question_model(
+    ctx: &WorkerContext,
+    state: crate::cc::prompt::BootstrapPromptState,
+) -> anyhow::Result<ReplyOutput> {
+    let schema_path = ctx.agent_dir.join(".claude/bootstrap-schema.json");
+    let schema = std::fs::read_to_string(&schema_path)
+        .with_context(|| format!("read bootstrap schema {}", schema_path.display()))?;
+    let invocation = bootstrap_question_invocation(
+        schema,
+        crate::snapshot_model(&ctx.model),
+        Some(Arc::clone(&ctx.debug)),
+    );
+    let claude_args = invocation.into_args();
+    let (sandbox_mode, home_dir) = if ctx.ssh_config_path.is_some() {
+        (
+            right_agent_config::SandboxMode::Openshell,
+            "/sandbox".to_owned(),
+        )
+    } else {
+        (
+            right_agent_config::SandboxMode::None,
+            ctx.agent_dir.to_string_lossy().into_owned(),
+        )
+    };
+    let base_prompt =
+        right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
+    let prompt_mode = crate::cc::prompt::PromptMode::BootstrapQuestion(state);
+    let mut command = if let Some(ssh_config) = &ctx.ssh_config_path {
+        let sandbox = ctx
+            .resolved_sandbox
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("sandbox name is unresolved for bootstrap question"))?;
+        let mut script = crate::cc::prompt::build_prompt_assembly_script(
+            &base_prompt,
+            prompt_mode,
+            "/sandbox",
+            "/tmp/right-bootstrap-question-prompt.md",
+            "/sandbox",
+            &claude_args,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
+            script = format!(
+                "export CLAUDE_CODE_OAUTH_TOKEN='{}'\n{script}",
+                token.replace('\'', "'\\''")
+            );
+        }
+        let mut command = tokio::process::Command::new("ssh");
+        command
+            .arg("-F")
+            .arg(ssh_config)
+            .arg(right_openshell::openshell::ssh_host_for_sandbox(sandbox))
+            .arg("--")
+            .arg(script);
+        command
+    } else {
+        let agent_dir = ctx.agent_dir.to_string_lossy();
+        let prompt_path = ctx.agent_dir.join(".claude/bootstrap-question-prompt.md");
+        let script = crate::cc::prompt::build_prompt_assembly_script(
+            &base_prompt,
+            prompt_mode,
+            &agent_dir,
+            &prompt_path.to_string_lossy(),
+            &agent_dir,
+            &claude_args,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let mut command = tokio::process::Command::new("bash");
+        command.arg("-c").arg(script).current_dir(&ctx.agent_dir);
+        command
+            .env("HOME", &ctx.agent_dir)
+            .env("USE_BUILTIN_RIPGREP", "0");
+        if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
+            command.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+        }
+        command
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = tokio::time::timeout(BOOTSTRAP_QUESTION_TIMEOUT, command.output())
+        .await
+        .context("bootstrap question model timed out")?
+        .context("run bootstrap question model")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "bootstrap question model exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout =
+        String::from_utf8(output.stdout).context("bootstrap question output was not UTF-8")?;
+    parse_reply_output(&stdout)
+        .map(|(output, _)| output)
+        .map_err(anyhow::Error::msg)
+        .context("parse bootstrap question model output")
+}
+
+async fn deliver_bootstrap_question<Model, ModelFut, Send, SendFut>(
+    conn: &right_db::Connection,
+    chat_id: i64,
+    thread_id: i64,
+    stage: &'static str,
+    model: &mut Model,
+    send: &mut Send,
+) -> anyhow::Result<()>
+where
+    Model: FnMut(crate::cc::prompt::BootstrapPromptState) -> ModelFut,
+    ModelFut: Future<Output = anyhow::Result<ReplyOutput>>,
+    Send: FnMut(String) -> SendFut,
+    SendFut: Future<Output = anyhow::Result<i32>>,
+{
+    let answers = right_db::bootstrap_answers::recorded_answers(conn, chat_id, thread_id)
+        .await
+        .context("load authoritative bootstrap answers for question")?;
+    // Retry model failures and shape rejections only — never a delivered
+    // question. `state` is rebuilt from the same authoritative answers for
+    // every attempt, so each call is stateless and identical.
+    let state = bootstrap_prompt_state_from_answers(stage, answers);
+    let mut last_error: Option<anyhow::Error> = None;
+    let mut question: Option<String> = None;
+    for attempt in 1..=BOOTSTRAP_QUESTION_ATTEMPTS {
+        match model(state.clone())
+            .await
+            .and_then(|output| validate_bootstrap_output(&output, stage, false))
+        {
+            Ok(validated) => {
+                question = Some(validated);
+                break;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    stage,
+                    attempt,
+                    max_attempts = BOOTSTRAP_QUESTION_ATTEMPTS,
+                    "bootstrap question attempt failed: {error:#}"
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    let question = match question {
+        Some(question) => question,
+        None => {
+            let error = last_error
+                .unwrap_or_else(|| anyhow::anyhow!("bootstrap question produced no attempt"));
+            return Err(error).with_context(|| {
+                format!(
+                    "bootstrap question for stage `{stage}` failed after {BOOTSTRAP_QUESTION_ATTEMPTS} attempts"
+                )
+            });
+        }
+    };
+    let assistant_message_id = send(question).await?;
+    match right_db::bootstrap_answers::record_question_issue(
+        conn,
+        stage,
+        chat_id,
+        thread_id,
+        assistant_message_id,
+    )
+    .await
+    .context("record model bootstrap question issue")?
+    {
+        right_db::bootstrap_answers::RecordQuestionIssueOutcome::Recorded => Ok(()),
+        outcome => anyhow::bail!("bootstrap question issue rejected after delivery: {outcome:?}"),
+    }
+}
+
+async fn run_bootstrap_interview_turn<Model, ModelFut, Send, SendFut>(
+    conn: &right_db::Connection,
+    chat_id: i64,
+    thread_id: i64,
+    messages: &[(i32, &str)],
+    mut model: Model,
+    mut send: Send,
+) -> anyhow::Result<BootstrapInterviewOutcome>
+where
+    Model: FnMut(crate::cc::prompt::BootstrapPromptState) -> ModelFut,
+    ModelFut: Future<Output = anyhow::Result<ReplyOutput>>,
+    Send: FnMut(String) -> SendFut,
+    SendFut: Future<Output = anyhow::Result<i32>>,
+{
+    let scope = right_db::bootstrap_answers::BootstrapOwner { chat_id, thread_id };
+    match right_db::bootstrap_answers::claim_owner(conn, chat_id, thread_id)
+        .await
+        .context("claim bootstrap interview owner")?
+    {
+        right_db::bootstrap_answers::ClaimOwnerOutcome::Claimed => {}
+        right_db::bootstrap_answers::ClaimOwnerOutcome::AlreadyOwned(owner) if owner != scope => {
+            send(BOOTSTRAP_CONFLICT_MESSAGE.to_owned()).await?;
+            return Ok(BootstrapInterviewOutcome::Handled);
+        }
+        right_db::bootstrap_answers::ClaimOwnerOutcome::AlreadyOwned(_) => {}
+    }
+
+    let Some(stage) = right_db::bootstrap_answers::first_missing_stage(conn, chat_id, thread_id)
+        .await
+        .context("load current bootstrap interview stage")?
+    else {
+        let answers = right_db::bootstrap_answers::recorded_answers(conn, chat_id, thread_id)
+            .await
+            .context("load completed bootstrap answers")?;
+        return Ok(BootstrapInterviewOutcome::Final(
+            bootstrap_prompt_state_from_answers("final", answers),
+        ));
+    };
+    let issued_stage = right_db::bootstrap_answers::issued_question_stage(conn, chat_id, thread_id)
+        .await
+        .context("load issued bootstrap question stage")?;
+    if messages.len() != 1 || issued_stage != Some(stage) {
+        deliver_bootstrap_question(conn, chat_id, thread_id, stage, &mut model, &mut send).await?;
+        return Ok(BootstrapInterviewOutcome::Handled);
+    }
+
+    let (source_message_id, answer) = messages[0];
+    let next_stage = match right_db::bootstrap_answers::record_current_answer(
+        conn,
+        answer,
+        chat_id,
+        thread_id,
+        source_message_id,
+    )
+    .await
+    .context("record current bootstrap answer")?
+    {
+        right_db::bootstrap_answers::RecordCurrentAnswerOutcome::Recorded {
+            next_stage, ..
+        } => next_stage,
+        outcome => anyhow::bail!("current bootstrap answer rejected: {outcome:?}"),
+    };
+    if let Some(next_stage) = next_stage {
+        deliver_bootstrap_question(conn, chat_id, thread_id, next_stage, &mut model, &mut send)
+            .await?;
+        return Ok(BootstrapInterviewOutcome::Handled);
+    }
+
+    let answers = right_db::bootstrap_answers::recorded_answers(conn, chat_id, thread_id)
+        .await
+        .context("load completed bootstrap answers")?;
+    Ok(BootstrapInterviewOutcome::Final(
+        bootstrap_prompt_state_from_answers("final", answers),
+    ))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1329,16 +2198,17 @@ async fn deactivate_session_if_active(
     chat_id: i64,
     eff_thread_id: i64,
     root_session_id: &str,
-) -> Result<(), right_db::DbError> {
-    conn.execute(
-        "UPDATE sessions
-         SET is_active = 0
-         WHERE chat_id = ?1 AND thread_id = ?2
-           AND root_session_id = ?3 AND is_active = 1",
-        right_db::params![chat_id, eff_thread_id, root_session_id],
-    )
-    .await?;
-    Ok(())
+) -> Result<bool, right_db::DbError> {
+    let changed = conn
+        .execute(
+            "UPDATE sessions
+             SET is_active = 0
+             WHERE chat_id = ?1 AND thread_id = ?2
+               AND root_session_id = ?3 AND is_active = 1",
+            right_db::params![chat_id, eff_thread_id, root_session_id],
+        )
+        .await?;
+    Ok(changed != 0)
 }
 
 async fn cleanup_prepared_first_call_session(
@@ -1644,7 +2514,95 @@ pub fn spawn_worker(
             // pending compaction so it cannot fire during this turn.
             crate::idle_compaction::cancel(&ctx.compact_timers, chat_id, eff_thread_id);
 
-            // Pass first message text for session label (truncated 60 chars).
+            let mut bootstrap_prompt_state = None;
+            let bootstrap_guard = if ctx.agent_dir.join("BOOTSTRAP.md").exists() {
+                let guard = ctx.bootstrap_lock.lock().await;
+                if ctx.agent_dir.join("BOOTSTRAP.md").exists() {
+                    let conn = match right_db::open_connection(&ctx.agent_dir, false).await {
+                        Ok(conn) => conn,
+                        Err(error) => {
+                            tracing::error!(
+                                ?key,
+                                "open database for bootstrap interview: {error:#}"
+                            );
+                            cancel_token.cancel();
+                            typing_task.await.ok();
+                            let _ = send_tg(
+                                &ctx.bot,
+                                tg_chat_id,
+                                eff_thread_id,
+                                "Bootstrap is still pending because the interview state could not be updated. Please try again.",
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    let messages = batch
+                        .iter()
+                        .map(|message| (message.message_id, message.text.as_deref().unwrap_or("")))
+                        .collect::<Vec<_>>();
+                    let current = batch
+                        .last()
+                        .expect("worker batches always contain at least one message");
+                    let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
+                    let interview = run_bootstrap_interview_turn(
+                        &conn,
+                        chat_id,
+                        eff_thread_id,
+                        &messages,
+                        |state| invoke_bootstrap_question_model(&ctx, state),
+                        |question| {
+                            let bot = ctx.bot.clone();
+                            async move {
+                                bot.send_message_opts(
+                                    tg_chat_id,
+                                    &question,
+                                    false,
+                                    thread,
+                                    Some(current.message_id),
+                                    None,
+                                )
+                                .await
+                                .map(|message| message.message_id)
+                                .map_err(anyhow::Error::from)
+                            }
+                        },
+                    )
+                    .await;
+                    match interview {
+                        Ok(BootstrapInterviewOutcome::Handled) => {
+                            cancel_token.cancel();
+                            typing_task.await.ok();
+                            continue;
+                        }
+                        Ok(BootstrapInterviewOutcome::Final(state)) => {
+                            bootstrap_prompt_state = Some(state);
+                            Some(guard)
+                        }
+                        Err(error) => {
+                            tracing::error!(?key, "bootstrap interview failed: {error:#}");
+                            cancel_token.cancel();
+                            typing_task.await.ok();
+                            let _ = send_tg(
+                                &ctx.bot,
+                                tg_chat_id,
+                                eff_thread_id,
+                                "Bootstrap is still pending because the interview state could not be updated. Please try again.",
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Interview-only turns return above before a Claude session exists.
+            // The completed interview keeps the bootstrap lock while preparing
+            // and invoking its single finalization turn.
             let first_text = batch.first().and_then(|m| m.text.as_deref());
             let prepared =
                 match prepare_cc_invocation(&ctx.agent_dir, chat_id, eff_thread_id, first_text)
@@ -1696,7 +2654,6 @@ pub fn spawn_worker(
                     }
                     None => None,
                 };
-
                 input_messages.push(build_input_message_from_debounce(
                     pending.msg,
                     pending.resolved,
@@ -1705,7 +2662,7 @@ pub fn spawn_worker(
                 ));
             }
 
-            let Some(input) = super::attachments::format_cc_input(&input_messages) else {
+            let Some(mut input) = super::attachments::format_cc_input(&input_messages) else {
                 tracing::warn!(
                     ?key,
                     "empty input after formatting -- skipping CC invocation"
@@ -1724,17 +2681,19 @@ pub fn spawn_worker(
                 }
                 continue;
             };
+            if bootstrap_prompt_state.is_some() {
+                input = BOOTSTRAP_FINAL_INPUT.to_owned();
+            }
             let (trigger_chat, trigger_author) = {
-                let m = input_messages
+                let message = input_messages
                     .first()
                     .expect("format_cc_input returned Some so input_messages is non-empty");
-                (m.chat.clone(), m.author.clone())
+                (message.chat.clone(), message.author.clone())
             };
 
-            // Invoke claude -p (D-13, D-14)
             let routed_message_ids = routed_message_ids(&batch);
             let (
-                reply_result,
+                mut reply_result,
                 session_uuid,
                 turn_id,
                 is_first_call,
@@ -1744,6 +2703,7 @@ pub fn spawn_worker(
                 cc_learning_invocation_id,
                 cc_last_assistant_text,
                 cc_send_message_used,
+                cc_session_guard,
             ) = match invoke_cc(
                 InvokeCcRequest {
                     conn: &prepared.conn,
@@ -1757,6 +2717,7 @@ pub fn spawn_worker(
                     session_uuid: &prepared.session_uuid,
                     turn_id: prepared.turn_id,
                     is_first_call: prepared.is_first_call,
+                    bootstrap_prompt_state: bootstrap_prompt_state.clone(),
                 },
                 &ctx,
             )
@@ -1773,6 +2734,7 @@ pub fn spawn_worker(
                     learning_invocation_id,
                     last_assistant_text,
                     send_message_used,
+                    session_guard,
                 }) => (
                     Ok(output),
                     session_uuid,
@@ -1784,25 +2746,20 @@ pub fn spawn_worker(
                     learning_invocation_id,
                     last_assistant_text,
                     send_message_used,
+                    Some(session_guard),
                 ),
                 Err(failure) => {
                     if ctx.resolved_sandbox.is_some() {
-                        // A sandboxed turn failed. Ask the supervisor to verify the
-                        // backend (it probes once before degrading; safe to over-report).
                         ctx.sandbox_runtime.report_suspected_failure();
                     }
                     let uuid = match &failure {
                         InvokeCcFailure::Reflectable { session_uuid, .. } => session_uuid.clone(),
-                        InvokeCcFailure::NonReflectable { .. } => String::new(),
-                        InvokeCcFailure::RateLimited { .. } => String::new(),
                         InvokeCcFailure::Backgrounded {
                             main_session_id, ..
                         } => main_session_id.clone(),
+                        InvokeCcFailure::NonReflectable { .. }
+                        | InvokeCcFailure::RateLimited { .. } => String::new(),
                     };
-                    // is_first_call=false: failures don't produce a normal
-                    // reply, so the bootstrap welcome photo should not fire.
-                    // Auth-error recovery deactivates the session, so a
-                    // subsequent retry sees is_first_call=true again.
                     (
                         Err(failure),
                         uuid,
@@ -1810,19 +2767,26 @@ pub fn spawn_worker(
                         false,
                         None,
                         crate::cc::stream::StreamUsage::default(),
-                        0u64,
+                        0,
                         None,
                         None,
                         false,
+                        None,
                     )
                 }
             };
 
             // Keep the host identity mirror fresh after normal sandbox turns.
             // Bootstrap completion performs an explicit sandbox -> host reconciliation
-            // inside `should_accept_bootstrap_for_worker`, so it does not need this
-            // separate pre-check sync.
-            let bootstrap_mode = ctx.agent_dir.join("BOOTSTRAP.md").exists();
+            // inside `verify_bootstrap_for_worker`, so it does not need this
+            // separate pre-check sync. Use the invocation's prompt mode because the
+            let bootstrap_mode = matches!(
+                cc_prompt_mode,
+                Some(crate::cc::prompt::PromptMode::BootstrapFinal(_))
+            );
+            if bootstrap_mode && reply_result.is_err() {
+                tracing::debug!(?key, "bootstrap invocation failed; preserving marker");
+            }
             if ctx.ssh_config_path.is_some() && !bootstrap_mode {
                 let sandbox = ctx.resolved_sandbox.clone().unwrap();
                 let agent_dir = ctx.agent_dir.clone();
@@ -1834,39 +2798,102 @@ pub fn spawn_worker(
                 });
             }
 
-            // Bootstrap completion: verify identity files before accepting completion.
-            // MCP tool bootstrap_done may have already deleted BOOTSTRAP.md, but
-            // we also check here as a safety net (handles no-sandbox mode too).
-            let bootstrap_signaled = matches!(
-                &reply_result,
-                Ok(Some(output)) if output.bootstrap_complete == Some(true)
-            );
-            if bootstrap_mode
-                && bootstrap_signaled
-                && should_accept_bootstrap_for_worker(&ctx).await
-            {
-                tracing::info!(key = ?key, "bootstrap complete — identity files verified");
-                // Open a short-lived connection to deactivate the session.
-                if let Ok(conn) = right_db::open_connection(&ctx.agent_dir, false).await {
-                    deactivate_current(&conn, chat_id, eff_thread_id)
-                        .await
-                        .map_err(|e| {
+            // Treat the structured final result as the first commit gate. File
+            // presence alone cannot complete onboarding: the model must also
+            // attest the exact final stage, completion=true, and a non-empty
+            // recap before we inspect or finalize identity files.
+            let completion_signaled = bootstrap_mode
+                && match &reply_result {
+                    Ok(Some(output)) => match validate_bootstrap_output(output, "final", true) {
+                        Ok(_) => true,
+                        Err(error) => {
                             tracing::error!(
                                 key = ?key,
-                                "deactivate_current after bootstrap: {:#}",
-                                e
+                                "invalid bootstrap final output: {error:#}"
+                            );
+                            false
+                        }
+                    },
+                    Ok(None) | Err(_) => false,
+                };
+            let mut bootstrap_completed = false;
+
+            if bootstrap_mode {
+                if completion_signaled {
+                    let verification =
+                        verify_bootstrap_for_worker(&ctx, chat_id, eff_thread_id).await;
+                    match verification {
+                        BootstrapVerification::Verified => {
+                            match finish_verified_bootstrap(
+                                &ctx,
+                                chat_id,
+                                eff_thread_id,
+                                &session_uuid,
                             )
-                        })
-                        .ok();
+                            .await
+                            {
+                                Ok(()) => bootstrap_completed = true,
+                                Err(error) => {
+                                    tracing::error!(
+                                        key = ?key,
+                                        "verified bootstrap finalization failed: {error:#}"
+                                    );
+                                    reply_result = Ok(Some(bootstrap_pending_output(
+                                        "Bootstrap is still pending because finalization failed. Please try again.",
+                                    )));
+                                }
+                            }
+                        }
+                        BootstrapVerification::AnswersMissing => {
+                            tracing::error!(
+                                key = ?key,
+                                "final Claude turn was reached without all bootstrap answers"
+                            );
+                            reply_result = Ok(Some(bootstrap_pending_output(
+                                "Bootstrap is still pending because not all onboarding answers were recorded. Please try again.",
+                            )));
+                        }
+                        BootstrapVerification::IdentityMissing => {
+                            tracing::error!(
+                                key = ?key,
+                                "final Claude turn did not create all bootstrap identity files"
+                            );
+                            reply_result = Ok(Some(bootstrap_pending_output(
+                                "Bootstrap is still pending because the required identity files could not be verified. Please try again.",
+                            )));
+                        }
+                        BootstrapVerification::InfrastructureError(error) => {
+                            tracing::error!(
+                                key = ?key,
+                                "final Claude turn could not be verified: {error:#}"
+                            );
+                            reply_result = Ok(Some(bootstrap_pending_output(
+                                "Bootstrap is still pending because verification failed. Please try again.",
+                            )));
+                        }
+                    }
+                } else if reply_result.is_ok() {
+                    reply_result = Ok(Some(bootstrap_pending_output(
+                        "Bootstrap is still pending because the identity files were not completed. Please try again.",
+                    )));
                 }
-                // BOOTSTRAP.md may already be deleted by MCP tool; ensure cleanup.
-                let bp = ctx.agent_dir.join("BOOTSTRAP.md");
-                if bp.exists()
-                    && let Err(e) = std::fs::remove_file(&bp)
+
+                if !bootstrap_completed && let Err(error) = restore_bootstrap_marker(&ctx.agent_dir)
                 {
-                    tracing::warn!(key = ?key, "failed to delete BOOTSTRAP.md: {e:#}");
+                    tracing::error!(key = ?key, "bootstrap marker restore failed: {error:#}");
+                    reply_result = Err(InvokeCcFailure::NonReflectable {
+                        message: format!(
+                            "Bootstrap marker restoration failed; restart the bot before continuing: {error:#}"
+                        ),
+                    });
                 }
             }
+
+            // Successful invocations retain their original foreground session lock
+            // through bootstrap verification, finalization, and marker restoration.
+            // Release it before ordinary reply/post-turn work.
+            drop(cc_session_guard);
+            drop(bootstrap_guard);
 
             // Cancel typing indicator
             cancel_token.cancel();
@@ -2005,7 +3032,7 @@ pub fn spawn_worker(
                         // bootstrap mode only. When caption fits, the first text
                         // part rides as the photo caption (single Telegram
                         // message); we then skip it in the text loop below.
-                        let caption_consumed = super::bootstrap_photo::send_if_needed(
+                        let caption_message_id = super::bootstrap_photo::send_if_needed(
                             &ctx.bot,
                             tg_chat_id,
                             eff_thread_id,
@@ -2016,8 +3043,8 @@ pub fn spawn_worker(
                         )
                         .await;
 
-                        let start = if caption_consumed { 1 } else { 0 };
-                        let mut sent_any_text_message = false;
+                        let start = usize::from(caption_message_id.is_some());
+                        let mut delivered_assistant_message_id = caption_message_id;
                         let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
                         for part in &parts[start..] {
                             match ctx
@@ -2025,8 +3052,8 @@ pub fn spawn_worker(
                                 .send_message_opts(tg_chat_id, part, true, thread, reply_to, None)
                                 .await
                             {
-                                Ok(_) => {
-                                    sent_any_text_message = true;
+                                Ok(message) => {
+                                    delivered_assistant_message_id = Some(message.message_id);
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -2042,8 +3069,9 @@ pub fn spawn_worker(
                                         )
                                         .await
                                     {
-                                        Ok(_) => {
-                                            sent_any_text_message = true;
+                                        Ok(message) => {
+                                            delivered_assistant_message_id =
+                                                Some(message.message_id);
                                         }
                                         Err(e2) => {
                                             tracing::error!(
@@ -2057,7 +3085,7 @@ pub fn spawn_worker(
                             }
                         }
 
-                        if assistant_text_was_delivered(caption_consumed, sent_any_text_message)
+                        if delivered_assistant_message_id.is_some()
                             && let Some(turn_id) = turn_id
                         {
                             super::archive::archive_assistant_message(
@@ -2537,7 +3565,9 @@ pub fn spawn_worker(
             // text) so the main session_id has the user turn recorded before the
             // background answer arrives; without this the next recall would have
             // a context hole.
-            if let Some(ref hs) = ctx.hindsight {
+            if let Some(hs) = &ctx.hindsight
+                && matches!(cc_prompt_mode, Some(crate::cc::prompt::PromptMode::Normal))
+            {
                 // Auto-retain this turn.
                 if let Some(ref reply_text) = reply_text_for_retain {
                     let sender_id = batch.first().and_then(|m| m.author.user_id);
@@ -2815,6 +3845,9 @@ pub(crate) struct CcReply {
     /// `true` when the turn called `mcp__right__send_message`; a terminal
     /// `content: null` is then sanctioned and must not trigger repair.
     pub(crate) send_message_used: bool,
+    /// Foreground main-session lock. The caller retains it through bootstrap
+    /// verification, repair, and finalization before starting post-turn work.
+    pub(crate) session_guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 #[derive(Debug)]
@@ -2837,6 +3870,7 @@ struct InvokeCcRequest<'a> {
     session_uuid: &'a str,
     turn_id: u64,
     is_first_call: bool,
+    bootstrap_prompt_state: Option<crate::cc::prompt::BootstrapPromptState>,
 }
 
 async fn prepare_cc_invocation(
@@ -3159,6 +4193,7 @@ async fn invoke_cc(
         session_uuid,
         turn_id,
         is_first_call,
+        bootstrap_prompt_state,
     } = req;
     let session_uuid = session_uuid.to_owned();
 
@@ -3167,22 +4202,19 @@ async fn invoke_cc(
     } else {
         vec!["--resume".to_string(), session_uuid.clone()]
     };
-
-    // Bootstrap mode detection: check if BOOTSTRAP.md exists in agent dir.
-    let bootstrap_mode = ctx.agent_dir.join("BOOTSTRAP.md").exists();
-    if bootstrap_mode {
-        tracing::info!(?chat_id, "bootstrap mode: BOOTSTRAP.md present");
-    }
-    let prompt_mode = if bootstrap_mode {
-        crate::cc::prompt::PromptMode::Bootstrap
-    } else {
-        crate::cc::prompt::PromptMode::Normal
+    let prompt_mode = match bootstrap_prompt_state {
+        Some(state) => crate::cc::prompt::PromptMode::BootstrapFinal(state),
+        None => crate::cc::prompt::PromptMode::Normal,
     };
+    let bootstrap_mode = matches!(
+        prompt_mode,
+        crate::cc::prompt::PromptMode::BootstrapFinal(_)
+    );
+    if bootstrap_mode {
+        tracing::info!(?chat_id, "bootstrap mode: all answers recorded");
+    }
 
-    // Block harness built-ins that conflict with MCP equivalents or that
-    // don't belong in a headless Telegram-driven agent (see invocation.rs).
     let disallowed_tools = crate::cc::invocation::baseline_disallowed_tools();
-
     let schema_filename = if bootstrap_mode {
         "bootstrap-schema.json"
     } else {
@@ -3201,24 +4233,29 @@ async fn invoke_cc(
             )
             .await;
             return Err(
-                format_error_reply(-1, &format!("{schema_filename} read failed: {:#}", e)).into(),
+                format_error_reply(-1, &format!("{schema_filename} read failed: {e:#}")).into(),
             );
         }
     };
 
-    let mcp_path =
-        crate::cc::invocation::mcp_config_path(ctx.ssh_config_path.as_deref(), &ctx.agent_dir);
     let mut active_progress = start_progress_invocation(ctx, chat_id, eff_thread_id).await;
     let learning_invocation_id = active_progress
         .as_ref()
         .map(|active| active.invocation_id.clone());
-    let invocation_mcp_path = active_progress
-        .as_ref()
-        .map(|active| active.claude_mcp_config_path.clone())
-        .unwrap_or(mcp_path);
+    let invocation_mcp_path = Some(
+        active_progress
+            .as_ref()
+            .map(|active| active.claude_mcp_config_path.clone())
+            .unwrap_or_else(|| {
+                crate::cc::invocation::mcp_config_path(
+                    ctx.ssh_config_path.as_deref(),
+                    &ctx.agent_dir,
+                )
+            }),
+    );
 
     let mut invocation = crate::cc::invocation::ClaudeInvocation {
-        mcp_config_path: Some(invocation_mcp_path),
+        mcp_config_path: invocation_mcp_path,
         json_schema: Some(reply_schema),
         output_format: crate::cc::invocation::OutputFormat::StreamJson,
         model: crate::snapshot_model(&ctx.model),
@@ -3286,7 +4323,9 @@ async fn invoke_cc(
         right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
 
     let session_key: SessionKey = (chat_id, eff_thread_id);
-    let (operator_focus, agent_focus) =
+    let (operator_focus, agent_focus) = if bootstrap_mode {
+        (None, None)
+    } else {
         match right_db::thread_focus::get(conn, chat_id, eff_thread_id).await {
             Ok(Some(f)) => (f.operator_focus, f.agent_focus),
             Ok(None) => (None, None),
@@ -3299,7 +4338,8 @@ async fn invoke_cc(
                 );
                 (None, None)
             }
-        };
+        }
+    };
     // The edge-triggered memory-status state is committed only after the marker
     // is actually written to the agent's stdin (see below). Committing here, at
     // computation time, would silently drop the marker on any pre-delivery
@@ -3308,7 +4348,9 @@ async fn invoke_cc(
     // `Some(new_last)` = there is a pending commit; the inner `Option<String>`
     // is the value to store (`Some` insert / `None` remove).
     let mut pending_memory_status_commit: Option<Option<String>> = None;
-    let (memory_mode, volatile_prefix) = if ctx.hindsight.is_some() {
+    let (memory_mode, volatile_prefix) = if bootstrap_mode {
+        (None, None)
+    } else if ctx.hindsight.is_some() {
         let cache_key = format!("{}:{}", chat_id, eff_thread_id);
         let cached = if let Some(ref cache) = ctx.prefetch_cache {
             cache.get(&cache_key).await
@@ -3391,10 +4433,7 @@ async fn invoke_cc(
         )
     };
 
-    let effective_input = match volatile_prefix {
-        Some(prefix) => format!("{prefix}\n\n{input}"),
-        None => input.to_string(),
-    };
+    let effective_input = build_effective_input(&prompt_mode, input, volatile_prefix.as_deref());
 
     let chat_context_block = {
         use super::attachments::ChatContext as CC;
@@ -3471,8 +4510,8 @@ async fn invoke_cc(
     // `claude -p --session-id <session_uuid>` subprocess is still writing the
     // JSONL. Acquiring the lock unconditionally serialises both. On first
     // call the lock is uncontended (fresh UUID, no other holder), so there's
-    // zero overhead vs. the previous skip-on-first-call path. The guard is
-    // held for the entire CC subprocess lifetime, then dropped on return.
+    // zero overhead vs. the previous skip-on-first-call path. Successful turns
+    // return the guard so bootstrap verification and finalization remain serialized.
     let session_guard: tokio::sync::OwnedMutexGuard<()> = {
         let entry = ctx
             .session_locks
@@ -3528,7 +4567,7 @@ async fn invoke_cc(
         );
         let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
-            prompt_mode,
+            prompt_mode.clone(),
             "/sandbox",
             &format!("/tmp/right-system-prompt-{session_uuid}.md"),
             "/sandbox",
@@ -3571,7 +4610,7 @@ async fn invoke_cc(
         let prompt_path_str = prompt_path.to_string_lossy();
         let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
-            prompt_mode,
+            prompt_mode.clone(),
             &agent_dir_str,
             &prompt_path_str,
             &agent_dir_str,
@@ -3668,6 +4707,7 @@ async fn invoke_cc(
             learning_invocation_id: learning_invocation_id.clone(),
             last_assistant_text: None,
             send_message_used: false,
+            session_guard,
         });
     }
     log_invoking_claude(&log_ctx, is_first_call, sandboxed);
@@ -4418,6 +5458,7 @@ async fn invoke_cc(
             learning_invocation_id: learning_invocation_id.clone(),
             last_assistant_text: None,
             send_message_used: false,
+            session_guard,
         });
     }
 
@@ -4531,6 +5572,7 @@ async fn invoke_cc(
                         learning_invocation_id: learning_invocation_id.clone(),
                         last_assistant_text: None,
                         send_message_used: false,
+                        session_guard,
                     });
                 } else {
                     // Token request already running — silent, don't spam.
@@ -4545,6 +5587,7 @@ async fn invoke_cc(
                         learning_invocation_id: learning_invocation_id.clone(),
                         last_assistant_text: None,
                         send_message_used: false,
+                        session_guard,
                     });
                 }
             } else {
@@ -4580,6 +5623,7 @@ async fn invoke_cc(
                         learning_invocation_id: learning_invocation_id.clone(),
                         last_assistant_text: None,
                         send_message_used: false,
+                        session_guard,
                     });
                 } else {
                     return Ok(CcReply {
@@ -4593,6 +5637,7 @@ async fn invoke_cc(
                         learning_invocation_id: learning_invocation_id.clone(),
                         last_assistant_text: None,
                         send_message_used: false,
+                        session_guard,
                     });
                 }
             }
@@ -4757,6 +5802,7 @@ async fn invoke_cc(
                 learning_invocation_id: learning_invocation_id.clone(),
                 last_assistant_text,
                 send_message_used,
+                session_guard,
             })
         }
         Err(reason) => {
@@ -4844,7 +5890,48 @@ async fn send_error_to_telegram_inner(
 
 #[cfg(test)]
 mod tests {
+    use super::super::session::deactivate_current;
     use super::*;
+
+    #[test]
+    fn bootstrap_effective_input_ignores_all_volatile_content() {
+        let prompt_mode = crate::cc::prompt::PromptMode::BootstrapFinal(
+            crate::cc::prompt::BootstrapPromptState {
+                stage: "final",
+                user_name: Some("Ada".into()),
+                agent_name: Some("Ember".into()),
+                nature: Some("sprite".into()),
+                vibe: Some("warm".into()),
+                emoji: Some("🔥".into()),
+            },
+        );
+        let volatile_prefix = crate::cc::prompt::build_volatile_prefix(
+            Some("adversarial recalled memory"),
+            Some("<memory-status>adversarial status</memory-status>"),
+            Some("adversarial repair notice"),
+            Some("adversarial saved focus"),
+        )
+        .expect("all volatile inputs are populated");
+
+        let effective_input = build_effective_input(
+            &prompt_mode,
+            "adversarial caller input",
+            Some(&volatile_prefix),
+        );
+
+        assert_eq!(effective_input.as_bytes(), BOOTSTRAP_FINAL_INPUT.as_bytes());
+    }
+
+    #[test]
+    fn normal_effective_input_preserves_volatile_prefix() {
+        let effective_input = build_effective_input(
+            &crate::cc::prompt::PromptMode::Normal,
+            "user input",
+            Some("volatile prefix"),
+        );
+
+        assert_eq!(effective_input, "volatile prefix\n\nuser input");
+    }
     use right_openshell::test_support::{PROCESS_ENV_LOCK, PathGuard};
     use std::os::unix::fs::PermissionsExt;
 
@@ -5186,6 +6273,7 @@ mod tests {
                 session_uuid: &prepared.session_uuid,
                 turn_id: prepared.turn_id,
                 is_first_call: prepared.is_first_call,
+                bootstrap_prompt_state: None,
             },
             &ctx,
         )
@@ -5228,6 +6316,7 @@ mod tests {
             model: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
             stop_tokens: Arc::new(DashMap::new()),
             session_locks: Arc::new(DashMap::new()),
+            bootstrap_lock: Arc::new(tokio::sync::Mutex::new(())),
             compact_timers: Arc::new(DashMap::new()),
             bg_requests: Arc::new(DashMap::new()),
             bg_handoff_gates: Arc::new(DashMap::new()),
@@ -5383,10 +6472,750 @@ mod tests {
         assert!(log.contains("stream_log=/tmp/f7d5a319.ndjson"), "{log}");
     }
 
-    #[tokio::test]
-    async fn sandbox_bootstrap_acceptance_materializes_identity_mirror_from_sandbox() {
-        let _guard = PROCESS_ENV_LOCK.lock().await;
+    async fn record_all_bootstrap_answers(
+        conn: &right_db::Connection,
+        chat_id: i64,
+        thread_id: i64,
+    ) {
+        assert_eq!(
+            right_db::bootstrap_answers::claim_owner(conn, chat_id, thread_id)
+                .await
+                .unwrap(),
+            right_db::bootstrap_answers::ClaimOwnerOutcome::Claimed
+        );
+        for (index, (stage, answer)) in [
+            ("user_name", "Ada"),
+            ("agent_name", "Ember"),
+            ("nature", "familiar"),
+            ("vibe", "warm and terse"),
+            ("emoji", "🔥"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let assistant_message_id = i32::try_from(index * 2 + 1).unwrap();
+            let source_message_id = assistant_message_id + 1;
+            assert_eq!(
+                right_db::bootstrap_answers::record_question_issue(
+                    conn,
+                    stage,
+                    chat_id,
+                    thread_id,
+                    assistant_message_id,
+                )
+                .await
+                .unwrap(),
+                right_db::bootstrap_answers::RecordQuestionIssueOutcome::Recorded
+            );
+            right_db::conversation::archive_message(
+                conn,
+                right_db::conversation::ConversationMessage {
+                    platform: "telegram",
+                    chat_id,
+                    thread_id,
+                    message_id: Some(source_message_id),
+                    sender_user_id: Some(1),
+                    sender_name: Some("User"),
+                    addressed_to_bot: true,
+                    routed_to_agent: true,
+                    root_session_id: Some("bootstrap-session"),
+                    turn_id: None,
+                    role: right_db::conversation::ConversationRole::User,
+                    content: answer,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                right_db::bootstrap_answers::record_answer(
+                    conn,
+                    stage,
+                    answer,
+                    chat_id,
+                    thread_id,
+                    source_message_id,
+                )
+                .await
+                .unwrap(),
+                right_db::bootstrap_answers::RecordAnswerOutcome::Recorded
+            );
+        }
+    }
+    async fn session_count(conn: &right_db::Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM sessions", (), |row| row.get(0))
+            .await
+            .unwrap()
+    }
 
+    fn question_output(stage: &str, content: &str) -> ReplyOutput {
+        ReplyOutput {
+            content: Some(content.to_owned()),
+            reply_to_message_id: None,
+            attachments: None,
+            used_skill_receipts: None,
+            bootstrap_stage: Some(stage.to_owned()),
+            bootstrap_complete: Some(false),
+        }
+    }
+
+    #[test]
+    fn bootstrap_final_validator_rejects_every_incomplete_shape() {
+        let valid = || {
+            let mut output = question_output("final", "Identity files are ready.");
+            output.bootstrap_complete = Some(true);
+            output
+        };
+
+        let mut wrong_stage = valid();
+        wrong_stage.bootstrap_stage = Some("emoji".to_owned());
+        assert!(validate_bootstrap_output(&wrong_stage, "final", true).is_err());
+
+        let mut missing_stage = valid();
+        missing_stage.bootstrap_stage = None;
+        assert!(validate_bootstrap_output(&missing_stage, "final", true).is_err());
+
+        let mut false_completion = valid();
+        false_completion.bootstrap_complete = Some(false);
+        assert!(validate_bootstrap_output(&false_completion, "final", true).is_err());
+
+        let mut missing_completion = valid();
+        missing_completion.bootstrap_complete = None;
+        assert!(validate_bootstrap_output(&missing_completion, "final", true).is_err());
+
+        let mut null_content = valid();
+        null_content.content = None;
+        assert!(validate_bootstrap_output(&null_content, "final", true).is_err());
+    }
+
+    #[test]
+    fn bootstrap_question_invocation_is_tool_less() {
+        let args = bootstrap_question_invocation("{}".to_owned(), None, None).into_args();
+
+        assert!(args.windows(2).any(|pair| pair == ["--tools", ""]));
+        assert!(!args.iter().any(|arg| arg == "--mcp-config"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_question_retries_invalid_then_delivers_valid_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        right_db::bootstrap_answers::claim_owner(&conn, 42, 7)
+            .await
+            .unwrap();
+        let mut outputs = VecDeque::from([
+            question_output("agent_name", "Wrong stage?"),
+            question_output("user_name", "What is your name?"),
+        ]);
+        let mut model_calls = 0_u32;
+        let mut sent: Vec<String> = Vec::new();
+
+        deliver_bootstrap_question(
+            &conn,
+            42,
+            7,
+            "user_name",
+            &mut |_| {
+                model_calls += 1;
+                std::future::ready(Ok(outputs.pop_front().expect("model called too often")))
+            },
+            &mut |question| {
+                sent.push(question);
+                std::future::ready(Ok(101))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(model_calls, 2);
+        assert_eq!(sent, vec!["What is your name?".to_owned()]);
+        assert_eq!(
+            right_db::bootstrap_answers::issued_question_stage(&conn, 42, 7)
+                .await
+                .unwrap(),
+            Some("user_name")
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_question_exhaustion_delivers_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        right_db::bootstrap_answers::claim_owner(&conn, 42, 7)
+            .await
+            .unwrap();
+        let mut model_calls = 0_u32;
+        let mut send_calls = 0_u32;
+
+        let error = deliver_bootstrap_question(
+            &conn,
+            42,
+            7,
+            "user_name",
+            &mut |_| {
+                model_calls += 1;
+                std::future::ready(Ok(question_output("agent_name", "Wrong stage?")))
+            },
+            &mut |_| {
+                send_calls += 1;
+                std::future::ready(Ok(101))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("failed after 3 attempts"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(model_calls, BOOTSTRAP_QUESTION_ATTEMPTS);
+        assert_eq!(send_calls, 0);
+        assert_eq!(
+            right_db::bootstrap_answers::issued_question_stage(&conn, 42, 7)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn bootstrap_validator_enforces_transitions() {
+        assert!(
+            validate_bootstrap_output(&question_output("agent_name", "Name?"), "user_name", false)
+                .is_err()
+        );
+        // Live UAT shape: multi-line, and punctuation the old gate rejected.
+        // Question wording is the model's job; the platform gates only stage,
+        // completion, and non-emptiness.
+        for natural in [
+            "Last detail:\nWhat emoji feels like you? ✨",
+            "Pick an emoji that fits you.",
+            "Which emoji is you? 🔥? 🌊? ✨?",
+        ] {
+            assert_eq!(
+                validate_bootstrap_output(&question_output("emoji", natural), "emoji", false)
+                    .unwrap(),
+                natural
+            );
+        }
+        assert!(
+            validate_bootstrap_output(&question_output("user_name", ""), "user_name", false)
+                .is_err()
+        );
+        let mut early = question_output("user_name", "Name?");
+        early.bootstrap_complete = Some(true);
+        assert!(validate_bootstrap_output(&early, "user_name", false).is_err());
+        assert_eq!(
+            validate_bootstrap_output(
+                &question_output("user_name", "Your name?"),
+                "user_name",
+                false
+            )
+            .unwrap(),
+            "Your name?"
+        );
+        let mut final_output = question_output("final", "Done");
+        final_output.bootstrap_complete = Some(true);
+        assert_eq!(
+            validate_bootstrap_output(&final_output, "final", true).unwrap(),
+            "Done"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_led_interview_records_only_answers_after_issued_questions() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        let model_stages = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        let model_log = Arc::clone(&model_stages);
+        let send_log = Arc::clone(&sent);
+        let outcome = run_bootstrap_interview_turn(
+            &conn,
+            42,
+            7,
+            &[(100, "hi")],
+            move |state| {
+                let model_log = Arc::clone(&model_log);
+                async move {
+                    model_log.lock().await.push(state.stage);
+                    Ok(question_output(state.stage, "What name do you like?"))
+                }
+            },
+            move |text| {
+                let send_log = Arc::clone(&send_log);
+                async move {
+                    send_log.lock().await.push(text);
+                    Ok(101)
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, BootstrapInterviewOutcome::Handled);
+        assert_eq!(*model_stages.lock().await, vec!["user_name"]);
+        assert!(
+            right_db::bootstrap_answers::recorded_answers(&conn, 42, 7)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let outcome = run_bootstrap_interview_turn(
+            &conn,
+            42,
+            7,
+            &[(102, "Ada")],
+            |state| async move { Ok(question_output(state.stage, "What should I be called?")) },
+            |_| async { Ok(103) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, BootstrapInterviewOutcome::Handled);
+        assert_eq!(
+            right_db::bootstrap_answers::recorded_answers(&conn, 42, 7)
+                .await
+                .unwrap(),
+            vec![right_db::bootstrap_answers::RecordedAnswer {
+                stage: "user_name",
+                answer: "Ada".to_owned()
+            }]
+        );
+        assert_eq!(session_count(&conn).await, 0);
+    }
+
+    #[tokio::test]
+    async fn conflict_multi_batch_and_delivery_retry_preserve_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        right_db::bootstrap_answers::claim_owner(&conn, 42, 7)
+            .await
+            .unwrap();
+        let model_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let conflict_calls = Arc::clone(&model_calls);
+        let outcome = run_bootstrap_interview_turn(
+            &conn,
+            99,
+            3,
+            &[(200, "Ada")],
+            move |_| {
+                conflict_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                async { anyhow::bail!("must not invoke") }
+            },
+            |_| async { Ok(201) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, BootstrapInterviewOutcome::Handled);
+        assert_eq!(model_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        let error = run_bootstrap_interview_turn(
+            &conn,
+            42,
+            7,
+            &[(101, "Ada"), (102, "Grace")],
+            |state| async move { Ok(question_output(state.stage, "What name do you like?")) },
+            |_| async { anyhow::bail!("delivery failed") },
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("delivery failed"));
+        assert!(
+            right_db::bootstrap_answers::recorded_answers(&conn, 42, 7)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            right_db::bootstrap_answers::issued_question_stage(&conn, 42, 7)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let outcome = run_bootstrap_interview_turn(
+            &conn,
+            42,
+            7,
+            &[(103, "Ada"), (104, "Grace")],
+            |state| async move { Ok(question_output(state.stage, "What name do you like?")) },
+            |_| async { Ok(105) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, BootstrapInterviewOutcome::Handled);
+        assert!(
+            right_db::bootstrap_answers::recorded_answers(&conn, 42, 7)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            right_db::bootstrap_answers::issued_question_stage(&conn, 42, 7)
+                .await
+                .unwrap(),
+            Some("user_name")
+        );
+    }
+
+    #[tokio::test]
+    async fn fabricated_identity_files_cannot_pass_without_recorded_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        for filename in right_agent::identity_mirror::IDENTITY_MIRROR_FILES {
+            std::fs::write(dir.path().join(filename), "fabricated").unwrap();
+        }
+
+        let verification = verify_bootstrap_for_paths(&conn, dir.path(), None, 42, 7).await;
+
+        assert!(matches!(
+            verification,
+            BootstrapVerification::AnswersMissing
+        ));
+    }
+
+    #[tokio::test]
+    async fn each_recorded_answer_advances_the_first_missing_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+
+        assert_eq!(
+            right_db::bootstrap_answers::claim_owner(&conn, 42, 7)
+                .await
+                .unwrap(),
+            right_db::bootstrap_answers::ClaimOwnerOutcome::Claimed
+        );
+        assert_eq!(
+            right_db::bootstrap_answers::record_question_issue(&conn, "user_name", 42, 7, 99)
+                .await
+                .unwrap(),
+            right_db::bootstrap_answers::RecordQuestionIssueOutcome::Recorded
+        );
+        right_db::conversation::archive_message(
+            &conn,
+            right_db::conversation::ConversationMessage {
+                platform: "telegram",
+                chat_id: 42,
+                thread_id: 7,
+                message_id: Some(100),
+                sender_user_id: Some(1),
+                sender_name: Some("User"),
+                addressed_to_bot: true,
+                routed_to_agent: true,
+                root_session_id: Some("bootstrap-session"),
+                turn_id: None,
+                role: right_db::conversation::ConversationRole::User,
+                content: "Ada",
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            right_db::bootstrap_answers::record_answer(&conn, "user_name", "Ada", 42, 7, 100)
+                .await
+                .unwrap(),
+            right_db::bootstrap_answers::RecordAnswerOutcome::Recorded
+        );
+        assert_eq!(
+            right_db::bootstrap_answers::missing_stages(&conn, 42, 7)
+                .await
+                .unwrap()
+                .first()
+                .copied(),
+            Some("agent_name")
+        );
+    }
+
+    #[tokio::test]
+    async fn finalization_deactivates_matching_session_and_removes_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        create_session(&conn, 42, 7, "bootstrap-session", None)
+            .await
+            .unwrap();
+        std::fs::write(dir.path().join("BOOTSTRAP.md"), "bootstrap").unwrap();
+        record_all_bootstrap_answers(&conn, 42, 7).await;
+
+        finish_verified_bootstrap_with_connection(dir.path(), &conn, 42, 7, "bootstrap-session")
+            .await
+            .unwrap();
+
+        assert!(!dir.path().join("BOOTSTRAP.md").exists());
+        assert!(get_active_session(&conn, 42, 7).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn marker_unlink_sync_failure_restores_durable_bootstrap_continuity() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        create_session(&conn, 42, 7, "bootstrap-session", None)
+            .await
+            .unwrap();
+        std::fs::write(dir.path().join("BOOTSTRAP.md"), "bootstrap").unwrap();
+        record_all_bootstrap_answers(&conn, 42, 7).await;
+        let mut operations = Vec::new();
+        let mut directory_sync = |agent_dir: &Path, operation: &str| {
+            operations.push(operation.to_owned());
+            if operation == "remove bootstrap marker" {
+                anyhow::bail!("injected post-unlink directory sync failure");
+            }
+            sync_agent_directory(agent_dir, operation)
+        };
+
+        let error = finish_verified_bootstrap_with_connection_and_directory_sync(
+            dir.path(),
+            &conn,
+            42,
+            7,
+            "bootstrap-session",
+            &mut directory_sync,
+        )
+        .await
+        .expect_err("marker directory sync failure must roll finalization back");
+
+        assert!(
+            format!("{error:#}").contains("injected post-unlink directory sync failure"),
+            "{error:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("BOOTSTRAP.md")).unwrap(),
+            right_codegen::BOOTSTRAP_INSTRUCTIONS
+        );
+        assert_eq!(
+            get_active_session(&conn, 42, 7)
+                .await
+                .unwrap()
+                .unwrap()
+                .root_session_id,
+            "bootstrap-session"
+        );
+        assert!(!bootstrap_finalization_intent_path(dir.path()).exists());
+        assert_eq!(
+            operations,
+            [
+                "publish bootstrap finalization intent",
+                "remove bootstrap marker",
+                "restore bootstrap marker",
+                "clear bootstrap finalization intent",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn marker_restore_sync_failure_retains_finalization_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        create_session(&conn, 42, 7, "bootstrap-session", None)
+            .await
+            .unwrap();
+        record_all_bootstrap_answers(&conn, 42, 7).await;
+        std::fs::write(dir.path().join("BOOTSTRAP.md"), "bootstrap").unwrap();
+        let mut directory_sync = |agent_dir: &Path, operation: &str| {
+            if matches!(
+                operation,
+                "remove bootstrap marker" | "restore bootstrap marker"
+            ) {
+                anyhow::bail!("injected {operation} directory sync failure");
+            }
+            sync_agent_directory(agent_dir, operation)
+        };
+
+        let error = finish_verified_bootstrap_with_connection_and_directory_sync(
+            dir.path(),
+            &conn,
+            42,
+            7,
+            "bootstrap-session",
+            &mut directory_sync,
+        )
+        .await
+        .expect_err("failed durable marker restore must retain recovery intent");
+
+        assert!(
+            format!("{error:#}").contains("restore bootstrap marker after removal failed"),
+            "{error:#}"
+        );
+        assert!(dir.path().join("BOOTSTRAP.md").exists());
+        assert!(bootstrap_finalization_intent_path(dir.path()).exists());
+        assert!(get_active_session(&conn, 42, 7).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn marker_removal_and_restore_failure_retains_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        create_session(&conn, 42, 7, "bootstrap-session", None)
+            .await
+            .unwrap();
+        record_all_bootstrap_answers(&conn, 42, 7).await;
+        std::fs::create_dir(dir.path().join("BOOTSTRAP.md")).unwrap();
+
+        let error = finish_verified_bootstrap_with_connection(
+            dir.path(),
+            &conn,
+            42,
+            7,
+            "bootstrap-session",
+        )
+        .await
+        .expect_err("directory marker cannot be removed or restored as a file");
+
+        let error_chain = format!("{error:#}");
+        assert!(error_chain.contains("restore bootstrap marker after removal failed"));
+        assert!(error_chain.contains("remove"));
+        assert!(dir.path().join("BOOTSTRAP.md").exists());
+        assert!(get_active_session(&conn, 42, 7).await.unwrap().is_none());
+        assert!(bootstrap_finalization_intent_path(dir.path()).exists());
+    }
+    #[tokio::test]
+    async fn crash_after_deactivation_recovers_verified_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        create_session(&conn, 42, 7, "bootstrap-session", None)
+            .await
+            .unwrap();
+        for filename in right_agent::identity_mirror::IDENTITY_MIRROR_FILES {
+            std::fs::write(dir.path().join(filename), "verified").unwrap();
+        }
+        record_all_bootstrap_answers(&conn, 42, 7).await;
+        std::fs::write(dir.path().join("BOOTSTRAP.md"), "bootstrap").unwrap();
+        let intent = BootstrapFinalizationIntent::new(42, 7, "bootstrap-session").unwrap();
+        write_bootstrap_finalization_intent(dir.path(), &intent).unwrap();
+        assert!(
+            deactivate_session_if_active(&conn, 42, 7, "bootstrap-session")
+                .await
+                .unwrap()
+        );
+        drop(conn);
+
+        recover_bootstrap_finalization(dir.path(), None)
+            .await
+            .unwrap();
+
+        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
+        assert!(get_active_session(&conn, 42, 7).await.unwrap().is_none());
+        assert!(!dir.path().join("BOOTSTRAP.md").exists());
+        assert!(!bootstrap_finalization_intent_path(dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn recovery_with_missing_identity_restores_exact_session_and_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        create_session(&conn, 42, 7, "bootstrap-session", None)
+            .await
+            .unwrap();
+        record_all_bootstrap_answers(&conn, 42, 7).await;
+        let intent = BootstrapFinalizationIntent::new(42, 7, "bootstrap-session").unwrap();
+        write_bootstrap_finalization_intent(dir.path(), &intent).unwrap();
+        deactivate_session_if_active(&conn, 42, 7, "bootstrap-session")
+            .await
+            .unwrap();
+        drop(conn);
+
+        let error = recover_bootstrap_finalization(dir.path(), None)
+            .await
+            .expect_err("missing identity must abort startup");
+
+        assert!(format!("{error:#}").contains("identity files are missing"));
+        assert!(dir.path().join("BOOTSTRAP.md").exists());
+        assert!(bootstrap_finalization_intent_path(dir.path()).exists());
+        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
+        assert_eq!(
+            get_active_session(&conn, 42, 7)
+                .await
+                .unwrap()
+                .unwrap()
+                .root_session_id,
+            "bootstrap-session"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_recovery_intent_restores_marker_and_fails_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let _conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        std::fs::write(bootstrap_finalization_intent_path(dir.path()), b"{broken").unwrap();
+
+        let error = recover_bootstrap_finalization(dir.path(), None)
+            .await
+            .expect_err("malformed intent must abort startup");
+
+        assert!(format!("{error:#}").contains("parse bootstrap finalization intent"));
+        assert!(dir.path().join("BOOTSTRAP.md").exists());
+        assert!(bootstrap_finalization_intent_path(dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn replaced_active_session_leaves_marker_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        create_session(&conn, 42, 7, "bootstrap-session", None)
+            .await
+            .unwrap();
+        deactivate_current(&conn, 42, 7).await.unwrap();
+        create_session(&conn, 42, 7, "replacement-session", None)
+            .await
+            .unwrap();
+        let marker_path = dir.path().join("BOOTSTRAP.md");
+        std::fs::write(&marker_path, "bootstrap").unwrap();
+
+        finish_verified_bootstrap_with_connection(dir.path(), &conn, 42, 7, "bootstrap-session")
+            .await
+            .expect_err("replaced bootstrap session must not finalize");
+
+        assert_eq!(std::fs::read_to_string(marker_path).unwrap(), "bootstrap");
+        assert_eq!(
+            get_active_session(&conn, 42, 7)
+                .await
+                .unwrap()
+                .unwrap()
+                .root_session_id,
+            "replacement-session"
+        );
+    }
+
+    #[test]
+    fn pending_completion_restores_missing_bootstrap_marker() {
+        let dir = tempfile::tempdir().unwrap();
+
+        restore_bootstrap_marker(dir.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("BOOTSTRAP.md")).unwrap(),
+            right_codegen::BOOTSTRAP_INSTRUCTIONS
+        );
+    }
+    #[test]
+    fn marker_restoration_failure_is_propagated() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("BOOTSTRAP.md")).unwrap();
+
+        let error = restore_bootstrap_marker(dir.path()).expect_err("directory marker must fail");
+
+        assert!(format!("{error:#}").contains("bootstrap marker path is not a file"));
+    }
+
+    #[tokio::test]
+    async fn sandbox_bootstrap_probe_classifies_missing_identity() {
+        let agent_dir = tempfile::tempdir().unwrap();
+
+        let verification = verify_bootstrap_for_paths_with_probe(
+            agent_dir.path(),
+            Some("right-test-sandbox"),
+            |_| async { Ok(("missing".to_owned(), 0)) },
+        )
+        .await;
+
+        assert!(matches!(
+            verification,
+            BootstrapVerification::IdentityMissing
+        ));
+    }
+
+    #[tokio::test]
+    async fn sandbox_bootstrap_probe_classifies_verified_identity() {
+        let _guard = PROCESS_ENV_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -5415,22 +7244,62 @@ esac
         .unwrap();
         std::fs::set_permissions(&fake_openshell, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _path_guard = PathGuard::prepend(&bin);
-
         let agent_dir = tmp.path().join("agent");
-        std::fs::create_dir(&agent_dir).unwrap();
-        let ssh_config = tmp.path().join("sandbox.ssh-config");
 
-        assert!(
-            should_accept_bootstrap_for_paths(
-                &agent_dir,
-                "right-test-agent",
-                Some(&ssh_config),
-                Some("right-test-sandbox"),
-            )
-            .await
-        );
+        let verification = verify_bootstrap_for_paths_with_probe(
+            &agent_dir,
+            Some("right-test-sandbox"),
+            |_| async { Ok(("verified".to_owned(), 0)) },
+        )
+        .await;
+
+        assert!(matches!(verification, BootstrapVerification::Verified));
         assert!(right_agent::identity_mirror::host_identity_mirror_complete(
             &agent_dir
+        ));
+    }
+
+    #[tokio::test]
+    async fn sandbox_bootstrap_probe_classifies_nonzero_and_unexpected_output() {
+        let agent_dir = tempfile::tempdir().unwrap();
+
+        let nonzero = verify_bootstrap_for_paths_with_probe(
+            agent_dir.path(),
+            Some("right-test-sandbox"),
+            |_| async { Ok(("verified".to_owned(), 9)) },
+        )
+        .await;
+        assert!(matches!(
+            nonzero,
+            BootstrapVerification::InfrastructureError(_)
+        ));
+
+        let unexpected = verify_bootstrap_for_paths_with_probe(
+            agent_dir.path(),
+            Some("right-test-sandbox"),
+            |_| async { Ok(("verified\n".to_owned(), 0)) },
+        )
+        .await;
+        assert!(matches!(
+            unexpected,
+            BootstrapVerification::InfrastructureError(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn sandbox_bootstrap_probe_classifies_infrastructure_failure() {
+        let agent_dir = tempfile::tempdir().unwrap();
+
+        let verification = verify_bootstrap_for_paths_with_probe(
+            agent_dir.path(),
+            Some("right-test-sandbox"),
+            |_| async { Err(miette::miette!("gateway unavailable")) },
+        )
+        .await;
+
+        assert!(matches!(
+            verification,
+            BootstrapVerification::InfrastructureError(_)
         ));
     }
 
@@ -6490,20 +8359,6 @@ esac
         );
     }
 
-    #[tokio::test]
-    async fn routed_message_ids_preserve_batch_order() {
-        let batch = vec![debug_msg(10, None), debug_msg(11, None)];
-
-        assert_eq!(routed_message_ids(&batch), vec![10, 11]);
-    }
-
-    #[tokio::test]
-    async fn assistant_text_was_delivered_accepts_caption_or_message() {
-        assert!(assistant_text_was_delivered(true, false));
-        assert!(assistant_text_was_delivered(false, true));
-        assert!(!assistant_text_was_delivered(false, false));
-    }
-
     #[tokio::test(start_paused = true)]
     async fn fast_album_closes_after_idle_window() {
         let (tx, mut rx) = mpsc::channel::<DebounceMsg>(8);
@@ -7045,6 +8900,70 @@ mod bg_handoff_gate_tests {
             .await
             .expect("session lock should release when the failure is dropped")
             .expect("waiter task should not panic");
+    }
+
+    #[tokio::test]
+    async fn successful_reply_retains_session_lock_through_bootstrap_finalization() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let session_guard = Arc::clone(&lock).lock_owned().await;
+        let reply = CcReply {
+            output: None,
+            session_uuid: "bootstrap-session".into(),
+            turn_id: 1,
+            is_first_call: true,
+            prompt_mode: crate::cc::prompt::PromptMode::BootstrapFinal(
+                crate::cc::prompt::BootstrapPromptState {
+                    stage: "final",
+                    user_name: Some("Ada".into()),
+                    agent_name: Some("Ember".into()),
+                    nature: Some("familiar".into()),
+                    vibe: Some("warm".into()),
+                    emoji: Some("🔥".into()),
+                },
+            ),
+            usage: crate::cc::stream::StreamUsage::default(),
+            wall_elapsed_ms: 0,
+            learning_invocation_id: None,
+            last_assistant_text: None,
+            send_message_used: false,
+            session_guard,
+        };
+
+        let waiter_lock = Arc::clone(&lock);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (acquired_tx, mut acquired_rx) = tokio::sync::oneshot::channel();
+        let waiter = tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            let _guard = waiter_lock.lock_owned().await;
+            acquired_tx.send(()).unwrap();
+        });
+        started_rx.await.unwrap();
+
+        let CcReply { session_guard, .. } = reply;
+        tokio::task::yield_now().await;
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(20), &mut acquired_rx,)
+                .await
+                .is_err(),
+            "waiter must remain blocked after the original successful turn"
+        );
+
+        // Simulate bootstrap verification and finalization while retaining the
+        // original guard.
+        tokio::task::yield_now().await;
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(20), &mut acquired_rx,)
+                .await
+                .is_err(),
+            "waiter must remain blocked until bootstrap finalization completes"
+        );
+
+        drop(session_guard);
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), acquired_rx)
+            .await
+            .expect("waiter should acquire after bootstrap completion releases the guard")
+            .expect("waiter should report lock acquisition");
+        waiter.await.expect("waiter task should not panic");
     }
 }
 

@@ -2,12 +2,13 @@
 //!
 //! Inverts the state mutations performed by bootstrap completion:
 //! - Backs up `IDENTITY.md` / `SOUL.md` / `USER.md` from host and sandbox.
-//! - Deletes those files from both sides.
+//! - For configured sandboxes, requires authoritative sandbox identity deletion.
+//! - Deletes the host identity only after sandbox deletion succeeds.
 //! - Recreates `BOOTSTRAP.md` on host (the bootstrap-mode flag).
 //! - Deactivates all active `sessions` rows so the next message starts a
 //!   new CC session.
 //!
-//! Sandbox, credentials, memory bank, and `data.db` rows are preserved.
+//! Sandbox, credentials, memory bank, and other `data.db` rows are preserved.
 //! Process-compose orchestration (stop bot → execute → start bot) is the
 //! caller's responsibility (see `crates/right/src/main.rs::cmd_agent_rebootstrap`).
 //!
@@ -22,6 +23,10 @@ use right_openshell::openshell_proto::openshell::v1::open_shell_client::OpenShel
 
 /// Identity files that bootstrap (re)creates and that this command rewinds.
 pub const IDENTITY_FILES: &[&str] = &["IDENTITY.md", "SOUL.md", "USER.md"];
+
+/// Runtime-owned crash-recovery record written by the bot while committing
+/// bootstrap completion. It is transient state, not a codegen-managed file.
+pub const BOOTSTRAP_FINALIZATION_INTENT_FILE: &str = ".bootstrap-finalization.json";
 
 /// Resolved inputs for a rebootstrap run. Cheap to compute; doesn't touch
 /// the network or sandbox.
@@ -47,20 +52,15 @@ pub struct RebootstrapReport {
 
 /// Disposition of the sandbox-side cleanup half of `execute()`.
 ///
-/// Distinguishes "the agent has no sandbox by design" (`NoneMode`) from
-/// "we successfully cleaned the sandbox" (`Cleaned`) from "we punted because
-/// openshell was unhealthy or the sandbox was missing" (`Skipped`). The CLI
-/// surfaces `Skipped` as a warning so the operator knows identity files
-/// inside `/sandbox/` were NOT removed.
+/// A configured sandbox can only produce `Cleaned`: unavailable OpenShell,
+/// an absent sandbox, or failed deletion aborts the reset before host identity,
+/// sessions, or bootstrap answers are changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxStatus {
     /// Agent uses sandbox.mode = none — no sandbox to clean.
     NoneMode,
     /// Sandbox-side cleanup completed.
     Cleaned,
-    /// Skipped because openshell was unhealthy or sandbox didn't exist.
-    /// `reason` is a short, operator-readable string.
-    Skipped(&'static str),
 }
 
 /// Build a `RebootstrapPlan` for `agent_name` under `home`.
@@ -112,9 +112,15 @@ pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
 }
 
 /// Run the full rebootstrap sequence (host + sandbox file ops + session
-/// deactivation). Caller is responsible for stopping the bot before and
-/// restarting it after.
+/// deactivation). For configured sandboxes, host state is reset only after
+/// authoritative sandbox identity deletion succeeds. Caller is responsible
+/// for stopping the bot before and restarting it after.
 pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport> {
+    if plan.sandbox_mode == SandboxMode::Openshell && plan.sandbox_name.is_none() {
+        return Err(miette::miette!(
+            "configured OpenShell sandbox has no resolved name; refusing to reset host state"
+        ));
+    }
     std::fs::create_dir_all(&plan.backup_dir).map_err(|e| {
         miette::miette!(
             "failed to create backup dir {}: {e:#}",
@@ -127,13 +133,15 @@ pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport
     let (mut session, sandbox_status) = open_sandbox_session(plan.sandbox_name.as_deref()).await?;
     let sandbox_backed_up = backup_sandbox_files(session.as_mut(), &plan.backup_dir).await?;
 
-    // Delete from sandbox first — failure here would otherwise let
-    // reverse_sync re-populate the host on the next message.
+    // The sandbox is authoritative for sandboxed agents. Host identity,
+    // sessions, and answers remain untouched unless its deletion completed.
     delete_identity_from_sandbox(session.as_mut()).await?;
     delete_identity_from_host(&plan.agent_dir)?;
 
     write_bootstrap_md(&plan.agent_dir)?;
     let sessions_deactivated = deactivate_active_sessions(&plan.agent_dir).await?;
+    clear_bootstrap_answers(&plan.agent_dir).await?;
+    clear_bootstrap_finalization_intent(&plan.agent_dir)?;
 
     Ok(RebootstrapReport {
         backup_dir: plan.backup_dir.clone(),
@@ -185,10 +193,9 @@ struct SandboxSession {
 
 /// Resolve `sandbox_name` to a connected gRPC client + sandbox id.
 ///
-/// Returns a `(session, status)` pair so callers can both skip sandbox-side
-/// work (`session.is_none()`) and surface *why* it was skipped to the
-/// operator. None-mode, openshell unhealthy, and sandbox-absent are all
-/// non-errors — the caller decides how to report each.
+/// `None` means the agent explicitly uses `sandbox.mode = none`. Every failure
+/// to reach or resolve a configured sandbox is an error: continuing would reset
+/// host state while leaving the authoritative sandbox identity intact.
 async fn open_sandbox_session(
     sandbox_name: Option<&str>,
 ) -> miette::Result<(Option<SandboxSession>, SandboxStatus)> {
@@ -199,21 +206,17 @@ async fn open_sandbox_session(
     let mtls_dir = match right_openshell::openshell::preflight_check() {
         right_openshell::openshell::OpenShellStatus::Ready(d) => d,
         other => {
-            tracing::info!(
-                ?other,
-                "rebootstrap: openshell not ready, skipping sandbox-side ops"
-            );
-            return Ok((None, SandboxStatus::Skipped("openshell not ready")));
+            return Err(miette::miette!(
+                "OpenShell is not ready for configured sandbox '{sandbox}': {other:?}; refusing to reset host state"
+            ));
         }
     };
 
     let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
     if !right_openshell::openshell::sandbox_exists(&mut client, sandbox).await? {
-        tracing::info!(
-            sandbox,
-            "rebootstrap: sandbox absent, skipping sandbox-side ops"
-        );
-        return Ok((None, SandboxStatus::Skipped("sandbox absent")));
+        return Err(miette::miette!(
+            "configured sandbox '{sandbox}' does not exist; refusing to reset host state"
+        ));
     }
     let id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
     Ok((
@@ -279,6 +282,34 @@ fn write_bootstrap_md(agent_dir: &Path) -> miette::Result<()> {
         .map_err(|e| miette::miette!("failed to write BOOTSTRAP.md at {}: {e:#}", path.display()))
 }
 
+/// Remove any pending bootstrap-finalization intent after an explicit
+/// rebootstrap has reset identity and session state. Missing state is already
+/// clear; other filesystem errors fail the reset.
+pub fn clear_bootstrap_finalization_intent(agent_dir: &Path) -> miette::Result<()> {
+    let path = agent_dir.join(BOOTSTRAP_FINALIZATION_INTENT_FILE);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            let directory = std::fs::File::open(agent_dir).map_err(|error| {
+                miette::miette!(
+                    "failed to open agent directory {} after clearing bootstrap finalization intent: {error:#}",
+                    agent_dir.display()
+                )
+            })?;
+            directory.sync_all().map_err(|error| {
+                miette::miette!(
+                    "failed to sync agent directory {} after clearing bootstrap finalization intent: {error:#}",
+                    agent_dir.display()
+                )
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(miette::miette!(
+            "failed to clear bootstrap finalization intent {}: {error:#}",
+            path.display()
+        )),
+    }
+}
+
 /// Mark all active `sessions` rows in the agent's `data.db` as inactive.
 /// Returns the number of rows updated. Skipped (returns 0) if `data.db`
 /// is missing.
@@ -308,6 +339,19 @@ async fn deactivate_active_sessions(agent_dir: &Path) -> miette::Result<usize> {
     Ok(n)
 }
 
+async fn clear_bootstrap_answers(agent_dir: &Path) -> miette::Result<usize> {
+    if !agent_dir.join("data.db").exists() {
+        tracing::debug!("rebootstrap: data.db absent, skipping bootstrap answer cleanup");
+        return Ok(0);
+    }
+    let conn = right_db::open_connection(agent_dir, false)
+        .await
+        .map_err(|error| miette::miette!("open data.db failed: {error:#}"))?;
+    right_db::bootstrap_answers::clear(&conn)
+        .await
+        .map_err(|error| miette::miette!("clear bootstrap answers failed: {error:#}"))
+}
+
 /// Remove identity files from `agent_dir`. NotFound is silenced (idempotent);
 /// any other I/O error propagates — leaving stale identity files on disk
 /// while `BOOTSTRAP.md` is rewritten would defeat the whole command.
@@ -330,8 +374,8 @@ fn delete_identity_from_host(agent_dir: &Path) -> miette::Result<()> {
 
 /// Delete identity files from the sandbox via gRPC `exec_in_sandbox`.
 ///
-/// Skipped (returns `Ok`) when `session` is `None`. `rm -f` makes missing
-/// files non-fatal, so this is naturally idempotent.
+/// `None` is valid only for `sandbox.mode = none`. `rm -f` makes missing files
+/// non-fatal, so a reachable configured sandbox is naturally idempotent.
 async fn delete_identity_from_sandbox(session: Option<&mut SandboxSession>) -> miette::Result<()> {
     let Some(session) = session else {
         return Ok(());
@@ -363,6 +407,47 @@ async fn delete_identity_from_sandbox(session: Option<&mut SandboxSession>) -> m
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    async fn record_user_name_answer(
+        conn: &right_db::Connection,
+        chat_id: i64,
+        thread_id: i64,
+        assistant_message_id: i32,
+        user_message_id: i32,
+    ) {
+        assert_eq!(
+            right_db::bootstrap_answers::claim_owner(conn, chat_id, thread_id)
+                .await
+                .unwrap(),
+            right_db::bootstrap_answers::ClaimOwnerOutcome::Claimed
+        );
+        assert_eq!(
+            right_db::bootstrap_answers::record_question_issue(
+                conn,
+                "user_name",
+                chat_id,
+                thread_id,
+                assistant_message_id,
+            )
+            .await
+            .unwrap(),
+            right_db::bootstrap_answers::RecordQuestionIssueOutcome::Recorded
+        );
+        assert_eq!(
+            right_db::bootstrap_answers::record_current_answer(
+                conn,
+                "Ada",
+                chat_id,
+                thread_id,
+                user_message_id,
+            )
+            .await
+            .unwrap(),
+            right_db::bootstrap_answers::RecordCurrentAnswerOutcome::Recorded {
+                stage: "user_name",
+                next_stage: Some("agent_name")
+            }
+        );
+    }
 
     #[test]
     fn backup_host_files_copies_present_files() {
@@ -477,8 +562,20 @@ mod tests {
         let agent_dir = home.path().join("agents").join("f");
         std::fs::create_dir_all(&agent_dir).unwrap();
         // No identity files at all
+
         delete_identity_from_host(&agent_dir).unwrap();
         delete_identity_from_host(&agent_dir).unwrap();
+    }
+    #[test]
+    fn clear_finalization_intent_removes_runtime_state_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let intent = dir.path().join(BOOTSTRAP_FINALIZATION_INTENT_FILE);
+        std::fs::write(&intent, "pending").unwrap();
+
+        clear_bootstrap_finalization_intent(dir.path()).unwrap();
+        clear_bootstrap_finalization_intent(dir.path()).unwrap();
+
+        assert!(!intent.exists());
     }
 
     #[test]
@@ -572,6 +669,84 @@ mod tests {
         let _ = right_db::open_connection(dir.path(), true).await.unwrap();
         let n = deactivate_active_sessions(dir.path()).await.unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn clear_bootstrap_answers_removes_recorded_interview() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        record_user_name_answer(&conn, 1, 0, 9, 10).await;
+        drop(conn);
+
+        assert_eq!(clear_bootstrap_answers(dir.path()).await.unwrap(), 1);
+        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
+        assert_eq!(
+            right_db::bootstrap_answers::missing_stages(&conn, 1, 0)
+                .await
+                .unwrap(),
+            vec!["user_name", "agent_name", "nature", "vibe", "emoji"]
+        );
+        assert_eq!(
+            right_db::bootstrap_answers::owner(&conn).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_configured_sandbox_unavailable_preserves_host_state() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = home.path().join("agents").join("unavailable");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        for &name in IDENTITY_FILES {
+            std::fs::write(agent_dir.join(name), format!("original {name}\n")).unwrap();
+        }
+        let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
+        conn.execute(
+            "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
+             VALUES (7, 3, 'preserved-session', 1)",
+            [],
+        )
+        .await
+        .unwrap();
+        record_user_name_answer(&conn, 7, 3, 98, 99).await;
+        drop(conn);
+
+        let plan = RebootstrapPlan {
+            agent_name: "unavailable".into(),
+            agent_dir: agent_dir.clone(),
+            backup_dir: home.path().join("backup"),
+            sandbox_mode: SandboxMode::Openshell,
+            sandbox_name: None,
+        };
+        let error = execute(&plan).await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("refusing to reset host state"),
+            "unexpected error: {error:#}"
+        );
+
+        for &name in IDENTITY_FILES {
+            assert_eq!(
+                std::fs::read_to_string(agent_dir.join(name)).unwrap(),
+                format!("original {name}\n")
+            );
+        }
+        assert!(!agent_dir.join("BOOTSTRAP.md").exists());
+        let conn = right_db::open_connection(&agent_dir, false).await.unwrap();
+        let active_sessions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE is_active = 1",
+                [],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(active_sessions, 1);
+        assert_eq!(
+            right_db::bootstrap_answers::missing_stages(&conn, 7, 3)
+                .await
+                .unwrap(),
+            vec!["agent_name", "nature", "vibe", "emoji"]
+        );
     }
 
     #[tokio::test]

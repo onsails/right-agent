@@ -38,8 +38,9 @@ const V44_SCHEMA: &str = include_str!("sql/v44_skill_lifecycle_cron.sql");
 const V46_NOTICE_TOKEN: &str = include_str!("sql/v46_notice_token.sql");
 const V47_CRON_SKILL_LINKS: &str = include_str!("sql/v47_cron_skill_links.sql");
 const V48_CURATOR_RUNS: &str = include_str!("sql/v48_curator_runs.sql");
+const V49_BOOTSTRAP_ANSWERS: &str = include_str!("sql/v49_bootstrap_answers.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 48;
+pub const LATEST_SCHEMA_VERSION: u32 = 49;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -1096,6 +1097,11 @@ pub static MIGRATIONS: Migrations = Migrations {
         Migration {
             version: 48,
             sql: V48_CURATOR_RUNS,
+            hook: None,
+        },
+        Migration {
+            version: 49,
+            sql: V49_BOOTSTRAP_ANSWERS,
             hook: None,
         },
     ],

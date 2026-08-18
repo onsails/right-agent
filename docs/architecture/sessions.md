@@ -157,6 +157,51 @@ Right Agent does not add custom subagent definition files; when allowed,
 subagents are spawned by the main Claude Code session through the built-in
 `Agent` tool.
 
+## Bootstrap completion
+
+An on-disk `BOOTSTRAP.md` marks onboarding as pending. Under the per-agent
+bootstrap mutex, the worker claims one `(chat_id, thread_id)` owner before
+session preparation; other scopes receive a static conflict without invoking
+Claude or creating a session.
+
+For the durable first-missing `user_name`, `agent_name`, `nature`, `vibe`, and
+`emoji` stages, a tool-less Claude invocation receives the authoritative stage
+and recorded answers in its system prompt and a constant stdin request to ask
+that stage naturally. The worker accepts only one non-empty question with
+`bootstrap_complete: false` and the exact expected `bootstrap_stage`, delivers
+it, then persists the delivered Telegram message id as the question issue. A
+trigger is never consumed as an answer when no matching issue existed.
+
+One later routed message records the answer directly and advances the stage.
+Multi-message batches record none and invoke Claude to re-ask the current stage.
+Question mode disables all tools and does not configure MCP. Final mode uses the
+same standard MCP setup and progress behavior as ordinary foreground turns,
+while retaining the built-in file tools needed to create identity files.
+
+Failed delivery does not publish an issue, so a later message retries. After the
+emoji answer, `BootstrapFinal` receives the exact JSON answers in the system
+prompt, creates the identity files, and must return stage `final` with completion
+true. Verification and durable finalization remain worker-owned.
+
+A verified completion is committed through the runtime-owned
+`.bootstrap-finalization.json` intent under `agent_dir`: atomically write and
+sync `{chat_id, thread_id, root_session_id}`, deactivate that exact active
+session, remove `BOOTSTRAP.md`, then clear the intent last. Marker-removal
+failure reactivates the exact session before returning an error.
+
+Bot startup recovers this intent before Telegram dispatch. It verifies the
+recorded answers and identity files again, then idempotently finishes
+exact-session deactivation and marker removal before clearing the intent.
+Missing identity restores `BOOTSTRAP.md` and reactivates the named session when
+its row exists; malformed intent or unverifiable/missing identity fails startup
+rather than exposing a false Normal mode. Explicit rebootstrap clears stale
+intent after resetting identity, marker, sessions, answers, and outstanding
+question issues.
+
+Bootstrap answer recording, identity verification, and finalization are
+worker-owned. No bootstrap MCP tool is exposed to the agent; explicit
+lifecycle/rebootstrap management alone owns reset.
+
 ## Per-session mutex on --resume
 
 Worker (`bot/src/telegram/worker.rs`) and async delivery

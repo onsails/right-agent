@@ -459,6 +459,52 @@ pub async fn latest_assistant_is_unique_exact(
     Ok(matches.len() == 1)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiteralUserMessage {
+    pub message_id: i32,
+    pub content: String,
+}
+
+/// Returns the newest archived user message in the exact Telegram conversation
+/// scope iff it contains `needle` as a case-insensitive literal substring.
+/// Historical messages are never considered.
+pub async fn newest_user_message_containing_literal(
+    conn: &Connection,
+    chat_id: i64,
+    thread_id: i64,
+    needle: &str,
+) -> Result<Option<LiteralUserMessage>> {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return Ok(None);
+    }
+    let rows: Vec<(Option<i32>, String)> = conn
+        .query_all(
+            "SELECT message_id, content
+             FROM conversation_messages
+             WHERE platform = 'telegram'
+               AND chat_id = ?
+               AND thread_id = ?
+               AND role = 'user'
+             ORDER BY id DESC
+             LIMIT 1",
+            crate::params![chat_id, thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .await?;
+    let Some((message_id, content)) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let needle = needle.to_lowercase();
+    if !content.to_lowercase().contains(&needle) {
+        return Ok(None);
+    }
+    Ok(message_id.map(|message_id| LiteralUserMessage {
+        message_id,
+        content,
+    }))
+}
+
 fn fetched_from_row(row: &crate::row::Row<'_>) -> Result<FetchedMessage> {
     Ok(FetchedMessage {
         message_id: row.get(0)?,
@@ -1300,6 +1346,41 @@ mod tests {
         assert_eq!(thread_results[0].message_id, Some(25));
         assert_eq!(chat_results.len(), 1);
         assert_eq!(chat_results[0].message_id, Some(25));
+    }
+    #[tokio::test]
+    async fn literal_verification_uses_only_newest_user_message_in_scope() {
+        let conn = migrated_connection().await;
+        archive_message(&conn, user_message(100, 10, 25, "My name is Ada"))
+            .await
+            .unwrap();
+        archive_message(&conn, user_message(100, 10, 26, "I prefer calm energy"))
+            .await
+            .unwrap();
+        archive_message(&conn, user_message(100, 11, 27, "My name is Grace"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            newest_user_message_containing_literal(&conn, 100, 10, "ada")
+                .await
+                .unwrap(),
+            None,
+            "historical matching messages must not verify an answer"
+        );
+        assert_eq!(
+            newest_user_message_containing_literal(&conn, 100, 10, "CALM")
+                .await
+                .unwrap()
+                .map(|message| message.message_id),
+            Some(26)
+        );
+        assert_eq!(
+            newest_user_message_containing_literal(&conn, 100, 11, "Grace")
+                .await
+                .unwrap()
+                .map(|message| message.message_id),
+            Some(27)
+        );
     }
 
     #[tokio::test]
