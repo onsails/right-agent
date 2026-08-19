@@ -134,7 +134,7 @@ pub enum SandboxError {
     #[error("failed to install the pinned microsandbox runtime: {source}")]
     RuntimeInstall {
         #[source]
-        source: SdkError,
+        source: Box<SdkError>,
     },
     #[error("failed to lock the runtime-install lockfile {}", path.display())]
     RuntimeInstallLock { path: PathBuf, source: io::Error },
@@ -180,26 +180,33 @@ pub enum SandboxError {
         name: String,
         operation: &'static str,
         #[source]
-        source: SdkError,
+        source: Box<SdkError>,
     },
 
     /// The guest command never started (binary missing, bad cwd, guest user
     /// setup failure). A command-level error: the sandbox itself is healthy.
-    #[error("sandbox '{name}': command '{cmd}' failed to start in the guest: {message}")]
+    #[error("sandbox '{name}': command '{cmd}' failed to start in the guest ({kind}): {message}")]
     ExecSpawn {
         name: String,
         cmd: String,
+        kind: String,
         message: String,
     },
 
     /// Writing to or closing a guest command's stdin failed. The exec session
-    /// is torn down; the sandbox itself may be healthy.
+    /// is torn down; the sandbox itself may be healthy. The message carries
+    /// the full `{:#}` chain from the SDK's `ExecStdinError`.
     #[error("sandbox '{name}': stdin for '{cmd}' failed: {message}")]
     ExecStdin {
         name: String,
         cmd: String,
         message: String,
     },
+
+    /// The exec session ended without an exit event — the agent connection
+    /// dropped mid-session. A backend-health signal, not a command error.
+    #[error("sandbox '{name}': exec session for '{cmd}' ended without an exit event")]
+    ExecLost { name: String, cmd: String },
 
     /// The runtime reported the secret rotation cannot be applied through
     /// `modify()` at all (e.g. capability missing on an old runtime).
@@ -214,9 +221,10 @@ pub enum SandboxError {
         details: String,
     },
 
-    /// The plan announced changes but `apply()` reported none applied.
-    #[error("sandbox '{name}': rotating secret '{env_var}' planned changes but applied none")]
-    RotationNotApplied { name: String, env_var: String },
+    /// The sandbox has no secret bound to this env var to rotate. The plan
+    /// classified the change as an add rather than a rotation.
+    #[error("sandbox '{name}' has no secret '{env_var}' to rotate")]
+    RotationTargetMissing { name: String, env_var: String },
 }
 
 impl SandboxError {
@@ -243,12 +251,14 @@ impl SandboxError {
                 sandbox: name.clone(),
             }),
             Self::Operation { name, source, .. } => Some(classify_sdk_error(name, &source.0)),
+            // A dropped exec session is a backend-health signal (agent/connectivity).
+            Self::ExecLost { .. } => Some(SandboxCause::Unreachable),
             Self::InvalidSpec { .. }
             | Self::ExecSpawn { .. }
             | Self::ExecStdin { .. }
             | Self::RotationUnsupported { .. }
-            | Self::RotationConflict { .. }
-            | Self::RotationNotApplied { .. } => None,
+            | Self::RotationTargetMissing { .. }
+            | Self::RotationConflict { .. } => None,
         }
     }
 }
@@ -365,6 +375,7 @@ mod tests {
         let spawn = SandboxError::ExecSpawn {
             name: "right-a".to_owned(),
             cmd: "claude".to_owned(),
+            kind: "NotFound".to_owned(),
             message: "no such file".to_owned(),
         };
         assert_eq!(spawn.cause(), None);
@@ -395,7 +406,7 @@ mod tests {
         let err = SandboxError::Operation {
             name: "right-a".to_owned(),
             operation: "exec",
-            source: SdkError(MicrosandboxError::SandboxNotRunning("right-a".to_owned())),
+            source: Box::new(SdkError(MicrosandboxError::SandboxNotRunning("right-a".to_owned()))),
         };
         assert_eq!(
             err.cause(),

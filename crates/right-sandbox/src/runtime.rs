@@ -64,17 +64,18 @@ pub fn diagnose_host() -> Result<(), SandboxError> {
 
 /// The actual install path, run at most once per process unless it fails.
 async fn install_once() -> Result<(), SandboxError> {
-    if setup::is_installed() {
-        return Ok(());
-    }
-    let _lock = acquire_install_lock()?;
-    // A process that held the lock before us may have completed the install.
+    // Take the cross-process lock unconditionally on this cold path. The
+    // OnceCell guards the hot path; here a concurrent process may have a
+    // half-extracted install (the SDK's install is not atomic), and the
+    // sentinel files can be present before extraction/chmod finish — so the
+    // is_installed() check must run under the lock, never before it.
+    let _lock = acquire_install_lock().await?;
     if setup::is_installed() {
         return Ok(());
     }
     tracing::info!("installing pinned microsandbox runtime into ~/.microsandbox");
     setup::install().await.map_err(|source| SandboxError::RuntimeInstall {
-        source: crate::error::SdkError(source),
+        source: Box::new(crate::error::SdkError(source)),
     })?;
     if !setup::is_installed() {
         return Err(SandboxError::RuntimeInstallVerify);
@@ -83,12 +84,13 @@ async fn install_once() -> Result<(), SandboxError> {
     Ok(())
 }
 
-/// Take the host-global advisory install lock, blocking until free.
+/// Take the host-global advisory install lock, waiting until free.
 ///
 /// The kernel releases the lock if the holder dies mid-install; the next
 /// process re-checks `is_installed()` under the lock, so a partial install is
-/// always completed by someone.
-fn acquire_install_lock() -> Result<InstallLock, SandboxError> {
+/// always completed by someone. The wait is async so a concurrent install
+/// never blocks a tokio worker thread for the full download.
+async fn acquire_install_lock() -> Result<InstallLock, SandboxError> {
     let path = std::env::temp_dir().join(format!("{INSTALL_LOCK_KEY}.lock"));
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -103,7 +105,7 @@ fn acquire_install_lock() -> Result<InstallLock, SandboxError> {
         match file.try_lock() {
             Ok(()) => return Ok(InstallLock { _file: file }),
             Err(std::fs::TryLockError::WouldBlock) => {
-                std::thread::sleep(INSTALL_LOCK_RETRY);
+                tokio::time::sleep(INSTALL_LOCK_RETRY).await;
             }
             Err(std::fs::TryLockError::Error(source)) => {
                 return Err(SandboxError::RuntimeInstallLock { path, source });
@@ -111,6 +113,7 @@ fn acquire_install_lock() -> Result<InstallLock, SandboxError> {
         }
     }
 }
+
 
 /// The held advisory lock; drop releases it.
 struct InstallLock {
@@ -129,9 +132,9 @@ mod tests {
         assert_eq!(INSTALL_LOCK_KEY, "rt-msb-runtime-install");
     }
 
-    #[test]
-    fn install_lock_can_be_taken() {
-        let lock = acquire_install_lock().expect("install lock");
+    #[tokio::test]
+    async fn install_lock_can_be_taken() {
+        let lock = acquire_install_lock().await.expect("install lock");
         drop(lock);
     }
 

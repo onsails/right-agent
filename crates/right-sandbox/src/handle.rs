@@ -73,7 +73,7 @@ impl SandboxHandle {
                     .map_err(|source| SandboxError::Operation {
                         name: spec.name.clone(),
                         operation: "create",
-                        source: source.into(),
+                        source: Box::new(crate::error::SdkError(source)),
                     })?;
                 Ok(Self::from_sandbox(spec.name.clone(), sandbox))
             }
@@ -263,7 +263,6 @@ impl SandboxHandle {
     ) -> Result<SecretRotation, SandboxError> {
         binding.validate_ref()?;
 
-
         let plan = self
             .sandbox
             .modify()
@@ -290,12 +289,21 @@ impl SandboxHandle {
         }
 
         let mut disposition = RotationDisposition::Live;
-        let mut saw_change = false;
         for change in &plan.changes {
             let PlannedChange::Secret(secret) = change else {
                 continue;
             };
-            saw_change = true;
+            // A rotation re-asserts only env+source, so a sandbox that has the
+            // binding classifies the change as Rotated. Anything else (notably
+            // Added) means the sandbox has no such secret — surface that
+            // directly instead of the SDK's downstream "needs at least one
+            // allowed host" conflict.
+            if secret.change != microsandbox::SecretChangeKind::Rotated {
+                return Err(SandboxError::RotationTargetMissing {
+                    name: self.name.clone(),
+                    env_var: binding.env_var.clone(),
+                });
+            }
             match secret.disposition {
                 ModificationDisposition::Live => {}
                 ModificationDisposition::NextStart => {
@@ -326,13 +334,6 @@ impl SandboxHandle {
             .apply()
             .await
             .map_err(|source| operation_error(&self.name, "rotate secret", source))?;
-
-        if saw_change && !applied.applied {
-            return Err(SandboxError::RotationNotApplied {
-                name: self.name.clone(),
-                env_var: binding.env_var.clone(),
-            });
-        }
 
         Ok(SecretRotation {
             disposition,
@@ -368,7 +369,8 @@ impl SandboxHandle {
             MicrosandboxError::ExecFailed(failed) => SandboxError::ExecSpawn {
                 name: self.name.clone(),
                 cmd: cmd.to_owned(),
-                message: failed.message,
+                kind: format!("{:?}", failed.kind),
+                message: crate::exec::format_exec_failed(&failed),
             },
             source => operation_error(&self.name, operation, source),
         }
@@ -448,6 +450,6 @@ fn operation_error(
     SandboxError::Operation {
         name: name.to_owned(),
         operation,
-        source: crate::error::SdkError(source),
+        source: Box::new(crate::error::SdkError(source)),
     }
 }

@@ -154,13 +154,20 @@ impl ExecStream {
             Some(microsandbox::ExecEvent::Failed(failed)) => Err(SandboxError::ExecSpawn {
                 name: self.name.clone(),
                 cmd: self.cmd.clone(),
-                message: failed.message,
+                kind: format!("{:?}", failed.kind),
+                message: format_exec_failed(&failed),
             }),
-            Some(microsandbox::ExecEvent::StdinError(err)) => Err(SandboxError::ExecStdin {
-                name: self.name.clone(),
-                cmd: self.cmd.clone(),
-                message: format!("{err:?}"),
-            }),
+            Some(microsandbox::ExecEvent::StdinError(err)) => {
+                let message = match &err.errno_name {
+                    Some(errno) => format!("{} [{errno}]", err.message),
+                    None => err.message,
+                };
+                Err(SandboxError::ExecStdin {
+                    name: self.name.clone(),
+                    cmd: self.cmd.clone(),
+                    message,
+                })
+            }
         }
     }
 
@@ -184,10 +191,9 @@ impl ExecStream {
             match self.next_event().await? {
                 Some(ExecEvent::Exited { code }) => return Ok(code),
                 None => {
-                    return Err(SandboxError::ExecSpawn {
+                    return Err(SandboxError::ExecLost {
                         name: self.name.clone(),
                         cmd: self.cmd.clone(),
-                        message: "the exec session ended without an exit event".to_owned(),
                     });
                 }
                 _ => {}
@@ -203,7 +209,7 @@ impl ExecStream {
             .map_err(|source| SandboxError::Operation {
                 name: self.name.clone(),
                 operation: "exec signal",
-                source: source.into(),
+                source: Box::new(crate::error::SdkError(source)),
             })
     }
 
@@ -215,7 +221,7 @@ impl ExecStream {
             .map_err(|source| SandboxError::Operation {
                 name: self.name.clone(),
                 operation: "exec kill",
-                source: source.into(),
+                source: Box::new(crate::error::SdkError(source)),
             })
     }
 }
@@ -242,7 +248,7 @@ impl ChunkedStdin {
                 .map_err(|source| SandboxError::ExecStdin {
                     name: self.name.clone(),
                     cmd: self.cmd.clone(),
-                    message: format!("{source}"),
+                    message: format!("{source:#}"),
                 })?;
         }
         Ok(())
@@ -256,8 +262,24 @@ impl ChunkedStdin {
             .map_err(|source| SandboxError::ExecStdin {
                 name: self.name.clone(),
                 cmd: self.cmd.clone(),
-                message: format!("{source}"),
+                message: format!("{source:#}"),
             })
+    }
+}
+
+/// Render an SDK `ExecFailed` with its errno/stage context appended.
+///
+/// `kind` is carried separately on [`SandboxError::ExecSpawn`]; this formats
+/// only the human message plus the structured `errno_name`/`stage` when the
+/// agentd classifier populated them.
+pub(crate) fn format_exec_failed(
+    failed: &microsandbox::protocol::exec::ExecFailed,
+) -> String {
+    match (&failed.errno_name, &failed.stage) {
+        (Some(errno), Some(stage)) => format!("{} [{errno} at {stage}]", failed.message),
+        (Some(errno), None) => format!("{} [{errno}]", failed.message),
+        (None, Some(stage)) => format!("{} [at {stage}]", failed.message),
+        (None, None) => failed.message.clone(),
     }
 }
 
