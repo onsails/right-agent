@@ -181,9 +181,12 @@ pub(super) async fn sandbox_exists(name: &str) -> miette::Result<bool> {
     .await
     .map_err(|_| miette::miette!("`openshell sandbox get {name}` timed out"))?;
     match probe {
-        // The CLI reports a missing sandbox on stderr with a zero exit, so the
-        // absence has to be read out of the payload rather than the status.
-        Ok(json) => Ok(sandbox_phase(&json).is_ok()),
+        // A successful `get` IS existence; whether the sandbox is usable is
+        // wait_for_ready's question. Deciding it on the payload instead would
+        // fail open — a response that parsed but carried no phase would read
+        // as "gone", and the delete-confirmation loop would call that deleted.
+        Ok(_) => Ok(true),
+        // A missing sandbox exits non-zero and names itself on stderr.
         Err(error) if is_sandbox_not_found(&format!("{error:#}")) => Ok(false),
         Err(error) => Err(error),
     }
