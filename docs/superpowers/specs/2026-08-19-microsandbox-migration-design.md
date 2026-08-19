@@ -32,17 +32,18 @@ conflict that blocks OpenShell.
 | Cutover | No backend abstraction. New concrete `right-sandbox` crate; `right-openshell` deleted whole in the final stage. Migration is an explicit one-time command, so no runtime dispatch between backends is needed. |
 | Sandboxless mode | `sandbox: mode: none` is removed. Every Agent has an Agent Sandbox. A config carrying `mode: none` is a hard error; `mode: openshell` is accepted and ignored for one release, then the field is dropped. |
 | Process ownership | The Agent's bot spawns its sandbox detached and re-attaches by name on restart. No new daemon, no process-compose entry. Sandboxes do not auto-start on host reboot; the supervisor starts them on attach. |
-| Command transport | SSH is retained via `ProxyCommand msb ssh serve <name> --stdio`. `resolved_sandbox` + `ssh_config_path` collapse into one `SandboxHandle`. |
+| Command transport | `sandbox.exec_stream()` — native streaming stdout/stderr with stdin. No SSH: `ssh_config_path`, ControlMaster, host aliases, and `quote_ssh_remote_args` are all deleted. SSH existed only because OpenShell offered no other pipe. `resolved_sandbox` + `ssh_config_path` collapse into one `SandboxHandle`. |
 | Egress | Permissive = `public` + `host`. Restrictive = `host` + explicit allowlist, shipped but documented experimental until exercised. Egress is a typed value applied through the SDK; `policy.yaml` codegen and the `SandboxPolicyApply` codegen category are deleted. |
-| Filesystem | The microVM boundary replaces landlock. No host bind mounts; all transfer goes through the fs API/SFTP. The `SandboxRecreate` codegen category disappears. |
+| Filesystem | The microVM boundary replaces landlock. No host bind mounts; all transfer goes through the SDK fs API. The `SandboxRecreate` codegen category disappears. |
 | Guest user | An unprivileged `sandbox` user runs `claude`; provisioning runs as root. This preserves the `chmod a-w` integrity guarantee on `/sandbox/.platform`, which root would ignore. |
 | Resources | 2 vCPU, 8 GiB memory, 16 GiB writable layer, overridable per Agent under `sandbox.resources`. Memory is a limit, not a reservation. |
 | Base image | Stock OCI image plus imperative bootstrap. No Right-maintained image, no base snapshot. |
 | Providers | Credentials live in `~/.right/providers.db` (SQLite, 0600) and reach the sandbox as microsandbox source-ref secrets, so the runtime persists no secret. Ownership is a column; `shared_from` is dropped from `agent.yaml`. Built-in provider types become Rust consts; `managed_profiles.rs` is deleted. |
 | Injection | Headers by default; `query_params` opt-in per catalog entry; body injection never. Violations use `BlockAndLog` plus an operator alert over Telegram. |
 | Provider status | `ready` / `needs-value` / `error`. Composition confirmation, `wait_for_provider_composed*`, and `ensure_v2_enabled` are deleted. |
-| Upstream risk | Exact-pin the `microsandbox` crate, assert the version at startup, and keep a small real-VM contract suite. |
-| Diagnosis | `GatewayCause` is replaced by `SandboxCause { MsbMissing, MsbVersionMismatch, HypervisorUnavailable, SandboxNotFound, SandboxNotRunning, Unreachable }`. `SandboxHealth` and `sandbox_gate` are unchanged. |
+| Runtime install | No user-visible install and no PATH dependency. Right calls `microsandbox::setup::is_installed()` / `setup::install()` at startup, which downloads the SDK's pinned `msb` and `libkrunfw` into `~/.microsandbox/` and verifies them. |
+| Upstream risk | Exact-pin the `microsandbox` crate. The SDK pins its own runtime version, so no separate version floor is needed. Keep a small real-VM contract suite. |
+| Diagnosis | `GatewayCause` is replaced by `SandboxCause { RuntimeInstallFailed, HypervisorUnavailable, SandboxNotFound, SandboxNotRunning, Unreachable }`. `SandboxHealth` and `sandbox_gate` are unchanged. |
 | Testing | No fake backend. Sandbox-touching tests become real-VM `ci_msb_*` tests that do not run on GitHub-hosted runners. |
 | Migration | Explicit `right agent migrate-sandbox`; the bot refuses to start against an unmigrated Agent with an actionable message. |
 
@@ -51,8 +52,8 @@ conflict that blocks OpenShell.
 No refactoring starts until all seven hold on an Apple Silicon workstation. Each is
 currently unverified; failure of 1, 2, or 5 changes the design.
 
-1. `claude -p` runs over `msb ssh serve --stdio` with piped stdin and `stream-json`
-   stdout.
+1. `claude -p` runs under `sandbox.exec_stream()` with piped stdin and `stream-json`
+   stdout, including a long turn that outlives any idle timeout.
 2. A real provider API returns success with a substituted credential. Upstream
    configures no ALPN on either TLS side, so an h2-capable guest is expected to fall
    back to HTTP/1.1 at the interceptor — inferred from rustls semantics, never tested
@@ -69,8 +70,7 @@ currently unverified; failure of 1, 2, or 5 changes the design.
 
 1. **PoC.** The gate above. Throwaway scripts, no production code.
 2. **`right-sandbox` crate.** Concrete msb-backed sandbox lifecycle, exec, file
-   transfer, egress, secrets, and the unified `SandboxHandle`. Version pin and
-   preflight.
+   transfer, egress, secrets, runtime install, and the unified `SandboxHandle`.
 3. **Provider store.** `~/.right/providers.db`, built-in catalog as consts, ownership
    and borrowing, dashboard and internal-API routes repointed. Dashboard keeps its
    current flows; `composed` becomes the tri-state status.
