@@ -247,7 +247,12 @@ async fn archive_openshell_home(
         ));
     }
 
-    let ssh_config = openshell::generate_ssh_config(old_name, migration_dir).await?;
+    // The SSH config and control-master socket are transport scratch, not
+    // backup content: keep them in a temp dir so the migration directory the
+    // operator is told to treat as a backup holds only the archive.
+    let ssh_dir =
+        tempfile::tempdir().map_err(|e| miette::miette!("create ssh working directory: {e:#}"))?;
+    let ssh_config = openshell::generate_ssh_config(old_name, ssh_dir.path()).await?;
     let ssh_host = openshell::ssh_host_for_sandbox(old_name);
     let archive = migration_dir.join("sandbox.tar.gz");
     let download = openshell::ssh_tar_download(
@@ -262,7 +267,7 @@ async fn archive_openshell_home(
     openshell::tear_down_control_master(
         &ssh_config,
         &ssh_host,
-        &openshell::control_master_socket_path(migration_dir, old_name),
+        &openshell::control_master_socket_path(ssh_dir.path(), old_name),
     )
     .await;
     download?;

@@ -53,6 +53,7 @@ walkdir = { workspace = true }
 secrecy = { workspace = true }
 tonic = { workspace = true }
 uuid = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2.2"
@@ -60,6 +61,5 @@ predicates = "3.1"
 right-db = { path = "../right-db", version = "*", features = ["test-support"] }
 right-providers = { path = "../right-providers", version = "*", features = ["test-support"] }
 right-openshell = { path = "../right-openshell", version = "*", features = ["test-support"] }
-tempfile = "3.27"
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
