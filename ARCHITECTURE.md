@@ -511,16 +511,12 @@ cloudflared config) are all `Regenerated(BotRestart)` — reread on
 `crates/right-codegen/src/contract.rs` provides the only sanctioned
 writers:
 
-- `write_regenerated(path, content)` — all `Regenerated` outputs except
-  `SandboxPolicyApply`.
+- `write_regenerated(path, content)` — all `Regenerated` outputs.
 - `write_regenerated_bytes(path, content)` — byte variant for non-UTF-8
   payloads.
 - `write_merged_rmw(path, merge_fn)` — read-modify-write with
   unknown-field preservation.
 - `write_agent_owned(path, initial)` — no-op if file exists.
-- `write_and_apply_sandbox_policy(sandbox, path, content).await` — the
-  ONLY way to update policy for a running sandbox. Writes + applies
-  atomically via `openshell policy set --wait`.
 
 Direct `std::fs::write` inside codegen modules is a review-blocking
 defect.

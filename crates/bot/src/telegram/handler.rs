@@ -331,9 +331,13 @@ pub(crate) async fn handle_message(
                     bot: ctx.bot.clone(),
                     agent_db_dir: ctx.agent_dir.0.clone(),
                     debug: Arc::clone(&settings.debug),
-                    // Resolved once per turn from the runtime handle: the
-                    // supervisor publishes a new handle after every recovery.
-                    sandbox: settings.sandbox_runtime.current_sandbox(),
+                    // Seeded empty on purpose: `spawn_worker`'s debounce loop
+                    // re-resolves this from `sandbox_runtime` at the top of
+                    // every batch, because the supervisor publishes a new
+                    // handle after each recovery. Seeding a handle here would
+                    // be dead on arrival and invite the next reader to trust
+                    // a snapshot.
+                    sandbox: None,
                     auth_watcher_active: Arc::clone(&ctx.intercept_slots.auth_watcher),
                     auth_code_tx: Arc::clone(&ctx.intercept_slots.auth_code),
                     show_thinking: settings.show_thinking,

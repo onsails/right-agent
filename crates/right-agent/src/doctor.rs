@@ -176,47 +176,65 @@ fn check_binary(name: &str, fix_hint: Option<&str>) -> DoctorCheck {
     }
 }
 
-/// Check whether the OpenShell sandbox for a given agent exists and is READY.
+/// Check whether the agent's microVM exists and is running.
 ///
-/// Returns `None` when OpenShell is not ready (certs missing, not installed) —
-/// the caller skips the check silently in that case.
+/// A missing sandbox is not an error the operator must repair: the bot's
+/// supervisor creates it at bring-up.
 async fn check_sandbox_for_agent(
     agent_name: &str,
     config: Option<&crate::agent::types::AgentConfig>,
 ) -> Option<DoctorCheck> {
-    // Only check if OpenShell is available.
-    let mtls_dir = match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-        _ => return None, // OpenShell not ready — skip sandbox check
-    };
-
     let explicit_sandbox_name = config
         .and_then(|c| c.sandbox.as_ref())
         .and_then(|s| s.name.as_deref());
-    let sandbox =
-        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+    let sandbox = right_sandbox::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+    let name = format!("sandbox/{agent_name}");
 
-    let result = async {
-        let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-        right_openshell::openshell::is_sandbox_ready(&mut client, &sandbox).await
-    }
-    .await;
-
-    match result {
-        Ok(true) => Some(DoctorCheck {
-            name: format!("sandbox/{agent_name}"),
-            status: CheckStatus::Pass,
-            detail: format!("sandbox '{sandbox}' exists and READY"),
-            fix: None,
-        }),
-        Ok(false) => Some(DoctorCheck {
-            name: format!("sandbox/{agent_name}"),
-            status: CheckStatus::Fail,
-            detail: format!("sandbox '{sandbox}' not found"),
-            fix: Some(format!("Run `right agent init {agent_name}` to create it")),
-        }),
+    match right_sandbox::SandboxHandle::attach(&sandbox).await {
+        Ok(handle) => match handle.status().await {
+            Ok(phase) if phase.is_running() => Some(DoctorCheck {
+                name,
+                status: CheckStatus::Pass,
+                detail: format!("sandbox '{sandbox}' is {phase}"),
+                fix: None,
+            }),
+            Ok(phase) => Some(DoctorCheck {
+                name,
+                status: CheckStatus::Warn,
+                detail: format!("sandbox '{sandbox}' is {phase}, not running"),
+                fix: Some(
+                    "The bot starts the sandbox when the agent runs; `right up` brings it back"
+                        .to_owned(),
+                ),
+            }),
+            Err(e) => Some(DoctorCheck {
+                name,
+                status: CheckStatus::Warn,
+                detail: format!("sandbox '{sandbox}' status unavailable: {e:#}"),
+                fix: None,
+            }),
+        },
+        // A missing sandbox is normal before the agent has ever run: the
+        // supervisor creates it at bring-up, so this is not a failure the
+        // operator has to repair by hand.
+        Err(e)
+            if matches!(
+                e.cause(),
+                Some(right_sandbox::SandboxCause::SandboxNotFound { .. })
+            ) =>
+        {
+            Some(DoctorCheck {
+                name,
+                status: CheckStatus::Warn,
+                detail: format!("sandbox '{sandbox}' does not exist yet"),
+                fix: Some(
+                    "`right up` creates it on the agent's first run — no manual step is needed"
+                        .to_owned(),
+                ),
+            })
+        }
         Err(e) => Some(DoctorCheck {
-            name: format!("sandbox/{agent_name}"),
+            name,
             status: CheckStatus::Warn,
             detail: format!("sandbox check failed: {e:#}"),
             fix: None,

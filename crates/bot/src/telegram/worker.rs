@@ -2230,15 +2230,17 @@ pub fn spawn_worker(
                 batch_size = 1,
                 "worker received message, starting debounce"
             );
-            // Re-resolve the sandbox handle for this batch. The supervisor
-            // publishes a NEW handle on recovery, so a snapshot taken when the
-            // worker spawned goes stale: a worker born during a degraded
-            // window would hold `None` forever and refuse every turn even
-            // after the backend came back, and one born while Ready would keep
-            // addressing a VM that recovery has since replaced.
-            ctx.sandbox = ctx.sandbox_runtime.current_sandbox();
             let batch = collect_batch(first, &mut rx).await;
             super::wait_for_bg_handoff_gate(&ctx.bg_handoff_gates, key).await;
+            // Re-resolve the sandbox handle for this batch, after the debounce
+            // and handoff waits so the window between resolving and using it
+            // stays as small as possible. The supervisor publishes a NEW
+            // handle on recovery, so a snapshot taken when the worker spawned
+            // goes stale: a worker born during a degraded window would hold
+            // `None` forever and refuse every turn even after the backend came
+            // back, and one born while Ready would keep addressing a VM that
+            // recovery has since replaced.
+            ctx.sandbox = ctx.sandbox_runtime.current_sandbox();
             if ctx.shutdown.is_cancelled() {
                 tracing::warn!(
                     ?key,
@@ -6124,28 +6126,42 @@ mod tests {
     /// during a degraded window held `None` forever and refused every turn
     /// even after the backend recovered (bricked until `/new`), and one born
     /// while Ready kept addressing a VM recovery had already replaced. The
-    /// debounce loop therefore re-resolves `ctx.sandbox` once per batch,
-    /// exactly as the dashboard and keepalive paths resolve per use.
+    /// debounce loop therefore re-resolves `ctx.sandbox` once per batch.
+    ///
+    /// This drives the real `spawn_worker` loop rather than replicating its
+    /// refresh line, so deleting that line fails the test.
     #[tokio::test]
     async fn worker_resolves_the_sandbox_per_batch_not_at_spawn() {
         let dir = tempfile::tempdir().unwrap();
-        let mut ctx = worker_context_for_invoke_test(dir.path());
+        let ctx = worker_context_for_invoke_test(dir.path());
         let runtime = Arc::clone(&ctx.sandbox_runtime);
+
+        let tx = spawn_worker((42, 0), ctx, Arc::new(DashMap::new()));
         assert_eq!(
             runtime.sandbox_reads(),
             0,
-            "building the worker context must not snapshot the sandbox"
+            "spawning a worker must not snapshot the sandbox"
         );
 
-        // What the debounce loop does at the top of each batch.
-        for _ in 0..3 {
-            ctx.sandbox = ctx.sandbox_runtime.current_sandbox();
+        // Feed one batch. The loop resolves the sandbox before it does
+        // anything with the guest; the turn itself then fails closed on the
+        // degraded runtime, which is fine — the read is what is under test.
+        tx.send(debug_msg(1, None))
+            .await
+            .expect("worker accepts the message");
+        // The read happens early in the cycle; poll briefly rather than
+        // sleeping a fixed interval.
+        for _ in 0..100 {
+            if runtime.sandbox_reads() > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
-        assert_eq!(
-            runtime.sandbox_reads(),
-            3,
-            "each batch reads the handle published at that moment"
+        assert!(
+            runtime.sandbox_reads() > 0,
+            "the debounce loop must resolve the live handle when a batch arrives, \
+             not reuse the handle captured at spawn"
         );
     }
 
