@@ -2208,7 +2208,7 @@ fn clear_foreground_handoff_controls(
 /// `SendError` and removes the entry + respawns (Pitfall 7 mitigation).
 pub fn spawn_worker(
     key: SessionKey,
-    ctx: WorkerContext,
+    mut ctx: WorkerContext,
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
 ) -> mpsc::Sender<DebounceMsg> {
     let (tx, mut rx) = mpsc::channel::<DebounceMsg>(32); // bounded — safe for debounce
@@ -2230,6 +2230,13 @@ pub fn spawn_worker(
                 batch_size = 1,
                 "worker received message, starting debounce"
             );
+            // Re-resolve the sandbox handle for this batch. The supervisor
+            // publishes a NEW handle on recovery, so a snapshot taken when the
+            // worker spawned goes stale: a worker born during a degraded
+            // window would hold `None` forever and refuse every turn even
+            // after the backend came back, and one born while Ready would keep
+            // addressing a VM that recovery has since replaced.
+            ctx.sandbox = ctx.sandbox_runtime.current_sandbox();
             let batch = collect_batch(first, &mut rx).await;
             super::wait_for_bg_handoff_gate(&ctx.bg_handoff_gates, key).await;
             if ctx.shutdown.is_cancelled() {
@@ -6108,6 +6115,38 @@ mod tests {
             shutdown: CancellationToken::new(),
             sandbox_runtime,
         }
+    }
+
+    /// Regression for the startup-snapshot bug in the foreground turn path.
+    ///
+    /// A worker outlives sandbox recoveries, and each recovery publishes a
+    /// NEW handle. Snapshotting at spawn produced two failures: a worker born
+    /// during a degraded window held `None` forever and refused every turn
+    /// even after the backend recovered (bricked until `/new`), and one born
+    /// while Ready kept addressing a VM recovery had already replaced. The
+    /// debounce loop therefore re-resolves `ctx.sandbox` once per batch,
+    /// exactly as the dashboard and keepalive paths resolve per use.
+    #[tokio::test]
+    async fn worker_resolves_the_sandbox_per_batch_not_at_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = worker_context_for_invoke_test(dir.path());
+        let runtime = Arc::clone(&ctx.sandbox_runtime);
+        assert_eq!(
+            runtime.sandbox_reads(),
+            0,
+            "building the worker context must not snapshot the sandbox"
+        );
+
+        // What the debounce loop does at the top of each batch.
+        for _ in 0..3 {
+            ctx.sandbox = ctx.sandbox_runtime.current_sandbox();
+        }
+
+        assert_eq!(
+            runtime.sandbox_reads(),
+            3,
+            "each batch reads the handle published at that moment"
+        );
     }
 
     #[tokio::test]
