@@ -50,8 +50,24 @@ fn json_contains_key(value: &serde_json::Value, needle: &str) -> bool {
 }
 
 /// Create a [`RightBackend`] with a temp dir as agents_dir and right_home.
+///
+/// Skill packages are probed on the host agent dir: every agent is sandboxed
+/// now, and these tests exercise learning bookkeeping, not the gRPC transport.
+/// The production (sandbox) probe is covered by
+/// `skill_learning_start_fails_closed_without_sandbox_transport` and
+/// `skill_learning_finish_rejects_sandboxed_host_fallback_without_mtls`.
 /// Returns `(backend, agents_dir_path, _temp_dir_guard)`.
 fn make_backend() -> (RightBackend, PathBuf, TempDir) {
+    let tmp = TempDir::new().expect("tempdir");
+    let agents_dir = tmp.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+    let backend = RightBackend::new(agents_dir.clone(), None).with_host_skill_probe();
+    (backend, agents_dir, tmp)
+}
+
+/// Create a [`RightBackend`] that uses the production sandbox skill probe with
+/// no gateway available, to assert the fail-closed path.
+fn make_backend_with_sandbox_probe() -> (RightBackend, PathBuf, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
     let agents_dir = tmp.path().join("agents");
     std::fs::create_dir_all(&agents_dir).expect("create agents dir");
@@ -70,9 +86,14 @@ async fn create_agent_dir(agents_dir: &std::path::Path, name: &str) -> PathBuf {
     agent_dir
 }
 
+/// Write a sandboxed agent.yaml plus a skill package in the agent dir, which
+/// [`make_backend`]'s host probe reads.
 fn create_host_skill_package(agent_dir: &Path, skill_name: &str) {
-    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
-        .expect("write agent config");
+    std::fs::write(
+        agent_dir.join("agent.yaml"),
+        "sandbox:\n  name: test-agent\n",
+    )
+    .expect("write agent config");
     let skill_dir = agent_dir.join(".claude/skills").join(skill_name);
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
     std::fs::write(skill_dir.join("SKILL.md"), "# Learned skill\n").expect("write skill");
@@ -1482,7 +1503,7 @@ async fn skill_learning_start_rejects_core_skill_update() {
 async fn skill_learning_start_rejects_non_learned_update() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
-    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  name: test-agent\n")
         .expect("write agent config");
     let skill_dir = agent_dir.join(".claude/skills/custom-skill");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
@@ -1520,7 +1541,7 @@ async fn skill_learning_start_rejects_non_learned_update() {
 async fn skill_learning_start_rejects_update_when_package_missing() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
-    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  name: test-agent\n")
         .expect("write agent config");
 
     let result = backend
@@ -1541,6 +1562,42 @@ async fn skill_learning_start_rejects_update_when_package_missing() {
     assert_eq!(result.is_error, Some(true));
     let body = extract_error_body(&result);
     assert_eq!(body["error"]["code"], "skill_package_missing");
+}
+
+#[tokio::test]
+async fn skill_learning_start_fails_closed_without_sandbox_transport() {
+    // Every agent is sandboxed and there is no host fallback: when the sandbox
+    // cannot be reached the package check must fail loudly instead of assuming
+    // the package is absent.
+    let (backend, agents_dir, _tmp) = make_backend_with_sandbox_probe();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    std::fs::write(
+        agent_dir.join("agent.yaml"),
+        "sandbox:\n  name: test-agent\n",
+    )
+    .expect("write agent config");
+    let skill_dir = agent_dir.join(".claude/skills/rightx-custom-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(skill_dir.join("SKILL.md"), "# Learned skill\n").expect("write skill");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_start",
+            json!({
+                "action": "update",
+                "skill_name": "rightx-custom-skill",
+                "reason": "update a package that only exists on the host",
+            }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "skill_package_check_failed");
 }
 
 #[tokio::test]
@@ -1579,7 +1636,7 @@ async fn skill_learning_finish_requires_receipt_message_for_success() {
 async fn skill_learning_finish_rejects_success_when_package_missing() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
-    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  name: test-agent\n")
         .expect("write agent config");
 
     let result = backend
@@ -1719,7 +1776,7 @@ async fn skill_learning_finish_updated_bumps_patch_and_preserves_created_by() {
 async fn skill_learning_start_background_kinds_insert_events_without_telegram_delivery() {
     let (backend, agents_dir, tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
-    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  name: test-agent\n")
         .expect("write agent config");
     let kinds = [
         (
@@ -1970,11 +2027,13 @@ async fn skill_learning_finish_rejects_invalid_hint_outcome_before_insert() {
 
 #[tokio::test]
 async fn skill_learning_finish_rejects_sandboxed_host_fallback_without_mtls() {
-    let (backend, agents_dir, _tmp) = make_backend();
+    // A skill package that exists only on the host must NOT satisfy the check:
+    // the probe talks to the sandbox and fails closed when it cannot.
+    let (backend, agents_dir, _tmp) = make_backend_with_sandbox_probe();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     std::fs::write(
         agent_dir.join("agent.yaml"),
-        "sandbox:\n  mode: openshell\n",
+        "sandbox:\n  name: test-agent\n",
     )
     .expect("write agent config");
     let skill_dir = agent_dir.join(".claude/skills/rightx-demo");
@@ -2085,7 +2144,7 @@ async fn skill_learning_start_rejects_bundled_or_codegen_owned_update() {
 async fn skill_learning_start_rejects_empty_message_before_insert() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
-    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  name: test-agent\n")
         .expect("write agent config");
     let skill_dir = agent_dir.join(".claude/skills/rightx-custom-skill");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
@@ -2198,7 +2257,7 @@ async fn cron_create_rejects_target_not_in_allowlist() {
     // Initialize the agent's data.db so get_conn succeeds.
     right_db::open_connection(&agent_dir, true).await.unwrap();
 
-    let backend = RightBackend::new(agents_dir.clone(), None);
+    let backend = RightBackend::new(agents_dir.clone(), None).with_host_skill_probe();
     let args = serde_json::json!({
         "job_name": "j1",
         "schedule": "*/5 * * * *",
@@ -2236,7 +2295,7 @@ async fn cron_create_accepts_target_in_allowlist_group() {
     write_allowlist(&agent_dir, &[], &[-200]);
     right_db::open_connection(&agent_dir, true).await.unwrap();
 
-    let backend = RightBackend::new(agents_dir.clone(), None);
+    let backend = RightBackend::new(agents_dir.clone(), None).with_host_skill_probe();
     let args = serde_json::json!({
         "job_name": "j1",
         "schedule": "*/5 * * * *",
@@ -2272,7 +2331,7 @@ async fn cron_create_persists_model_and_update_clears_it() {
     write_allowlist(&agent_dir, &[7], &[]);
     right_db::open_connection(&agent_dir, true).await.unwrap();
 
-    let backend = RightBackend::new(agents_dir.clone(), None);
+    let backend = RightBackend::new(agents_dir.clone(), None).with_host_skill_probe();
 
     backend
         .tools_call(
@@ -2352,7 +2411,7 @@ async fn cron_create_links_skill_names() {
     let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
     seed_active_skill(&conn, "rightx-a").await;
 
-    let backend = RightBackend::new(agents_dir.clone(), None);
+    let backend = RightBackend::new(agents_dir.clone(), None).with_host_skill_probe();
     let result = backend
         .tools_call(
             "a1",
@@ -2387,7 +2446,7 @@ async fn cron_link_skill_links_and_validates() {
     let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
     seed_active_skill(&conn, "rightx-a").await;
 
-    let backend = RightBackend::new(agents_dir.clone(), None);
+    let backend = RightBackend::new(agents_dir.clone(), None).with_host_skill_probe();
     backend
         .tools_call(
             "a1",
@@ -2463,7 +2522,7 @@ async fn cron_trigger_with_then_persists_then_json_and_origin() {
     write_allowlist(&agent_dir, &[7], &[]);
     right_db::open_connection(&agent_dir, true).await.unwrap();
 
-    let backend = RightBackend::new(agents_dir.clone(), None);
+    let backend = RightBackend::new(agents_dir.clone(), None).with_host_skill_probe();
 
     // Standing job to trigger.
     backend
@@ -2581,7 +2640,7 @@ async fn cron_create_rejects_missing_target_chat_id() {
     write_allowlist(&agent_dir, &[100], &[]);
     right_db::open_connection(&agent_dir, true).await.unwrap();
 
-    let backend = RightBackend::new(agents_dir.clone(), None);
+    let backend = RightBackend::new(agents_dir.clone(), None).with_host_skill_probe();
     let args = serde_json::json!({
         "job_name": "j1",
         "schedule": "*/5 * * * *",
@@ -2612,7 +2671,7 @@ async fn cron_create_rejects_when_allowlist_missing() {
     // Note: NOT calling write_allowlist — file does not exist.
     right_db::open_connection(&agent_dir, true).await.unwrap();
 
-    let backend = RightBackend::new(agents_dir.clone(), None);
+    let backend = RightBackend::new(agents_dir.clone(), None).with_host_skill_probe();
     let args = serde_json::json!({
         "job_name": "j1",
         "schedule": "*/5 * * * *",
@@ -2756,7 +2815,7 @@ async fn cron_update_changes_target_chat_id_with_validation() {
     write_allowlist(&agent_dir, &[100], &[-200, -300]);
     right_db::open_connection(&agent_dir, true).await.unwrap();
 
-    let backend = RightBackend::new(agents_dir.clone(), None);
+    let backend = RightBackend::new(agents_dir.clone(), None).with_host_skill_probe();
     backend
         .tools_call(
             "a1",
@@ -2829,7 +2888,7 @@ async fn cron_update_clears_target_thread_id_with_explicit_null() {
     write_allowlist(&agent_dir, &[], &[-200]);
     right_db::open_connection(&agent_dir, true).await.unwrap();
 
-    let backend = RightBackend::new(agents_dir.clone(), None);
+    let backend = RightBackend::new(agents_dir.clone(), None).with_host_skill_probe();
     backend
         .tools_call(
             "a1",

@@ -318,8 +318,7 @@ pub(crate) struct CuratorContext {
     pub agent_dir: PathBuf,
     pub agent_db_dir: PathBuf,
     pub agent_name: String,
-    pub ssh_config_path: Option<PathBuf>,
-    pub resolved_sandbox: Option<String>,
+    pub sandbox: Option<crate::sandbox::Sandbox>,
     pub internal_client: Arc<right_mcp::internal_client::InternalClient>,
     pub model: String,
     pub debug_flag: Arc<AtomicBool>,
@@ -529,12 +528,21 @@ pub(crate) async fn run_if_due(
     );
 
     // LLM consolidation fork.
+    let sandbox = match crate::cc::invocation::guard_no_sandboxed_host_exec(
+        &ctx.agent_name,
+        ctx.sandbox.as_ref(),
+    ) {
+        Ok(sandbox) => std::sync::Arc::clone(sandbox),
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "skipping curator: {e:#}");
+            return;
+        }
+    };
     let active_invocation = match crate::cc::invocation::register_non_foreground_invocation(
         crate::cc::invocation::NonForegroundInvocationRegistration {
             agent_name: ctx.agent_name.clone(),
             agent_dir: ctx.agent_dir.clone(),
-            ssh_config_path: ctx.ssh_config_path.clone(),
-            resolved_sandbox: ctx.resolved_sandbox.clone(),
+            sandbox: std::sync::Arc::clone(&sandbox),
             internal_client: Arc::clone(&ctx.internal_client),
             kind: right_mcp::internal_client::ProgressInvocationKindDto::Curator,
             chat_id: None,
@@ -561,32 +569,14 @@ pub(crate) async fn run_if_due(
     );
     let args = invocation.into_args();
 
-    let mut cmd = match crate::cc::invocation::build_claude_command(
-        &args,
-        &ctx.agent_dir,
-        ctx.ssh_config_path.as_deref(),
-        ctx.resolved_sandbox.as_deref(),
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "skipping curator: {e:#}");
-            active_invocation.cleanup().await;
-            mark_failed_run(&mut state, ctx.config, now);
-            if let Err(e) = save_state_db(&conn, &state).await {
-                tracing::warn!(agent = %ctx.agent_name, "curator save state failed: {e:#}");
-            }
-            return;
-        }
-    };
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
+    let command = crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, &sandbox)
+        .await
+        .stdout(crate::cc::sandbox_process::Capture::Pipe)
+        .stderr(crate::cc::sandbox_process::Capture::Pipe);
 
     let mut usage_for_run: Option<right_agent::usage::UsageBreakdown> = None;
 
-    let run_status = match right_process::ProcessGroupChild::spawn(cmd) {
+    let run_status = match command.spawn().await {
         Ok(child) => {
             match crate::cc::invocation::wait_with_output_or_kill(child, CURATOR_TIMEOUT).await {
                 Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
@@ -600,12 +590,12 @@ pub(crate) async fn run_if_due(
                         record_curator_maintain_spend(&conn, &archived_skill_names, &b, None).await;
                         usage_for_run = Some(b);
                     }
-                    if output.status.success() {
+                    if output.success() {
                         "success".to_owned()
                     } else {
                         tracing::warn!(
                             agent = %ctx.agent_name,
-                            status = ?output.status,
+                            exit_code = output.code,
                             "curator exited non-zero"
                         );
                         "failed".to_owned()
@@ -764,12 +754,21 @@ async fn run_report_only_pass(
             return;
         }
     };
+    let sandbox = match crate::cc::invocation::guard_no_sandboxed_host_exec(
+        &ctx.agent_name,
+        ctx.sandbox.as_ref(),
+    ) {
+        Ok(sandbox) => std::sync::Arc::clone(sandbox),
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "skipping report-only curator: {e:#}");
+            return;
+        }
+    };
     let active = match crate::cc::invocation::register_non_foreground_invocation(
         crate::cc::invocation::NonForegroundInvocationRegistration {
             agent_name: ctx.agent_name.clone(),
             agent_dir: ctx.agent_dir.clone(),
-            ssh_config_path: ctx.ssh_config_path.clone(),
-            resolved_sandbox: ctx.resolved_sandbox.clone(),
+            sandbox: std::sync::Arc::clone(&sandbox),
             internal_client: Arc::clone(&ctx.internal_client),
             kind: right_mcp::internal_client::ProgressInvocationKindDto::Curator,
             chat_id: None,
@@ -788,27 +787,13 @@ async fn run_report_only_pass(
     let invocation =
         build_report_only_invocation(ctx, &lifecycle_rows, active.mcp_config_path().to_owned());
     let args = invocation.into_args();
-    let mut cmd = match crate::cc::invocation::build_claude_command(
-        &args,
-        &ctx.agent_dir,
-        ctx.ssh_config_path.as_deref(),
-        ctx.resolved_sandbox.as_deref(),
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "skipping report-only curator: {e:#}");
-            active.cleanup().await;
-            return;
-        }
-    };
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
+    let command = crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, &sandbox)
+        .await
+        .stdout(crate::cc::sandbox_process::Capture::Pipe)
+        .stderr(crate::cc::sandbox_process::Capture::Pipe);
 
     let (actions_json, action_count, cost, cache_r, cache_c) =
-        match right_process::ProcessGroupChild::spawn(cmd) {
+        match command.spawn().await {
             Ok(child) => {
                 match crate::cc::invocation::wait_with_output_or_kill(child, CURATOR_TIMEOUT).await
                 {
@@ -1171,8 +1156,7 @@ mod tests {
             agent_dir,
             agent_db_dir: PathBuf::from("/tmp/db"),
             agent_name: "agent-1".into(),
-            ssh_config_path: None,
-            resolved_sandbox: None,
+            sandbox: None,
             internal_client: Arc::new(right_mcp::internal_client::InternalClient::new(
                 "/tmp/fake.sock",
             )),

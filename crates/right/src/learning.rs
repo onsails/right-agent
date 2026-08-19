@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -169,70 +169,73 @@ pub(crate) fn validate_skill_name(skill_name: &str) -> Result<(), CallToolResult
     validate_skill_name_value(skill_name).map_err(skill_name_error)
 }
 
-pub(crate) fn skill_package_dir(
-    agent_dir: &Path,
-    skill_name: &str,
-) -> Result<PathBuf, CallToolResult> {
-    validate_skill_name(skill_name)?;
-    let base = agent_dir.join(".claude").join("skills");
-    let dir = base.join(skill_name);
-    if !dir.starts_with(&base) {
-        return Err(skill_name_error(
-            "derived skill package path escaped .claude/skills",
-        ));
-    }
-    Ok(dir)
+/// How the presence of a skill package is probed.
+///
+/// Production has exactly one probe: the agent's own sandbox, reached over the
+/// OpenShell gRPC transport. A sandboxed agent never reads its skills from the
+/// host filesystem, so the host variant exists only under `cfg(test)` — it is a
+/// stand-in that lets the learning bookkeeping flows run without a live gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SkillPackageProbe {
+    Sandbox,
+    #[cfg(test)]
+    HostDir,
 }
 
 pub(crate) async fn skill_package_exists(
+    probe: SkillPackageProbe,
     agent_name: &str,
     mtls_dir: Option<&Path>,
     agent_dir: &Path,
     skill_name: &str,
 ) -> anyhow::Result<bool> {
     validate_skill_name_value(skill_name).map_err(|e| anyhow::anyhow!("{e}"))?;
+    match probe {
+        SkillPackageProbe::Sandbox => {}
+        #[cfg(test)]
+        SkillPackageProbe::HostDir => {
+            return Ok(agent_dir
+                .join(".claude")
+                .join("skills")
+                .join(skill_name)
+                .join("SKILL.md")
+                .is_file());
+        }
+    }
 
     let config = right_agent::agent::parse_agent_config(agent_dir)
         .map_err(|e| anyhow::anyhow!("{e:#}"))
         .with_context(|| format!("failed to parse agent config for {agent_name}"))?;
-    let is_sandboxed = config.as_ref().map(|c| c.is_sandboxed()).unwrap_or(true);
-
-    if is_sandboxed {
-        let mtls_dir = mtls_dir.filter(|path| path.exists()).ok_or_else(|| {
-            anyhow::anyhow!("sandboxed agent requires OpenShell mTLS for skill package checks")
-        })?;
-        let explicit_sandbox_name = config
-            .as_ref()
-            .and_then(|c| c.sandbox.as_ref())
-            .and_then(|s| s.name.as_deref());
-        let sandbox_name =
-            right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
-        let mut client = right_openshell::openshell::connect_grpc(mtls_dir)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e:#}"))
-            .context("skill package check: failed to connect to OpenShell gRPC")?;
-        let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, &sandbox_name)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e:#}"))
-            .with_context(|| {
-                format!("skill package check: failed to resolve sandbox ID for {sandbox_name}")
-            })?;
-        let sandbox_path = format!("/sandbox/.claude/skills/{skill_name}/SKILL.md");
-        let (_, exit_code) = right_openshell::openshell::exec_in_sandbox(
-            &mut client,
-            &sandbox_id,
-            &["test", "-f", &sandbox_path],
-            right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
-        )
+    let mtls_dir = mtls_dir.filter(|path| path.exists()).ok_or_else(|| {
+        anyhow::anyhow!("sandboxed agent requires OpenShell mTLS for skill package checks")
+    })?;
+    let explicit_sandbox_name = config
+        .as_ref()
+        .and_then(|c| c.sandbox.as_ref())
+        .and_then(|s| s.name.as_deref());
+    let sandbox_name =
+        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+    let mut client = right_openshell::openshell::connect_grpc(mtls_dir)
         .await
         .map_err(|e| anyhow::anyhow!("{e:#}"))
-        .with_context(|| format!("skill package check: exec test -f {sandbox_path} failed"))?;
-        return Ok(exit_code == 0);
-    }
-
-    let host_dir = skill_package_dir(agent_dir, skill_name)
-        .map_err(|_| anyhow::anyhow!("invalid derived skill package path"))?;
-    Ok(host_dir.join("SKILL.md").is_file())
+        .context("skill package check: failed to connect to OpenShell gRPC")?;
+    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, &sandbox_name)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:#}"))
+        .with_context(|| {
+            format!("skill package check: failed to resolve sandbox ID for {sandbox_name}")
+        })?;
+    let sandbox_path = format!("/sandbox/.claude/skills/{skill_name}/SKILL.md");
+    let (_, exit_code) = right_openshell::openshell::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["test", "-f", &sandbox_path],
+        right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e:#}"))
+    .with_context(|| format!("skill package check: exec test -f {sandbox_path} failed"))?;
+    Ok(exit_code == 0)
 }
 
 pub(crate) fn is_known_core_skill(skill_name: &str) -> bool {
@@ -320,13 +323,15 @@ pub(crate) fn validate_start_message(
 }
 
 pub(crate) async fn validate_skill_package_state(
+    probe: SkillPackageProbe,
     agent_name: &str,
     mtls_dir: Option<&Path>,
     agent_dir: &Path,
     skill_name: &str,
     expectation: SkillPackageExpectation,
 ) -> Result<(), CallToolResult> {
-    let exists = match skill_package_exists(agent_name, mtls_dir, agent_dir, skill_name).await {
+    let exists = match skill_package_exists(probe, agent_name, mtls_dir, agent_dir, skill_name).await
+    {
         Ok(exists) => exists,
         Err(e) => {
             return Err(tool_error(

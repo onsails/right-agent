@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use super::BotType;
 use super::handler::{
-    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, RightHome, SshConfigPath,
+    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, RightHome,
 };
 use super::mention::BotIdentity;
 use super::worker::{DebounceMsg, SessionKey};
@@ -29,7 +29,6 @@ pub(crate) struct HandlerCtx {
     pub(crate) worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     pub(crate) agent_dir: Arc<AgentDir>,
     pub(crate) home: Arc<RightHome>,
-    pub(crate) ssh_config: Arc<SshConfigPath>,
     pub(crate) intercept_slots: Arc<InterceptSlots>,
     pub(crate) internal_api: Arc<InternalApi>,
     pub(crate) settings: Arc<AgentSettings>,
@@ -261,7 +260,6 @@ pub(crate) mod test_support {
 
     use super::super::handler::{
         AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, RightHome,
-        SshConfigPath,
     };
 
     /// Build a `HandlerCtx` with dummy dependencies for handler-free tests
@@ -294,7 +292,7 @@ pub(crate) mod test_support {
         let settings = Arc::new(AgentSettings {
             show_thinking: false,
             model: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
-            resolved_sandbox: None,
+            sandbox: None,
             hindsight: None,
             prefetch_cache: None,
             upgrade_lock: Arc::new(tokio::sync::RwLock::new(())),
@@ -304,8 +302,6 @@ pub(crate) mod test_support {
             claude_health: crate::keepalive::ClaudeHealth::new(
                 "test".to_owned(),
                 PathBuf::from("/tmp/router-test"),
-                None,
-                None,
                 None,
                 None,
             ),
@@ -327,7 +323,6 @@ pub(crate) mod test_support {
             worker_map: Arc::new(DashMap::new()),
             agent_dir: Arc::new(AgentDir(PathBuf::from("/tmp/router-test"))),
             home: Arc::new(RightHome(PathBuf::from("/tmp/router-test"))),
-            ssh_config: Arc::new(SshConfigPath(None)),
             intercept_slots: Arc::new(InterceptSlots {
                 auth_code: Arc::new(tokio::sync::Mutex::new(None)),
                 auth_watcher: Arc::new(std::sync::atomic::AtomicBool::new(false)),

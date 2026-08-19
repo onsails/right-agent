@@ -769,9 +769,13 @@ pub(crate) async fn run_aggregator_http(
         axum::middleware::from_fn_with_state(token_map, bearer_auth_middleware),
     );
 
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+    // Loopback, not 0.0.0.0: the guest reaches this through the
+    // `host.microsandbox.internal` alias, which resolves to a host loopback
+    // address (stage-1 assumption 5). Binding every interface would expose the
+    // aggregator to the local network for no benefit.
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
         .await
-        .map_err(|e| miette::miette!("bind to 0.0.0.0:{port} failed: {e:#}"))?;
+        .map_err(|e| miette::miette!("bind to 127.0.0.1:{port} failed: {e:#}"))?;
 
     // Start internal REST API on Unix domain socket
     let socket_path = home.join("run/internal.sock");

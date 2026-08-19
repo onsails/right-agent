@@ -1,13 +1,13 @@
 use super::{back_online_message, unavailable_message};
-use right_openshell::diagnosis::GatewayCause;
+use right_sandbox::SandboxCause;
 
 #[test]
 fn unavailable_message_leads_with_consequence_and_includes_fix() {
-    let d = GatewayCause::DockerDown.diagnose();
+    let d = SandboxCause::HypervisorUnavailable.diagnose();
     let msg = unavailable_message(&d);
     assert!(msg.starts_with("⚠️"));
     assert!(msg.to_lowercase().contains("offline"));
-    assert!(msg.to_lowercase().contains("docker"));
+    assert!(msg.to_lowercase().contains("microvm"));
     // No raw CLI-style prefixes.
     assert!(!msg.contains("Failed:"));
     assert!(!msg.contains("Error:"));
@@ -15,7 +15,7 @@ fn unavailable_message_leads_with_consequence_and_includes_fix() {
 
 #[test]
 fn unavailable_message_html_escapes_dynamic_text() {
-    let d = GatewayCause::SandboxNotFound {
+    let d = SandboxCause::SandboxNotFound {
         sandbox: "a<b>&c".to_owned(),
     }
     .diagnose();

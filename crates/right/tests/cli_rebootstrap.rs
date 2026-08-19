@@ -49,7 +49,7 @@ fn rebootstrap_errors_when_state_present_but_pc_unreachable() {
     let agent_dir = home.path().join("agents").join("ghosty");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(agent_dir.join("IDENTITY.md"), "# ghosty\n").unwrap();
-    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  name: right-test\n").unwrap();
 
     // state.json points at a port nothing listens on. Reserved port 1 is
     // unused by anything reasonable; any TCP connect attempt will fail

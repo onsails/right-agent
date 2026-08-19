@@ -1122,19 +1122,10 @@ async fn handle_reload(State(state): State<InternalState>) -> axum::response::Re
             continue;
         }
 
-        // Determine mTLS dir for sandbox agents
-        let agent_config = right_agent::agent::discovery::parse_agent_config(&agent_dir)
-            .ok()
-            .flatten();
-        let mtls_dir = match &agent_config {
-            Some(config)
-                if *config.sandbox_mode() == right_agent::agent::SandboxMode::Openshell =>
-            {
-                match right_openshell::openshell::preflight_check() {
-                    right_openshell::openshell::OpenShellStatus::Ready(dir) => Some(dir),
-                    _ => None,
-                }
-            }
+        // Every agent is sandboxed, so the mTLS dir is available whenever the
+        // gateway preflight succeeds.
+        let mtls_dir = match right_openshell::openshell::preflight_check() {
+            right_openshell::openshell::OpenShellStatus::Ready(dir) => Some(dir),
             _ => None,
         };
 

@@ -2,8 +2,7 @@
 //! sole writer; every other consumer (message worker, dashboard) only reads.
 
 use arc_swap::ArcSwap;
-use right_openshell::diagnosis::GatewayDiagnosis;
-use right_openshell::sandbox_exec::SandboxExec;
+use right_sandbox::SandboxDiagnosis;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -12,13 +11,13 @@ use tokio::sync::mpsc;
 #[derive(Clone)]
 pub enum SandboxHealth {
     Ready,
-    Unavailable { diagnosis: Arc<GatewayDiagnosis> },
+    Unavailable { diagnosis: Arc<SandboxDiagnosis> },
 }
 
 /// Shared handle. Cheap to clone via `Arc`. Reads are lock-free (`ArcSwap`).
 pub struct SandboxRuntimeHandle {
     health: ArcSwap<SandboxHealth>,
-    sandbox: ArcSwap<Option<SandboxExec>>,
+    sandbox: ArcSwap<Option<crate::sandbox::Sandbox>>,
     affected: Mutex<HashSet<(i64, i64)>>,
     failure_tx: mpsc::Sender<()>,
 }
@@ -52,7 +51,7 @@ impl SandboxRuntimeHandle {
     /// follow-up letting the dashboard/keepalive read the sandbox from the
     /// handle instead of their startup snapshots; currently exercised only by
     /// tests.
-    pub fn current_sandbox(&self) -> Option<SandboxExec> {
+    pub fn current_sandbox(&self) -> Option<crate::sandbox::Sandbox> {
         Option::clone(&self.sandbox.load())
     }
 
@@ -71,14 +70,14 @@ impl SandboxRuntimeHandle {
 
     // ---- writes (supervisor only) ----
 
-    pub(crate) fn set_ready(&self, sandbox: SandboxExec) {
+    pub(crate) fn set_ready(&self, sandbox: crate::sandbox::Sandbox) {
         // Invariant: Ready ⟹ sandbox is Some. Publish the sandbox before
         // flipping health to Ready so a reader never sees Ready with no sandbox.
         self.sandbox.store(Arc::new(Some(sandbox)));
         self.health.store(Arc::new(SandboxHealth::Ready));
     }
 
-    pub(crate) fn set_unavailable(&self, diagnosis: Arc<GatewayDiagnosis>) {
+    pub(crate) fn set_unavailable(&self, diagnosis: Arc<SandboxDiagnosis>) {
         // Invariant: Ready ⟹ sandbox is Some. Flip health to Unavailable
         // before clearing the sandbox so a reader never sees Ready with no sandbox.
         self.health
@@ -97,16 +96,16 @@ impl SandboxRuntimeHandle {
 #[derive(Debug, PartialEq, Eq)]
 pub enum GateDecision {
     Proceed,
-    Reply { diagnosis: Arc<GatewayDiagnosis> },
+    Reply { diagnosis: Arc<SandboxDiagnosis> },
 }
 
-/// Decide whether a turn may invoke CC. **Fail-closed:** a sandboxed agent
-/// with an unavailable backend MUST NOT run (it would otherwise execute on the
-/// host with `--dangerously-skip-permissions`).
-pub fn sandbox_gate(is_sandboxed: bool, health: &SandboxHealth) -> GateDecision {
-    match (is_sandboxed, health) {
-        (false, _) | (true, SandboxHealth::Ready) => GateDecision::Proceed,
-        (true, SandboxHealth::Unavailable { diagnosis }) => GateDecision::Reply {
+/// Decide whether a turn may invoke CC. **Fail-closed:** every agent is
+/// sandboxed, so an unavailable backend MUST NOT run a turn (it would
+/// otherwise execute on the host with `--dangerously-skip-permissions`).
+pub fn sandbox_gate(health: &SandboxHealth) -> GateDecision {
+    match health {
+        SandboxHealth::Ready => GateDecision::Proceed,
+        SandboxHealth::Unavailable { diagnosis } => GateDecision::Reply {
             diagnosis: Arc::clone(diagnosis),
         },
     }

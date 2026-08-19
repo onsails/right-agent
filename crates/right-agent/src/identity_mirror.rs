@@ -21,7 +21,7 @@ pub fn host_identity_mirror_complete(agent_dir: &Path) -> bool {
 /// host-side consumers only require identity files.
 pub async fn sync_identity_mirror_from_sandbox(
     agent_dir: &Path,
-    sandbox_name: &str,
+    sandbox: &right_sandbox::SandboxHandle,
 ) -> miette::Result<()> {
     std::fs::create_dir_all(agent_dir).map_err(|e| {
         miette::miette!(
@@ -36,31 +36,26 @@ pub async fn sync_identity_mirror_from_sandbox(
         )
     })?;
 
-    let mut set = tokio::task::JoinSet::new();
-    for filename in IDENTITY_MIRROR_FILES {
-        let sandbox = sandbox_name.to_owned();
+    // Borrowing the handle rules out `JoinSet` (it demands `'static`); three
+    // small transfers do not need owned tasks.
+    let copy = async |filename: &'static str| {
         let staged_dest = staging.path().join(filename);
-        set.spawn(async move {
-            let sandbox_path = format!("/sandbox/{filename}");
-            right_openshell::openshell::download_file(&sandbox, &sandbox_path, &staged_dest)
-                .await
-                .map_err(|e| format!("{filename}: {e:#}"))
-        });
-    }
-
-    let mut errors = Vec::new();
-    while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok(Ok(())) => {}
-            Ok(Err(msg)) => errors.push(msg),
-            Err(join_err) => errors.push(format!("task panicked: {join_err}")),
-        }
-    }
+        sandbox
+            .fs_copy_to_host(&format!("/sandbox/{filename}"), &staged_dest)
+            .await
+            .map_err(|e| format!("{filename}: {e:#}"))
+    };
+    let [identity, soul, user] = IDENTITY_MIRROR_FILES;
+    let (identity, soul, user) = tokio::join!(copy(identity), copy(soul), copy(user));
+    let errors: Vec<String> = [identity, soul, user]
+        .into_iter()
+        .filter_map(Result::err)
+        .collect();
 
     if !errors.is_empty() {
         return Err(miette::miette!(
             "identity mirror sync from sandbox '{}' failed: {}",
-            sandbox_name,
+            sandbox.name(),
             errors.join("; ")
         ));
     }
@@ -208,8 +203,7 @@ fn rollback_published_identity_files(files: &[PublishedFile]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use right_openshell::test_support::{PROCESS_ENV_LOCK, PathGuard};
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn host_identity_mirror_requires_only_identity_files() {
@@ -406,103 +400,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn sync_identity_mirror_from_sandbox_downloads_required_files() {
-        let _guard = PROCESS_ENV_LOCK.lock().await;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        let fake_openshell = bin.join("openshell");
-        std::fs::write(
-            &fake_openshell,
-            r#"#!/bin/sh
-set -eu
-if [ "$1" != "sandbox" ] || [ "$2" != "download" ]; then
-  exit 64
-fi
-sandbox="$3"
-src="$4"
-dest="$5"
-if [ "$sandbox" != "right-test-sandbox" ]; then
-  exit 65
-fi
-case "$src" in
-  /sandbox/IDENTITY.md) printf '# identity\n' > "$dest/IDENTITY.md" ;;
-  /sandbox/SOUL.md) printf '# soul\n' > "$dest/SOUL.md" ;;
-  /sandbox/USER.md) printf '# user\n' > "$dest/USER.md" ;;
-  *) exit 66 ;;
-esac
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake_openshell, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _path_guard = PathGuard::prepend(&bin);
-
-        let agent_dir = tmp.path().join("agent");
-        std::fs::create_dir(&agent_dir).unwrap();
-
-        sync_identity_mirror_from_sandbox(&agent_dir, "right-test-sandbox")
-            .await
-            .unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(agent_dir.join("IDENTITY.md")).unwrap(),
-            "# identity\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(agent_dir.join("SOUL.md")).unwrap(),
-            "# soul\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(agent_dir.join("USER.md")).unwrap(),
-            "# user\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn sync_identity_mirror_from_sandbox_fails_when_any_required_file_is_missing() {
-        let _guard = PROCESS_ENV_LOCK.lock().await;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        let fake_openshell = bin.join("openshell");
-        std::fs::write(
-            &fake_openshell,
-            r#"#!/bin/sh
-set -eu
-src="$4"
-dest="$5"
-case "$src" in
-  /sandbox/IDENTITY.md) printf '# identity\n' > "$dest/IDENTITY.md" ;;
-  /sandbox/SOUL.md) exit 1 ;;
-  /sandbox/USER.md) printf '# user\n' > "$dest/USER.md" ;;
-  *) exit 66 ;;
-esac
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake_openshell, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _path_guard = PathGuard::prepend(&bin);
-
-        let agent_dir = tmp.path().join("agent");
-        std::fs::create_dir(&agent_dir).unwrap();
-
-        let err = sync_identity_mirror_from_sandbox(&agent_dir, "right-test-sandbox")
-            .await
-            .expect_err("missing SOUL.md must fail reconciliation");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("SOUL.md"),
-            "error should name missing file: {msg}"
-        );
-        assert!(!host_identity_mirror_complete(&agent_dir));
-        for filename in IDENTITY_MIRROR_FILES {
-            assert!(
-                !agent_dir.join(filename).exists(),
-                "failed reconciliation must not publish partial mirror file {filename}"
-            );
-        }
-    }
+    // The two tests that used to live here faked an `openshell` binary on
+    // $PATH to drive the old CLI download transport. That transport is gone —
+    // the sync now takes a `SandboxHandle` and uses `fs_copy_to_host`, which
+    // needs a live microVM. The property those tests actually guarded (a
+    // partial download must never publish a half-written mirror) is covered
+    // without a VM by the `publish_staged_identity_mirror` tests above, which
+    // inject the publish closure directly.
 }

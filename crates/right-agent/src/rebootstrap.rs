@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use tonic::transport::Channel;
 
-use crate::agent::types::{AgentConfig, SandboxMode};
+use crate::agent::types::AgentConfig;
 use right_openshell::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
 
 /// Identity files that bootstrap (re)creates and that this command rewinds.
@@ -35,9 +35,7 @@ pub struct RebootstrapPlan {
     pub agent_name: String,
     pub agent_dir: PathBuf,
     pub backup_dir: PathBuf,
-    pub sandbox_mode: SandboxMode,
-    /// `Some(name)` for openshell-mode agents; `None` for `sandbox.mode = none`.
-    pub sandbox_name: Option<String>,
+    pub sandbox_name: String,
 }
 
 /// Outcome summary returned to the CLI for the final printed report.
@@ -47,20 +45,6 @@ pub struct RebootstrapReport {
     pub host_backed_up: Vec<&'static str>,
     pub sandbox_backed_up: Vec<&'static str>,
     pub sessions_deactivated: usize,
-    pub sandbox_status: SandboxStatus,
-}
-
-/// Disposition of the sandbox-side cleanup half of `execute()`.
-///
-/// A configured sandbox can only produce `Cleaned`: unavailable OpenShell,
-/// an absent sandbox, or failed deletion aborts the reset before host identity,
-/// sessions, or bootstrap answers are changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SandboxStatus {
-    /// Agent uses sandbox.mode = none — no sandbox to clean.
-    NoneMode,
-    /// Sandbox-side cleanup completed.
-    Cleaned,
 }
 
 /// Build a `RebootstrapPlan` for `agent_name` under `home`.
@@ -79,24 +63,12 @@ pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
 
     let config: Option<AgentConfig> = crate::agent::parse_agent_config(&agent_dir)?;
 
-    let sandbox_mode = config
+    let explicit_sandbox_name = config
         .as_ref()
-        .map(|c| *c.sandbox_mode())
-        .unwrap_or(SandboxMode::Openshell);
-
-    let sandbox_name = match sandbox_mode {
-        SandboxMode::Openshell => {
-            let explicit_sandbox_name = config
-                .as_ref()
-                .and_then(|c| c.sandbox.as_ref())
-                .and_then(|s| s.name.as_deref());
-            Some(right_openshell::openshell::resolve_sandbox_name(
-                agent_name,
-                explicit_sandbox_name,
-            ))
-        }
-        SandboxMode::None => None,
-    };
+        .and_then(|c| c.sandbox.as_ref())
+        .and_then(|s| s.name.as_deref());
+    let sandbox_name =
+        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
 
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
     let backup_dir =
@@ -106,7 +78,6 @@ pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
         agent_name: agent_name.to_string(),
         agent_dir,
         backup_dir,
-        sandbox_mode,
         sandbox_name,
     })
 }
@@ -116,11 +87,6 @@ pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
 /// authoritative sandbox identity deletion succeeds. Caller is responsible
 /// for stopping the bot before and restarting it after.
 pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport> {
-    if plan.sandbox_mode == SandboxMode::Openshell && plan.sandbox_name.is_none() {
-        return Err(miette::miette!(
-            "configured OpenShell sandbox has no resolved name; refusing to reset host state"
-        ));
-    }
     std::fs::create_dir_all(&plan.backup_dir).map_err(|e| {
         miette::miette!(
             "failed to create backup dir {}: {e:#}",
@@ -130,12 +96,12 @@ pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport
 
     let host_backed_up = backup_host_files(&plan.agent_dir, &plan.backup_dir)?;
 
-    let (mut session, sandbox_status) = open_sandbox_session(plan.sandbox_name.as_deref()).await?;
-    let sandbox_backed_up = backup_sandbox_files(session.as_mut(), &plan.backup_dir).await?;
+    let mut session = open_sandbox_session(&plan.sandbox_name).await?;
+    let sandbox_backed_up = backup_sandbox_files(&mut session, &plan.backup_dir).await?;
 
     // The sandbox is authoritative for sandboxed agents. Host identity,
     // sessions, and answers remain untouched unless its deletion completed.
-    delete_identity_from_sandbox(session.as_mut()).await?;
+    delete_identity_from_sandbox(&mut session).await?;
     delete_identity_from_host(&plan.agent_dir)?;
 
     write_bootstrap_md(&plan.agent_dir)?;
@@ -148,7 +114,6 @@ pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport
         host_backed_up,
         sandbox_backed_up,
         sessions_deactivated,
-        sandbox_status,
     })
 }
 
@@ -193,16 +158,10 @@ struct SandboxSession {
 
 /// Resolve `sandbox_name` to a connected gRPC client + sandbox id.
 ///
-/// `None` means the agent explicitly uses `sandbox.mode = none`. Every failure
-/// to reach or resolve a configured sandbox is an error: continuing would reset
-/// host state while leaving the authoritative sandbox identity intact.
-async fn open_sandbox_session(
-    sandbox_name: Option<&str>,
-) -> miette::Result<(Option<SandboxSession>, SandboxStatus)> {
-    let Some(sandbox) = sandbox_name else {
-        return Ok((None, SandboxStatus::NoneMode));
-    };
-
+/// Every failure to reach or resolve the configured sandbox is an error:
+/// continuing would reset host state while leaving the authoritative sandbox
+/// identity intact.
+async fn open_sandbox_session(sandbox: &str) -> miette::Result<SandboxSession> {
     let mtls_dir = match right_openshell::openshell::preflight_check() {
         right_openshell::openshell::OpenShellStatus::Ready(d) => d,
         other => {
@@ -219,29 +178,21 @@ async fn open_sandbox_session(
         ));
     }
     let id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
-    Ok((
-        Some(SandboxSession {
-            name: sandbox.to_string(),
-            id,
-            client,
-        }),
-        SandboxStatus::Cleaned,
-    ))
+    Ok(SandboxSession {
+        name: sandbox.to_string(),
+        id,
+        client,
+    })
 }
 
 /// Download identity files from sandbox into `<backup_dir>/sandbox/`.
-/// Skipped entirely when `session` is `None`.
 ///
 /// Returns the list of files that were actually downloaded. A missing
 /// sandbox file is not an error; a download failure on a present file is.
 async fn backup_sandbox_files(
-    session: Option<&mut SandboxSession>,
+    session: &mut SandboxSession,
     backup_dir: &Path,
 ) -> miette::Result<Vec<&'static str>> {
-    let Some(session) = session else {
-        return Ok(Vec::new());
-    };
-
     let sandbox_backup_dir = backup_dir.join("sandbox");
     std::fs::create_dir_all(&sandbox_backup_dir).map_err(|e| {
         miette::miette!(
@@ -374,13 +325,9 @@ fn delete_identity_from_host(agent_dir: &Path) -> miette::Result<()> {
 
 /// Delete identity files from the sandbox via gRPC `exec_in_sandbox`.
 ///
-/// `None` is valid only for `sandbox.mode = none`. `rm -f` makes missing files
-/// non-fatal, so a reachable configured sandbox is naturally idempotent.
-async fn delete_identity_from_sandbox(session: Option<&mut SandboxSession>) -> miette::Result<()> {
-    let Some(session) = session else {
-        return Ok(());
-    };
-
+/// `rm -f` makes missing files non-fatal, so a reachable sandbox is naturally
+/// idempotent.
+async fn delete_identity_from_sandbox(session: &mut SandboxSession) -> miette::Result<()> {
     let paths: Vec<String> = IDENTITY_FILES
         .iter()
         .map(|n| format!("/sandbox/{n}"))
@@ -509,12 +456,11 @@ mod tests {
     }
 
     #[test]
-    fn plan_defaults_to_openshell_when_no_agent_yaml() {
+    fn plan_derives_sandbox_name_when_no_agent_yaml() {
         let home = make_home_with_agent("alice", None);
         let p = plan(home.path(), "alice").unwrap();
         assert_eq!(p.agent_name, "alice");
-        assert_eq!(p.sandbox_mode, SandboxMode::Openshell);
-        assert!(p.sandbox_name.is_some());
+        assert_eq!(p.sandbox_name, "right-alice");
         assert!(
             p.backup_dir
                 .starts_with(home.path().join("backups").join("alice")),
@@ -529,12 +475,11 @@ mod tests {
     }
 
     #[test]
-    fn plan_respects_sandbox_mode_none() {
-        let yaml = "sandbox:\n  mode: none\n";
+    fn plan_honours_explicit_sandbox_name() {
+        let yaml = "sandbox:\n  name: bobs-box\n";
         let home = make_home_with_agent("bob", Some(yaml));
         let p = plan(home.path(), "bob").unwrap();
-        assert_eq!(p.sandbox_mode, SandboxMode::None);
-        assert!(p.sandbox_name.is_none());
+        assert_eq!(p.sandbox_name, "bobs-box");
     }
 
     #[test]
@@ -715,8 +660,7 @@ mod tests {
             agent_name: "unavailable".into(),
             agent_dir: agent_dir.clone(),
             backup_dir: home.path().join("backup"),
-            sandbox_mode: SandboxMode::Openshell,
-            sandbox_name: None,
+            sandbox_name: "right-unavailable".into(),
         };
         let error = execute(&plan).await.unwrap_err();
         assert!(
@@ -749,65 +693,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn execute_none_mode_full_path() {
-        let home = tempfile::tempdir().unwrap();
-        let agents = home.path().join("agents");
-        let agent_dir = agents.join("nm");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
-        std::fs::write(agent_dir.join("IDENTITY.md"), "id\n").unwrap();
-        std::fs::write(agent_dir.join("SOUL.md"), "soul\n").unwrap();
-        std::fs::write(agent_dir.join("USER.md"), "user\n").unwrap();
-        // Seed an active session so we can verify deactivation.
-        let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
-        conn.execute(
-            "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
-             VALUES (42, 0, 'session-uuid', 1)",
-            [],
-        )
-        .await
-        .unwrap();
-        drop(conn);
-
-        let p = plan(home.path(), "nm").unwrap();
-        let report = execute(&p).await.unwrap();
-
-        // Host identity files moved to backup, deleted from agent dir.
-        for &f in IDENTITY_FILES {
-            assert!(
-                !agent_dir.join(f).exists(),
-                "{f} should be gone from agent dir"
-            );
-            assert!(
-                report.backup_dir.join(f).exists(),
-                "{f} should be in backup"
-            );
-        }
-        assert_eq!(report.host_backed_up, IDENTITY_FILES.to_vec());
-        assert!(
-            report.sandbox_backed_up.is_empty(),
-            "none-mode = no sandbox backup"
-        );
-        assert_eq!(report.sandbox_status, SandboxStatus::NoneMode);
-
-        // BOOTSTRAP.md recreated.
-        assert_eq!(
-            std::fs::read_to_string(agent_dir.join("BOOTSTRAP.md")).unwrap(),
-            right_codegen::BOOTSTRAP_INSTRUCTIONS
-        );
-
-        // Session deactivated.
-        assert_eq!(report.sessions_deactivated, 1);
-        let conn = right_db::open_connection(&agent_dir, false).await.unwrap();
-        let active: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sessions WHERE is_active = 1",
-                [],
-                |r| r.get(0),
-            )
-            .await
-            .unwrap();
-        assert_eq!(active, 0);
-    }
+    // The former `execute_none_mode_full_path` test covered `execute()` end to
+    // end without a sandbox. Sandboxless agents are gone: `execute()` now always
+    // requires a reachable sandbox, and the full path is covered by the
+    // sandbox-backed integration test in `tests/rebootstrap_sandbox.rs`.
 }

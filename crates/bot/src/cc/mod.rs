@@ -9,6 +9,7 @@ pub(crate) mod invocation;
 pub(crate) mod markdown_utils;
 pub(crate) mod prompt;
 pub(crate) mod sandbox_env;
+pub(crate) mod sandbox_process;
 pub(crate) mod stream;
 pub(crate) mod system_notice;
 pub(crate) mod worker_reply;

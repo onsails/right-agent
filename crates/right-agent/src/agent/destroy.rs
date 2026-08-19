@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use super::backup::push_no_sandbox_database_tar_excludes;
 use crate::agent::types::AgentConfig;
 
 /// Options for destroying an agent (resolved by caller — no TTY interaction).
@@ -25,15 +24,13 @@ pub struct DestroyResult {
 
 /// Run a pre-destroy backup. Returns the backup directory path.
 ///
-/// For non-sandboxed agents: tars the agent directory (excluding data.db and runtime sidecars).
-/// For sandboxed agents: attempts SSH tar of sandbox, falls back to config-only backup.
+/// Attempts an SSH tar of the sandbox, falling back to a config-only backup.
 /// Always copies agent.yaml, policy.yaml, allowlist.yaml, and VACUUM-copies data.db.
 async fn run_backup(
     home: &Path,
     agent_name: &str,
     agent_dir: &Path,
     config: &Option<AgentConfig>,
-    is_sandboxed: bool,
 ) -> miette::Result<PathBuf> {
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
     let backup_dir = right_config::backups_dir(home, agent_name).join(&timestamp);
@@ -46,45 +43,13 @@ async fn run_backup(
 
     tracing::info!(agent = agent_name, backup_dir = %backup_dir.display(), "starting pre-destroy backup");
 
-    if is_sandboxed {
-        // Try SSH tar download from sandbox; skip if sandbox not ready
-        let sandbox_backed_up = try_sandbox_backup(home, agent_name, config, &backup_dir).await;
-        if !sandbox_backed_up {
-            tracing::warn!(
-                agent = agent_name,
-                "sandbox not available for backup — backing up config files only"
-            );
-        }
-    } else {
-        // Non-sandboxed: tar the agent dir (excluding data.db — backed up separately)
-        let dest_tar = backup_dir.join("sandbox.tar.gz");
-        let parent = agent_dir
-            .parent()
-            .ok_or_else(|| miette::miette!("agent_dir has no parent"))?;
-        let mut tar_args = vec![
-            "czpf".to_string(),
-            dest_tar
-                .to_str()
-                .ok_or_else(|| miette::miette!("non-UTF-8 backup path"))?
-                .to_string(),
-        ];
-        push_no_sandbox_database_tar_excludes(&mut tar_args, agent_name);
-        tar_args.extend([
-            "-C".to_string(),
-            parent
-                .to_str()
-                .ok_or_else(|| miette::miette!("non-UTF-8 agents_dir"))?
-                .to_string(),
-            agent_name.to_string(),
-        ]);
-        let status = tokio::process::Command::new("tar")
-            .args(&tar_args)
-            .status()
-            .await
-            .map_err(|e| miette::miette!("failed to spawn tar: {e:#}"))?;
-        if !status.success() {
-            return Err(miette::miette!("tar exited with status {status}"));
-        }
+    // Try SSH tar download from sandbox; skip if sandbox not ready
+    let sandbox_backed_up = try_sandbox_backup(home, agent_name, config, &backup_dir).await;
+    if !sandbox_backed_up {
+        tracing::warn!(
+            agent = agent_name,
+            "sandbox not available for backup — backing up config files only"
+        );
     }
 
     for filename in &["agent.yaml", "policy.yaml", "allowlist.yaml"] {
@@ -177,9 +142,6 @@ struct DestroyProviderPlan {
     detach: Vec<String>,
     /// Records to delete from the gateway (no surviving agent references them).
     delete: Vec<String>,
-    /// record name -> surviving agent that should become the new OWNER (only when
-    /// the deleting agent OWNED a record still referenced by other agents).
-    rehome_owner_to: std::collections::HashMap<String, String>,
 }
 
 /// Decide the provider cascade for destroying `deleting`. `agents` is the full
@@ -197,138 +159,22 @@ fn plan_destroy_provider_cascade(
     for entry in deleting_providers {
         plan.detach.push(entry.name.clone());
         if !all_complete {
-            // Sibling enumeration was incomplete — skip delete/rehome to avoid
+            // Sibling enumeration was incomplete — skip the delete to avoid
             // removing a gateway record still referenced by an unread agent.
             continue;
         }
-        // Other agents that still reference this record by name.
-        let others: Vec<&str> = agents
+        // Delete only when no surviving agent still references this record by
+        // name. Ownership itself lives in providers.db, so a survivor keeping
+        // the record alive needs no agent.yaml edit here.
+        let referenced_elsewhere = agents
             .iter()
             .filter(|(a, _)| a != deleting)
-            .filter(|(_, ps)| ps.iter().any(|p| p.name == entry.name))
-            .map(|(a, _)| a.as_str())
-            .collect();
-        if others.is_empty() {
+            .any(|(_, ps)| ps.iter().any(|p| p.name == entry.name));
+        if !referenced_elsewhere {
             plan.delete.push(entry.name.clone());
-        } else if entry.is_owned() {
-            // Deleting agent owned a still-referenced record: re-home to a survivor.
-            plan.rehome_owner_to
-                .insert(entry.name.clone(), others[0].to_string());
         }
-        // borrowed + others remain: the true owner is elsewhere; do nothing.
     }
     plan
-}
-
-/// Set (or clear) the `shared_from:` line for the provider named `provider` in
-/// `agent`'s agent.yaml. `new_owner == None` removes the line (record becomes
-/// owned); `Some(owner)` rewrites/inserts it. Comment- and field-preserving:
-/// operates by line-walking the provider's block, like the rest of the platform's
-/// agent.yaml editors. Best-effort caller; returns the rewritten YAML.
-fn set_provider_shared_from(yaml: &str, provider: &str, new_owner: Option<&str>) -> String {
-    // List items under `    providers:` are 4-space-indented `- name:` entries;
-    // their fields are 6-space-indented. Match `serialize_provider_entry`.
-    const FIELD_INDENT: usize = 6;
-
-    let lines: Vec<&str> = yaml.split_inclusive('\n').collect();
-
-    // Find the `- name: <provider>` list item (value may be single-quoted).
-    let block_start = lines.iter().position(|l| {
-        let Some(rest) = l.trim_end_matches(['\n', '\r']).strip_prefix("    - name:") else {
-            return false;
-        };
-        let v = rest.trim();
-        let v = v
-            .strip_prefix('\'')
-            .and_then(|s| s.strip_suffix('\''))
-            .unwrap_or(v);
-        v == provider
-    });
-    let Some(block_start) = block_start else {
-        // Provider not found — return unchanged (best-effort).
-        return yaml.to_string();
-    };
-
-    // The block continues through more-indented lines until the next `    - `
-    // list item or a dedent (line indented < FIELD_INDENT and non-blank).
-    let mut block_end = lines.len();
-    for (i, line) in lines.iter().enumerate().skip(block_start + 1) {
-        let body = line.trim_end_matches(['\n', '\r']);
-        if body.trim().is_empty() {
-            // Blank line — stays part of the block (do not terminate on it).
-            continue;
-        }
-        let indent = body.len() - body.trim_start_matches(' ').len();
-        if body.starts_with("    - ") || indent < FIELD_INDENT {
-            block_end = i;
-            break;
-        }
-    }
-
-    // Within the block, find an existing `shared_from:` field line.
-    let existing = (block_start + 1..block_end).find(|&i| {
-        lines[i]
-            .trim_end_matches(['\n', '\r'])
-            .trim_start()
-            .starts_with("shared_from:")
-    });
-
-    let mut out = String::with_capacity(yaml.len() + 32);
-    match (existing, new_owner) {
-        (Some(idx), Some(owner)) => {
-            // Replace the existing line.
-            for (i, line) in lines.iter().enumerate() {
-                if i == idx {
-                    out.push_str(&format!(
-                        "{:indent$}shared_from: '{owner}'\n",
-                        "",
-                        indent = FIELD_INDENT
-                    ));
-                } else {
-                    out.push_str(line);
-                }
-            }
-        }
-        (Some(idx), None) => {
-            // Drop the existing line.
-            for (i, line) in lines.iter().enumerate() {
-                if i != idx {
-                    out.push_str(line);
-                }
-            }
-        }
-        (None, Some(owner)) => {
-            // Insert at the end of the block.
-            for (i, line) in lines.iter().enumerate() {
-                if i == block_end {
-                    out.push_str(&format!(
-                        "{:indent$}shared_from: '{owner}'\n",
-                        "",
-                        indent = FIELD_INDENT
-                    ));
-                }
-                out.push_str(line);
-            }
-            if block_end == lines.len() {
-                // Block runs to EOF — append after all lines. Guard against a
-                // missing trailing newline so we never glue two keys onto one
-                // line (mirrors `insert_provider_entry`).
-                if !out.ends_with('\n') {
-                    out.push('\n');
-                }
-                out.push_str(&format!(
-                    "{:indent$}shared_from: '{owner}'\n",
-                    "",
-                    indent = FIELD_INDENT
-                ));
-            }
-        }
-        (None, None) => {
-            // Nothing to clear.
-            return yaml.to_string();
-        }
-    }
-    out
 }
 
 /// Enumerate every agent directory under `agents_dir` and load its declared
@@ -381,73 +227,6 @@ fn load_agents_with_providers(
     (agents, all_complete)
 }
 
-/// Re-home ownership of `record` from the deleted owner to `new_owner` by editing
-/// surviving agents' `agent.yaml`. The new owner has its `shared_from` line
-/// removed (becomes owned); every OTHER surviving borrower that pointed at the
-/// deleted owner is repointed to `new_owner`. Best-effort: any read/write failure
-/// logs a warning and the loop continues — the record stays alive regardless, so
-/// a missed edit only affects rotation-ownership display, never correctness.
-fn rehome_owner_in_agent_yaml(
-    agents_dir: &Path,
-    record: &str,
-    deleted_owner: &str,
-    new_owner: &str,
-    agents: &[(String, Vec<right_agent_config::ProviderEntry>)],
-) {
-    for (agent, providers) in agents {
-        if agent == deleted_owner {
-            continue; // its directory is about to be removed
-        }
-        // Does this agent reference `record`, and if so how?
-        let Some(entry) = providers.iter().find(|p| p.name == record) else {
-            continue;
-        };
-        // The new owner becomes owned (clear shared_from). Other borrowers that
-        // pointed at the deleted owner get repointed. A borrower already pointing
-        // elsewhere (a different owner) is left alone.
-        let new_value: Option<&str> = if agent == new_owner {
-            None
-        } else if entry.shared_from.as_deref() == Some(deleted_owner) {
-            Some(new_owner)
-        } else {
-            continue;
-        };
-
-        let yaml_path = agents_dir.join(agent).join("agent.yaml");
-        let original = match std::fs::read_to_string(&yaml_path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    agent = %agent,
-                    record = %record,
-                    error = %format!("{e:#}"),
-                    "re-home: could not read agent.yaml; continuing"
-                );
-                continue;
-            }
-        };
-        let rewritten = set_provider_shared_from(&original, record, new_value);
-        if rewritten == original {
-            continue; // no change needed
-        }
-        if let Err(e) = std::fs::write(&yaml_path, rewritten) {
-            tracing::warn!(
-                agent = %agent,
-                record = %record,
-                error = %format!("{e:#}"),
-                "re-home: could not write agent.yaml; continuing"
-            );
-        } else {
-            tracing::info!(
-                agent = %agent,
-                record = %record,
-                new_owner = %new_owner,
-                "re-homed provider ownership during destroy"
-            );
-        }
-    }
-}
-
 /// Destroy an agent: stop process, optionally backup, delete sandbox, remove directory, reload PC.
 ///
 /// Non-fatal steps (stop, sandbox delete, PC reload) warn and continue.
@@ -465,7 +244,6 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
     }
 
     let config = crate::agent::parse_agent_config(&agent_dir)?;
-    let is_sandboxed = config.as_ref().map(|c| c.is_sandboxed()).unwrap_or(true);
 
     let mut result = DestroyResult {
         agent_stopped: false,
@@ -537,12 +315,11 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
     }
 
     if options.backup {
-        let backup_path =
-            run_backup(home, &options.agent_name, &agent_dir, &config, is_sandboxed).await?;
+        let backup_path = run_backup(home, &options.agent_name, &agent_dir, &config).await?;
         result.backup_path = Some(backup_path);
     }
 
-    let sandbox_name_for_cascade = if is_sandboxed {
+    let sandbox_name_for_cascade = {
         let explicit_sandbox_name = config
             .as_ref()
             .and_then(|c| c.sandbox.as_ref())
@@ -558,9 +335,7 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         // the explicit detach in the provider cascade below to guard against
         // a silent CLI failure leaving providers attached.
         result.sandbox_deleted = true;
-        Some(sb_name)
-    } else {
-        None
+        sb_name
     };
 
     // Cascade-clean provider records on the gateway (best-effort).
@@ -573,15 +348,12 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
     // records first (NotFound = already detached, treat as success), mirroring
     // `handle_provider_remove`.
     //
-    // With cross-agent SHARING, a single gateway record may be referenced by
-    // several agents (owner declares it; borrowers declare it with
-    // `shared_from`). `plan_destroy_provider_cascade` REFCOUNTS references so a
-    // record is deleted ONLY when no surviving agent references it, and re-homes
-    // ownership to a surviving borrower when the deleting agent owned a still-
-    // referenced record. The whole block is best-effort: every failure logs and
-    // continues so the agent-directory removal below still runs.
+    // A single gateway record may be referenced by several agents, so
+    // `plan_destroy_provider_cascade` REFCOUNTS references and deletes a record
+    // ONLY when no surviving agent references it. Ownership itself lives in
+    // providers.db, not in agent.yaml. The whole block is best-effort: every
+    // failure logs and continues so the agent-directory removal below still runs.
     if let Some(sandbox) = config.as_ref().and_then(|c| c.sandbox.as_ref())
-        && matches!(sandbox.mode, right_agent_config::SandboxMode::Openshell)
         && !sandbox.providers.is_empty()
     {
         // Enumerate every sibling agent (including the one being deleted) and its
@@ -609,25 +381,23 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
             Ok(mut client) => {
                 // Detach all of THIS agent's records from its sandbox.
                 for name in &plan.detach {
-                    if let Some(sb_name) = sandbox_name_for_cascade.as_deref() {
-                        match right_openshell::providers::detach_from_sandbox(
-                            &mut client,
-                            sb_name,
-                            name,
-                        )
-                        .await
-                        {
-                            Ok(()) => {}
-                            Err(right_openshell::providers::ProviderError::NotFound(_)) => {
-                                // Already detached — expected when delete_sandbox succeeded.
-                            }
-                            Err(e) => tracing::warn!(
-                                name = %name,
-                                sandbox = %sb_name,
-                                error = %format!("{e:#}"),
-                                "failed to detach provider during destroy; continuing"
-                            ),
+                    match right_openshell::providers::detach_from_sandbox(
+                        &mut client,
+                        &sandbox_name_for_cascade,
+                        name,
+                    )
+                    .await
+                    {
+                        Ok(()) => {}
+                        Err(right_openshell::providers::ProviderError::NotFound(_)) => {
+                            // Already detached — expected when delete_sandbox succeeded.
                         }
+                        Err(e) => tracing::warn!(
+                            name = %name,
+                            sandbox = %sandbox_name_for_cascade,
+                            error = %format!("{e:#}"),
+                            "failed to detach provider during destroy; continuing"
+                        ),
                     }
                 }
                 // Delete ONLY records no surviving agent references.
@@ -649,20 +419,6 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
                 error = %format!("{e:#}"),
                 "could not connect to openshell gateway for provider cleanup; continuing destroy"
             ),
-        }
-
-        // Re-home ownership of any still-referenced record the deleting agent
-        // owned. The record was kept alive by the delete-guard above, so a
-        // re-home failure is non-fatal (borrowers keep using it; only rotation-
-        // ownership display is affected). Filesystem-only — no gateway calls.
-        for (record, new_owner) in &plan.rehome_owner_to {
-            rehome_owner_in_agent_yaml(
-                &agents_dir,
-                record,
-                &options.agent_name,
-                new_owner,
-                &agents,
-            );
         }
     }
 

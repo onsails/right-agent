@@ -29,8 +29,6 @@ pub enum ProviderApiError {
         "generic provider \"{name}\" env_var cannot be changed without a new credential; rotate or recreate the provider"
     )]
     GenericEnvVarChangeRequiresCredential { name: String },
-    #[error("providers are only available for sandboxed agents (sandbox.mode = openshell)")]
-    SandboxModeNone,
     #[error(
         "generic providers require network_policy: permissive — restrictive mode forbids non-Anthropic upstream hosts"
     )]
@@ -70,7 +68,6 @@ impl axum::response::IntoResponse for ProviderApiError {
                 StatusCode::BAD_REQUEST,
                 "generic_env_var_change_requires_credential",
             ),
-            Self::SandboxModeNone => (StatusCode::BAD_REQUEST, "sandbox_mode_none"),
             Self::NetworkPolicyForbidsGeneric => {
                 (StatusCode::BAD_REQUEST, "network_policy_forbids_generic")
             }
@@ -191,23 +188,14 @@ fn record_generic(record: &ProviderRecord) -> Option<right_agent_config::Generic
     })
 }
 
-/// Whether an agent is a sandboxed agent that may carry providers.
-///
-/// Absent `sandbox` section or `mode: none` rejects with `sandbox_mode_none`
-/// (mode:none is transitional; stage 4 removes it entirely).
-fn require_openshell_sandbox(
-    cfg: &right_agent_config::AgentConfig,
-) -> Result<&right_agent_config::SandboxConfig, ProviderApiError> {
-    let sandbox = cfg
-        .sandbox
-        .as_ref()
-        .ok_or(ProviderApiError::SandboxModeNone)?;
-    if sandbox.mode != right_agent_config::SandboxMode::Openshell {
-        return Err(ProviderApiError::SandboxModeNone);
-    }
-    Ok(sandbox)
+/// The only precondition left on a provider operation: the agent exists and
+/// its `agent.yaml` parses. Every agent is sandboxed now, so there is no
+/// sandbox-mode gate to apply.
+fn require_known_agent(agents_dir: &std::path::Path, agent: &str) -> Result<(), ProviderApiError> {
+    load_agent_config(agents_dir, agent)
+        .map(|_| ())
+        .map_err(ProviderApiError::AgentYamlWrite)
 }
-
 
 // ── /provider-list ──────────────────────────────────────────────────────────
 
@@ -299,10 +287,9 @@ fn record_view(record: &ProviderRecord) -> ProviderView {
 
 /// The `agent.yaml` entry a record corresponds to.
 ///
-/// `shared_from` is NOT emitted: ownership is a providers.db column now and
-/// the yaml field is legacy migration input only (stage 4 removes it from
-/// `right_agent_config::ProviderEntry` together with its remaining readers in
-/// `destroy.rs` / `sandbox_supervisor.rs`).
+/// Ownership is not part of the yaml entry: `providers.db` (`owner_agent` plus
+/// `provider_borrows`) is the only authority, and `ProviderEntry` no longer
+/// carries a `shared_from` field.
 fn record_yaml_entry(record: &ProviderRecord) -> right_agent_config::ProviderEntry {
     right_agent_config::ProviderEntry {
         name: record.name.clone(),
@@ -314,7 +301,6 @@ fn record_yaml_entry(record: &ProviderRecord) -> right_agent_config::ProviderEnt
         },
         label: record_label(record),
         generic: record_generic(record),
-        shared_from: None,
     }
 }
 
@@ -336,9 +322,7 @@ pub(crate) async fn handle_provider_list(
     axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
     axum::Json(req): axum::Json<ProviderListReq>,
 ) -> Result<axum::Json<Vec<ProviderView>>, ProviderApiError> {
-    let cfg = load_agent_config(&state.agents_dir, &req.agent)
-        .map_err(ProviderApiError::AgentYamlWrite)?;
-    require_openshell_sandbox(&cfg)?;
+    require_known_agent(&state.agents_dir, &req.agent)?;
     let records = state.providers.list(&req.agent).await.map_err(store_err)?;
     let views = records.iter().map(record_view).collect();
     Ok(axum::Json(views))
@@ -401,7 +385,6 @@ pub(crate) async fn handle_provider_create(
 
     let cfg = load_agent_config(&state.agents_dir, &req.agent)
         .map_err(ProviderApiError::AgentYamlWrite)?;
-    require_openshell_sandbox(&cfg)?;
     if is_generic
         && matches!(
             cfg.network_policy,
@@ -468,9 +451,7 @@ pub(crate) async fn handle_provider_rotate(
     validate_name(&req.agent, &req.name)?;
     let _guard = state.providers.agent_lock(&req.agent).await;
 
-    let cfg = load_agent_config(&state.agents_dir, &req.agent)
-        .map_err(ProviderApiError::AgentYamlWrite)?;
-    require_openshell_sandbox(&cfg)?;
+    require_known_agent(&state.agents_dir, &req.agent)?;
 
     // Borrowed records are read-only for the borrower; the store enforces it
     // (resolve + reject_if_borrowed) inside `rotate`.
@@ -516,7 +497,6 @@ pub(crate) async fn handle_provider_config_update(
 
     let cfg = load_agent_config(&state.agents_dir, &req.agent)
         .map_err(ProviderApiError::AgentYamlWrite)?;
-    require_openshell_sandbox(&cfg)?;
 
     let record = state
         .providers
@@ -641,13 +621,9 @@ pub(crate) async fn handle_provider_share(
     require_trusted(&state.agents_dir, &req.owner_agent, req.actor_user_id)?;
     require_trusted(&state.agents_dir, &req.dest_agent, req.actor_user_id)?;
 
-    // Both sides must be sandboxed agents (mode:none is transitional).
-    let owner_cfg = load_agent_config(&state.agents_dir, &req.owner_agent)
-        .map_err(ProviderApiError::AgentYamlWrite)?;
-    require_openshell_sandbox(&owner_cfg)?;
-    let dest_cfg = load_agent_config(&state.agents_dir, &req.dest_agent)
-        .map_err(ProviderApiError::AgentYamlWrite)?;
-    require_openshell_sandbox(&dest_cfg)?;
+    // Both sides must be real agents; ownership and borrow rules live in the store.
+    require_known_agent(&state.agents_dir, &req.owner_agent)?;
+    require_known_agent(&state.agents_dir, &req.dest_agent)?;
 
     validate_name(&req.dest_agent, &req.provider)?;
     // Share locks the DEST agent only: the dest agent.yaml RMW is the only
@@ -694,9 +670,7 @@ pub(crate) async fn handle_provider_unshare(
     validate_name(&req.borrower_agent, &req.provider)?;
     let _guard = state.providers.agent_lock(&req.borrower_agent).await;
 
-    let cfg = load_agent_config(&state.agents_dir, &req.borrower_agent)
-        .map_err(ProviderApiError::AgentYamlWrite)?;
-    require_openshell_sandbox(&cfg)?;
+    require_known_agent(&state.agents_dir, &req.borrower_agent)?;
 
     // Reject unsharing an OWNED record with copy_conflict (the store's
     // plan_unshare), and reject unsharing a provider that is not borrowed
@@ -762,9 +736,7 @@ pub(crate) async fn handle_provider_remove(
     validate_name(&req.agent, &req.name)?;
     let _guard = state.providers.agent_lock(&req.agent).await;
 
-    let cfg = load_agent_config(&state.agents_dir, &req.agent)
-        .map_err(ProviderApiError::AgentYamlWrite)?;
-    require_openshell_sandbox(&cfg)?;
+    require_known_agent(&state.agents_dir, &req.agent)?;
 
     // The store enforces owner-only removal (borrowed references are
     // read-only) and re-homes the record to a surviving borrower when the
@@ -872,9 +844,9 @@ fn require_trusted(
     }
 }
 
-/// Enumerate host-local agents (except `for_agent`) where `actor_user_id`
-/// is trusted and the sandbox mode is openshell. Returns each peer's
-/// providers (never credentials — the store read APIs don't carry them).
+/// Enumerate host-local agents (except `for_agent`) where `actor_user_id` is
+/// trusted. Returns each peer's providers (never credentials — the store read
+/// APIs don't carry them).
 /// Tolerant: a peer with an unreadable `agent.yaml` or store row is
 /// skipped, not fatal.
 async fn build_peers(
@@ -933,12 +905,6 @@ async fn build_peers(
                 continue;
             }
         };
-        let Some(sandbox) = cfg.sandbox.as_ref() else {
-            continue;
-        };
-        if sandbox.mode != right_agent_config::SandboxMode::Openshell {
-            continue;
-        }
         let network_policy = match cfg.network_policy {
             right_agent_config::NetworkPolicy::Permissive => "permissive",
             right_agent_config::NetworkPolicy::Restrictive => "restrictive",
@@ -986,7 +952,6 @@ pub(crate) async fn handle_provider_peers(
 
 // ── agent.yaml writers (write_merged_rmw) ────────────────────────────────────
 
-
 /// Render a free-form string as a single-quoted YAML scalar. Single quotes
 /// inside the value are escaped per the YAML 1.1/1.2 spec by doubling them
 /// (`'` -> `''`). Single-quoted scalars do not process backslash escapes,
@@ -1007,9 +972,8 @@ fn yaml_single_quote(value: &str) -> String {
 /// booleans or numbers — which would break `Option<String>` /
 /// `String` deserialization on the next bot restart.
 ///
-/// `shared_from` is deliberately never emitted: ownership is a providers.db
-/// column now, and the yaml field is legacy migration input only (stage 4
-/// removes it from `right_agent_config::ProviderEntry`).
+/// Ownership is not serialized: it is a `providers.db` column, and
+/// `ProviderEntry` no longer carries a `shared_from` field.
 fn serialize_provider_entry(entry: &right_agent_config::ProviderEntry) -> String {
     let mut out = String::new();
     out.push_str(&format!("    - name: {}\n", yaml_single_quote(&entry.name)));

@@ -9,13 +9,8 @@ use right_openshell::test_support::TestSandbox;
 /// the three identity files, and a stamped active session row in data.db.
 async fn seed_agent_dir(agent_dir: &Path, sandbox_name: &str) {
     std::fs::create_dir_all(agent_dir).unwrap();
-    let yaml = format!(
-        "sandbox:\n  mode: openshell\n  name: {sandbox_name}\n  policy_file: policy.yaml\n"
-    );
+    let yaml = format!("sandbox:\n  name: {sandbox_name}\n");
     std::fs::write(agent_dir.join("agent.yaml"), yaml).unwrap();
-    // policy.yaml content irrelevant — we never apply it; agent.yaml just
-    // needs to parse as a sandboxed agent.
-    std::fs::write(agent_dir.join("policy.yaml"), "version: 1\n").unwrap();
     std::fs::write(agent_dir.join("IDENTITY.md"), "host id\n").unwrap();
     std::fs::write(agent_dir.join("SOUL.md"), "host soul\n").unwrap();
     std::fs::write(agent_dir.join("USER.md"), "host user\n").unwrap();
@@ -68,8 +63,7 @@ async fn ci_openshell_execute_against_live_sandbox() {
             .join("backups")
             .join(agent_name)
             .join(format!("rebootstrap-{timestamp}")),
-        sandbox_mode: right_agent::agent::types::SandboxMode::Openshell,
-        sandbox_name: Some(sandbox.name().to_string()),
+        sandbox_name: sandbox.name().to_string(),
     };
 
     let report = rebootstrap::execute(&p).await.expect("execute failed");
@@ -110,8 +104,4 @@ async fn ci_openshell_execute_against_live_sandbox() {
     assert_eq!(report.sessions_deactivated, 1);
     assert_eq!(report.host_backed_up.to_vec(), IDENTITY_FILES.to_vec());
     assert_eq!(report.sandbox_backed_up.to_vec(), IDENTITY_FILES.to_vec());
-    assert_eq!(
-        report.sandbox_status,
-        right_agent::rebootstrap::SandboxStatus::Cleaned
-    );
 }

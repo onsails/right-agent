@@ -7,7 +7,6 @@ pub mod contract;
 pub(crate) mod mcp_config;
 pub mod mcp_instructions;
 pub(crate) mod pipeline;
-pub mod policy;
 pub(crate) mod process_compose;
 
 pub(crate) mod settings;
@@ -27,5 +26,3 @@ pub use process_compose::{ProcessComposeConfig, generate_process_compose};
 pub use settings::generate_settings;
 pub use skills::{BUILTIN_SKILL_LEGACY_NAMES, BUILTIN_SKILL_NAMES, install_builtin_skills};
 
-#[cfg(test)]
-mod policy_provider_tests;

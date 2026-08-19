@@ -151,13 +151,12 @@ mod provider_validation_tests {
                 upstream_hosts: vec!["api.acme.com".to_string()],
                 upstream_path_prefix: Some("/v1".to_string()),
             }),
-            shared_from: None,
         };
         let serialized = serialize_provider_entry(&entry);
         assert!(serialized.contains("name: 'agent-acme'"));
         assert!(serialized.contains("label: 'acme'"));
 
-        let yaml = format!("sandbox:\n  mode: openshell\n  providers:\n{serialized}");
+        let yaml = format!("sandbox:\n  providers:\n{serialized}");
         let cfg: right_agent_config::AgentConfig = serde_saphyr::from_str(&yaml)
             .expect("serialized provider entry must round-trip through serde_saphyr");
         let entry_back = &cfg.sandbox.unwrap().providers[0];
@@ -183,14 +182,13 @@ mod provider_validation_tests {
                 upstream_hosts: vec!["api.example.com".to_string()],
                 upstream_path_prefix: None,
             }),
-            shared_from: None,
         };
         let serialized = serialize_provider_entry(&entry);
         assert!(
             serialized.contains("label: 'no'"),
             "label must be single-quoted; got:\n{serialized}"
         );
-        let yaml = format!("sandbox:\n  mode: openshell\n  providers:\n{serialized}");
+        let yaml = format!("sandbox:\n  providers:\n{serialized}");
         let cfg: right_agent_config::AgentConfig = serde_saphyr::from_str(&yaml)
             .expect("single-quoted reserved-word label must still parse as Option<String>::Some");
         let entry_back = &cfg.sandbox.unwrap().providers[0];
@@ -198,21 +196,19 @@ mod provider_validation_tests {
     }
 
     #[test]
-    fn serialize_provider_entry_never_emits_shared_from() {
-        // Ownership is a providers.db column now. Even an entry structurally
-        // marked borrowed must not write `shared_from:` to agent.yaml —
-        // the field is legacy migration input only (stage 4 removes it).
-        let borrowed = right_agent_config::ProviderEntry {
+    fn serialize_provider_entry_emits_no_ownership_key() {
+        // Ownership is a providers.db column: `ProviderEntry` has no
+        // `shared_from` field and agent.yaml must never regrow one.
+        let entry = right_agent_config::ProviderEntry {
             name: "fal-a1b2c3".into(),
             type_: right_agent_config::ProviderType::BuiltIn("right-fal".into()),
             label: None,
             generic: None,
-            shared_from: Some("agent-a".into()),
         };
-        let s = serialize_provider_entry(&borrowed);
+        let s = serialize_provider_entry(&entry);
         assert!(
-            !s.contains("shared_from"),
-            "shared_from must never be emitted; got: {s}"
+            !s.contains("shared_from") && !s.contains("owner"),
+            "agent.yaml must not carry ownership; got: {s}"
         );
     }
 }
@@ -329,18 +325,22 @@ mod provider_view_tests {
     }
 
     #[test]
-    fn yaml_entry_from_record_never_borrowed() {
+    fn yaml_entry_from_borrowed_record_carries_no_ownership() {
         let mut rec = record(
             ProviderKind::Builtin("right-fal".into()),
             right_providers::ProviderStatus::Ready,
         );
         rec.borrower_agent = Some("right".into());
         let entry = record_yaml_entry(&rec);
-        assert!(entry.shared_from.is_none());
         assert!(matches!(
-            entry.type_,
-            right_agent_config::ProviderType::BuiltIn(ref s) if s == "right-fal"
+            &entry.type_,
+            right_agent_config::ProviderType::BuiltIn(s) if s == "right-fal"
         ));
+        let serialized = serialize_provider_entry(&entry);
+        assert!(
+            !serialized.contains("shared_from") && !serialized.contains("agent-a"),
+            "borrowed record must not leak ownership into agent.yaml; got: {serialized}"
+        );
     }
 }
 
@@ -512,7 +512,7 @@ mod insert_tests {
 
     #[test]
     fn insert_into_empty_sandbox() {
-        let original = "name: foo\nsandbox:\n  mode: openshell\n";
+        let original = "name: foo\nsandbox:\n  name: foo\n";
         let entry = "    - name: foo-bar\n      type: anthropic\n";
         let out = insert_provider_entry(original, entry).unwrap();
         assert!(
@@ -523,7 +523,7 @@ mod insert_tests {
 
     #[test]
     fn insert_into_existing_providers() {
-        let original = "sandbox:\n  mode: openshell\n  providers:\n    - name: x\n      type: y\n";
+        let original = "sandbox:\n  providers:\n    - name: x\n      type: y\n";
         let entry = "    - name: foo-bar\n      type: anthropic\n";
         let out = insert_provider_entry(original, entry).unwrap();
         assert!(
@@ -809,7 +809,7 @@ mod handler_tests {
         std::fs::write(
             agent_dir.join("agent.yaml"),
             "network_policy: restrictive\n\
-             sandbox:\n  mode: openshell\n  name: hostagent\n",
+             sandbox:\n  name: hostagent\n",
         )
         .unwrap();
 
@@ -861,7 +861,7 @@ mod handler_tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  name: hostagent\n",
+            "sandbox:\n  name: hostagent\n",
         )
         .unwrap();
 
@@ -929,7 +929,7 @@ mod handler_tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  name: hostagent\n",
+            "sandbox:\n  name: hostagent\n",
         )
         .unwrap();
 
@@ -982,7 +982,7 @@ mod handler_tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  name: hostagent\n",
+            "sandbox:\n  name: hostagent\n",
         )
         .unwrap();
 
@@ -1029,7 +1029,7 @@ mod handler_tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  name: hostagent\n",
+            "sandbox:\n  name: hostagent\n",
         )
         .unwrap();
 
@@ -1077,7 +1077,7 @@ mod handler_tests {
         let agent_dir = tmp.path().join("agents").join("hostagent");
         std::fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  name: hostagent\n",
+            "sandbox:\n  name: hostagent\n",
         )
         .unwrap();
 
@@ -1093,7 +1093,6 @@ mod handler_tests {
                     upstream_hosts: vec![format!("api{i:02}.example.com")],
                     upstream_path_prefix: None,
                 }),
-                shared_from: None,
             })
             .collect();
 
@@ -1152,7 +1151,7 @@ mod handler_tests {
         let agent_dir = tmp.path().join("agents").join("hostagent");
         std::fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  name: hostagent\n",
+            "sandbox:\n  name: hostagent\n",
         )
         .unwrap();
 
@@ -1197,7 +1196,7 @@ mod handler_tests {
         let agent_dir = tmp.path().join("agents").join("hostagent");
         std::fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  name: hostagent\n",
+            "sandbox:\n  name: hostagent\n",
         )
         .unwrap();
 
@@ -1242,7 +1241,7 @@ mod handler_tests {
         let agent_dir = tmp.path().join("agents").join("hostagent");
         std::fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  name: hostagent\n",
+            "sandbox:\n  name: hostagent\n",
         )
         .unwrap();
 
@@ -1291,11 +1290,13 @@ mod handler_tests {
     }
 
     #[tokio::test]
-    async fn provider_list_rejects_sandbox_mode_none() {
+    async fn provider_list_rejects_legacy_sandboxless_agent_yaml() {
         let tmp = tempfile::tempdir().unwrap();
         let agent_dir = tmp.path().join("agents").join("hostagent");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        // Write agent.yaml with mode: none — sandbox-mode guard should fire.
+        // `sandbox: mode: none` is gone: the config parser rejects it outright,
+        // so the route surfaces an agent.yaml failure instead of the retired
+        // `sandbox_mode_none` code.
         std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
 
         let app = make_provider_test_router(tmp.path()).await;
@@ -1310,15 +1311,20 @@ mod handler_tests {
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         let body_bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(
-            json["code"], "sandbox_mode_none",
-            "expected code=sandbox_mode_none, got: {json}"
+            json["code"], "agent_yaml_write",
+            "expected code=agent_yaml_write, got: {json}"
+        );
+        let message = json["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("no longer supported"),
+            "error must explain that sandboxless mode is gone, got: {json}"
         );
     }
 
@@ -1329,7 +1335,7 @@ mod handler_tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  name: hostagent\n",
+            "sandbox:\n  name: hostagent\n",
         )
         .unwrap();
 
@@ -1436,7 +1442,7 @@ mod peers_tests {
         .unwrap();
         std::fs::write(
             agent_dir.join("agent.yaml"),
-            format!("sandbox:\n  mode: openshell\n{providers_yaml}"),
+            format!("sandbox:\n{providers_yaml}"),
         )
         .unwrap();
     }
@@ -1472,7 +1478,7 @@ mod peers_tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  providers: []\n",
+            "sandbox:\n  providers: []\n",
         )
         .unwrap();
         // Missing allowlist = secure default: deny all
@@ -1481,10 +1487,12 @@ mod peers_tests {
     }
 
     #[tokio::test]
-    async fn build_peers_excludes_non_openshell_agent() {
+    async fn build_peers_skips_peer_with_legacy_sandboxless_agent_yaml() {
         let tmp = tempfile::tempdir().unwrap();
         write_agent(tmp.path(), "current", &[7], "  providers: []\n");
-        // trusted peer, but host-mode sandbox → must be excluded
+        // Trusted peer, but its agent.yaml still carries the removed
+        // `mode: none`: it no longer parses, so discovery skips it instead of
+        // aborting the whole listing.
         let agent_dir = tmp.path().join("hostmode");
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
@@ -1504,6 +1512,29 @@ mod peers_tests {
     }
 
     #[tokio::test]
+    async fn build_peers_includes_peer_without_sandbox_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent(tmp.path(), "current", &[7], "  providers: []\n");
+        // No `sandbox:` section at all: every agent is sandboxed now, so the
+        // peer is a normal share target rather than an excluded host agent.
+        let agent_dir = tmp.path().join("plain");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("allowlist.yaml"),
+            "version: 2\nusers:\n  - id: 7\n    added_at: 2026-01-01T00:00:00Z\n",
+        )
+        .unwrap();
+        std::fs::write(agent_dir.join("agent.yaml"), "model: sonnet\n").unwrap();
+
+        let store = open_store(tmp.path()).await;
+        let peers = build_peers(&store, tmp.path(), 7, "current").await.unwrap();
+        assert!(
+            peers.iter().any(|p| p.agent == "plain"),
+            "agent without a sandbox section must still be offered as a peer: {peers:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn build_peers_excludes_agent_with_no_allowlist() {
         let tmp = tempfile::tempdir().unwrap();
         write_agent(tmp.path(), "current", &[7], "  providers: []\n");
@@ -1512,7 +1543,7 @@ mod peers_tests {
         std::fs::create_dir_all(&no_allow_dir).unwrap();
         std::fs::write(
             no_allow_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  providers:\n    - name: nolst-fal\n      type: right-fal\n",
+            "sandbox:\n  providers:\n    - name: nolst-fal\n      type: right-fal\n",
         )
         .unwrap();
 
@@ -1538,7 +1569,7 @@ mod peers_tests {
         .unwrap();
         std::fs::write(
             bad_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  providers: []\n",
+            "sandbox:\n  providers: []\n",
         )
         .unwrap();
 

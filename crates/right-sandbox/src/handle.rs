@@ -379,6 +379,16 @@ impl SandboxHandle {
     }
 }
 
+/// The SDK sandbox is opaque, so the name is the only meaningful thing to
+/// print — and it is what log lines and `#[derive(Debug)]` containers want.
+impl std::fmt::Debug for SandboxHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SandboxHandle")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A point-in-time health snapshot of a running sandbox.
 ///
 /// See [`SandboxHandle::health`] — CPU is intentionally not reported.

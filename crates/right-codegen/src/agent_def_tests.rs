@@ -88,60 +88,40 @@ fn bootstrap_schema_has_every_protocol_stage() {
 
 #[test]
 fn system_prompt_contains_agent_name() {
-    let result = generate_system_prompt(
-        "mybot",
-        &right_agent_config::SandboxMode::Openshell,
-        "/sandbox",
-    );
+    let result = generate_system_prompt("mybot", "/sandbox");
     assert!(result.contains("mybot"));
 }
 
 #[test]
 fn system_prompt_contains_right_description() {
-    let result = generate_system_prompt(
-        "test",
-        &right_agent_config::SandboxMode::Openshell,
-        "/sandbox",
-    );
+    let result = generate_system_prompt("test", "/sandbox");
     assert!(result.contains("Right Agent"));
     assert!(result.contains("multi-agent runtime"));
 }
 
 #[test]
-fn system_prompt_contains_sandbox_mode() {
-    let openshell = generate_system_prompt(
-        "test",
-        &right_agent_config::SandboxMode::Openshell,
-        "/sandbox",
+fn system_prompt_describes_the_sandbox() {
+    let result = generate_system_prompt("test", "/sandbox");
+    assert!(
+        result.contains("microsandbox"),
+        "every agent runs in a microsandbox VM: {result}"
     );
-    assert!(openshell.contains("OpenShell"));
-
-    let none = generate_system_prompt(
-        "test",
-        &right_agent_config::SandboxMode::None,
-        "/test/agent/home",
+    assert!(
+        !result.contains("no sandbox"),
+        "sandboxless agents no longer exist: {result}"
     );
-    assert!(none.contains("no sandbox"));
 }
 
 #[test]
 fn system_prompt_mentions_right_mcp() {
-    let result = generate_system_prompt(
-        "test",
-        &right_agent_config::SandboxMode::Openshell,
-        "/sandbox",
-    );
+    let result = generate_system_prompt("test", "/sandbox");
     assert!(result.contains("right"));
     assert!(result.contains("MCP"));
 }
 
 #[test]
 fn system_prompt_requires_acting_over_promising() {
-    let result = generate_system_prompt(
-        "test",
-        &right_agent_config::SandboxMode::Openshell,
-        "/sandbox",
-    );
+    let result = generate_system_prompt("test", "/sandbox");
 
     for needle in [
         "A turn is work done, then reported.",
@@ -158,11 +138,7 @@ fn system_prompt_requires_acting_over_promising() {
 
 #[test]
 fn system_prompt_keeps_identity_framing_without_remember_routing() {
-    let result = generate_system_prompt(
-        "test",
-        &right_agent_config::SandboxMode::Openshell,
-        "/sandbox",
-    );
+    let result = generate_system_prompt("test", "/sandbox");
 
     for needle in [
         "Identity files are always-loaded durable context",
@@ -190,42 +166,17 @@ fn system_prompt_keeps_identity_framing_without_remember_routing() {
 }
 
 #[test]
-fn system_prompt_contains_ssh_block_for_openshell() {
-    let result = generate_system_prompt(
-        "mybot",
-        &right_agent_config::SandboxMode::Openshell,
-        "/sandbox",
-    );
-    assert!(
-        result.contains("right agent ssh mybot"),
-        "openshell prompt must include SSH command"
-    );
-    assert!(
-        result.contains("interactive terminal"),
-        "openshell prompt must explain when to use SSH"
-    );
-}
-
-#[test]
-fn system_prompt_no_ssh_block_for_no_sandbox() {
-    let result = generate_system_prompt(
-        "mybot",
-        &right_agent_config::SandboxMode::None,
-        "/test/agent/home",
-    );
+fn system_prompt_omits_retired_ssh_escape_hatch() {
+    let result = generate_system_prompt("mybot", "/sandbox");
     assert!(
         !result.contains("right agent ssh"),
-        "no-sandbox prompt must NOT include SSH command"
+        "the ssh subcommand is gone; the prompt must not advertise it: {result}"
     );
 }
 
 #[test]
-fn system_prompt_openshell_mentions_user_local_bin_contract() {
-    let result = generate_system_prompt(
-        "mybot",
-        &right_agent_config::SandboxMode::Openshell,
-        "/sandbox",
-    );
+fn system_prompt_mentions_user_local_bin_contract() {
+    let result = generate_system_prompt("mybot", "/sandbox");
 
     assert!(result.contains("## User-Installed CLI Tools"));
     assert!(result.contains("/sandbox/.local/bin"));
@@ -234,21 +185,6 @@ fn system_prompt_openshell_mentions_user_local_bin_contract() {
     assert!(result.contains("NPM_CONFIG_PREFIX=/sandbox/.local"));
     assert!(result.contains("NPM_CONFIG_CACHE=/sandbox/.npm"));
     assert!(result.contains("npm install -g"));
-}
-
-#[test]
-fn system_prompt_no_sandbox_omits_sandbox_user_local_bin_contract() {
-    let result = generate_system_prompt(
-        "mybot",
-        &right_agent_config::SandboxMode::None,
-        "/Users/example/.right/agents/mybot",
-    );
-
-    assert!(!result.contains("/sandbox/.local/bin"));
-    assert!(!result.contains("User-Installed CLI Tools"));
-    assert!(!result.contains("NPM_CONFIG_PREFIX=/sandbox/.local"));
-    assert!(!result.contains("Do not install tools into `~/bin`"));
-    assert!(!result.contains("Do not use sudo for tool installs"));
 }
 
 #[test]
@@ -647,11 +583,7 @@ fn cron_instructions_forbid_progress_updates() {
 
 #[test]
 fn system_prompt_contains_home_dir() {
-    let result = generate_system_prompt(
-        "test",
-        &right_agent_config::SandboxMode::Openshell,
-        "/my/custom/home",
-    );
+    let result = generate_system_prompt("test", "/my/custom/home");
     assert!(
         result.contains("/my/custom/home"),
         "system prompt must contain the passed home_dir"

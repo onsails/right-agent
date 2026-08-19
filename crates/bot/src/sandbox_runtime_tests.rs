@@ -1,10 +1,10 @@
 use super::{GateDecision, SandboxHealth, SandboxRuntimeHandle, sandbox_gate};
-use right_openshell::diagnosis::GatewayCause;
+use right_sandbox::SandboxCause;
 use std::sync::Arc;
 
 fn unavailable() -> SandboxHealth {
     SandboxHealth::Unavailable {
-        diagnosis: Arc::new(GatewayCause::DockerDown.diagnose()),
+        diagnosis: Arc::new(SandboxCause::HypervisorUnavailable.diagnose()),
     }
 }
 
@@ -18,10 +18,10 @@ fn new_handle_starts_unavailable() {
 #[test]
 fn set_unavailable_then_health_reflects_it() {
     let (h, _rx) = SandboxRuntimeHandle::new(SandboxHealth::Ready);
-    h.set_unavailable(Arc::new(GatewayCause::GatewayNotStarted.diagnose()));
+    h.set_unavailable(Arc::new(SandboxCause::Unreachable.diagnose()));
     match h.health() {
         SandboxHealth::Unavailable { diagnosis } => {
-            assert_eq!(diagnosis.cause, GatewayCause::GatewayNotStarted)
+            assert_eq!(diagnosis.cause, SandboxCause::Unreachable)
         }
         _ => panic!("expected Unavailable"),
     }
@@ -60,28 +60,18 @@ async fn sync_failure_reporter_is_noop_without_handle() {
 }
 
 #[test]
-fn non_sandboxed_always_proceeds() {
-    assert_eq!(
-        sandbox_gate(false, &SandboxHealth::Ready),
-        GateDecision::Proceed
-    );
-    assert_eq!(sandbox_gate(false, &unavailable()), GateDecision::Proceed);
+fn ready_backend_proceeds() {
+    assert_eq!(sandbox_gate(&SandboxHealth::Ready), GateDecision::Proceed);
 }
 
 #[test]
-fn sandboxed_and_ready_proceeds() {
-    assert_eq!(
-        sandbox_gate(true, &SandboxHealth::Ready),
-        GateDecision::Proceed
-    );
-}
-
-#[test]
-fn sandboxed_and_unavailable_replies_never_proceeds() {
-    match sandbox_gate(true, &unavailable()) {
-        GateDecision::Reply { diagnosis } => assert_eq!(diagnosis.cause, GatewayCause::DockerDown),
+fn unavailable_backend_replies_never_proceeds() {
+    match sandbox_gate(&unavailable()) {
+        GateDecision::Reply { diagnosis } => {
+            assert_eq!(diagnosis.cause, SandboxCause::HypervisorUnavailable)
+        }
         GateDecision::Proceed => {
-            panic!("FAIL-CLOSED VIOLATION: sandboxed agent must not run on host")
+            panic!("FAIL-CLOSED VIOLATION: an agent must never run outside its sandbox")
         }
     }
 }

@@ -22,6 +22,7 @@ right-memory = { path = "../right-memory", version = "*" }
 right-openshell = { path = "../right-openshell", version = "*" }
 right-providers = { path = "../right-providers", version = "*" }
 right-runtime-state = { path = "../right-runtime-state", version = "*" }
+right-sandbox = { path = "../right-sandbox", version = "*" }
 right-stt = { path = "../right-stt", version = "*" }
 right-ui = { path = "../right-ui", version = "*" }
 clap = { workspace = true }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::agent::types::{
-    LearningConfig, MemoryProvider, NetworkPolicy, RecallBudget, SandboxMode, SttConfig,
+    LearningConfig, MemoryProvider, NetworkPolicy, RecallBudget, SttConfig,
 };
 
 /// Default recall budget used when the user doesn't override it.
@@ -12,7 +12,6 @@ pub const DEFAULT_RECALL_MAX_TOKENS: u32 = 4096;
 
 /// Preserved config from a previous agent, used during `--force-recreate` re-init.
 pub struct InitOverrides {
-    pub sandbox_mode: SandboxMode,
     pub network_policy: NetworkPolicy,
     pub telegram_token: Option<String>,
     pub allowed_chat_ids: Vec<i64>,
@@ -36,7 +35,7 @@ const DEFAULT_AGENT_YAML: &str = include_str!("../templates/right/agent/agent.ya
 /// Creates the agent directory with template files (BOOTSTRAP.md, TOOLS.md,
 /// agent.yaml), installs built-in skills, generates
 /// .claude/settings.json, writes network and sandbox config to agent.yaml,
-/// optionally generates policy.yaml for openshell mode, and sets up trust entries.
+/// and sets up trust entries.
 ///
 /// Returns the absolute path to the created agent directory.
 /// Callers are responsible for checking if the directory already exists.
@@ -47,7 +46,6 @@ pub fn init_agent(
 ) -> miette::Result<PathBuf> {
     // Extract values from overrides with defaults.
     let default_overrides = InitOverrides {
-        sandbox_mode: SandboxMode::default(),
         network_policy: NetworkPolicy::default(),
         telegram_token: None,
         allowed_chat_ids: vec![],
@@ -124,16 +122,7 @@ pub fn init_agent(
         // Sandbox config. The name goes through the shared helper so it always
         // fits the upstream 19-char routable-name cap (OpenShell v0.0.105).
         let sb_name = right_openshell::openshell::sandbox_name(name);
-        match ov.sandbox_mode {
-            SandboxMode::Openshell => {
-                yaml.push_str(&format!(
-                    "\nsandbox:\n  mode: openshell\n  policy_file: policy.yaml\n  name: {sb_name}\n"
-                ));
-            }
-            SandboxMode::None => {
-                yaml.push_str(&format!("\nsandbox:\n  mode: none\n  name: {sb_name}\n"));
-            }
-        }
+        yaml.push_str(&format!("\nsandbox:\n  name: {sb_name}\n"));
 
         // Telegram token + chat IDs.
         if let Some(ref token) = ov.telegram_token {
@@ -206,17 +195,6 @@ pub fn init_agent(
             .map_err(|e| miette::miette!("Failed to update agent.yaml: {}", e))?;
     }
 
-    // Generate policy.yaml when sandbox mode is openshell.
-    if matches!(ov.sandbox_mode, SandboxMode::Openshell) {
-        let policy_yaml = right_codegen::policy::generate_policy(
-            right_runtime_state::MCP_HTTP_PORT,
-            &ov.network_policy,
-            right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
-        );
-        std::fs::write(agents_dir.join("policy.yaml"), &policy_yaml)
-            .map_err(|e| miette::miette!("Failed to write policy.yaml: {e}"))?;
-    }
-
     // Seed allowlist.yaml from the user-provided first trusted user.
     // Idempotent — skipped when allowlist.yaml already exists (wizard re-run, --force-recreate, etc.).
     if let Some(ov) = overrides
@@ -271,7 +249,6 @@ pub fn init_right_home(
     telegram_token: Option<&str>,
     telegram_allowed_chat_ids: &[i64],
     network_policy: &NetworkPolicy,
-    sandbox_mode: &SandboxMode,
     memory_provider: MemoryProvider,
     memory_api_key: Option<String>,
     memory_bank_id: Option<String>,
@@ -287,7 +264,6 @@ pub fn init_right_home(
     }
 
     let overrides = InitOverrides {
-        sandbox_mode: *sandbox_mode,
         network_policy: *network_policy,
         telegram_token: telegram_token.map(|t| t.to_string()),
         allowed_chat_ids: telegram_allowed_chat_ids.to_vec(),
@@ -313,10 +289,6 @@ pub fn init_right_home(
     if telegram_token.is_some() {
         println!("  Telegram bot token saved");
         println!("  agents/right/.claude/settings.json (Telegram plugin enabled)");
-    }
-
-    if matches!(sandbox_mode, SandboxMode::Openshell) {
-        println!("  agents/right/policy.yaml (OpenShell sandbox policy)");
     }
 
     Ok(())
@@ -375,29 +347,6 @@ where
             Err(e) => return Err(miette::miette!("prompt failed: {e:#}")),
         }
     }
-}
-
-/// Prompt for sandbox mode. Returns `None` on Esc.
-pub fn prompt_sandbox_mode() -> miette::Result<Option<SandboxMode>> {
-    let Some(choice) = inquire_back(|| {
-        inquire::Select::new(
-            "sandbox mode:",
-            vec![
-                "openshell — isolated container (recommended)",
-                "none — direct host access (computer-use, chrome)",
-            ],
-        )
-        .with_starting_cursor(0)
-        .prompt()
-    })?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(if choice.starts_with("openshell") {
-        SandboxMode::Openshell
-    } else {
-        SandboxMode::None
-    }))
 }
 
 /// Prompt for network policy. Returns `None` on Esc.
@@ -613,10 +562,6 @@ pub fn prompt_memory_config(
 pub const PROMPT_LABELS: &[&str] = &[
     // inquire_back: ctrl+c confirm
     "cancel?",
-    // prompt_sandbox_mode — label + options
-    "sandbox mode:",
-    "openshell — isolated container (recommended)",
-    "none — direct host access (computer-use, chrome)",
     // prompt_network_policy — label + options
     "network policy:",
     "permissive — all https domains (recommended)",
@@ -645,7 +590,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::agent::types::{MemoryProvider, NetworkPolicy, SandboxMode};
+    use crate::agent::types::{MemoryProvider, NetworkPolicy};
 
     #[test]
     fn init_creates_default_agent_files() {
@@ -655,7 +600,6 @@ mod tests {
             None,
             &[],
             &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -691,8 +635,8 @@ mod tests {
             "TOOLS.md must be seeded from template"
         );
         assert!(
-            agents_dir.join("policy.yaml").exists(),
-            "policy.yaml should be created for openshell mode"
+            !agents_dir.join("policy.yaml").exists(),
+            "OpenShell policy files are retired; init must not write one"
         );
         assert!(
             agents_dir.join("BOOTSTRAP.md").exists(),
@@ -724,7 +668,6 @@ mod tests {
             None,
             &[],
             &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -738,7 +681,6 @@ mod tests {
             None,
             &[],
             &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -766,7 +708,6 @@ mod tests {
             Some("123456:ABCdef"),
             &[],
             &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -790,7 +731,6 @@ mod tests {
             None,
             &[],
             &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -847,7 +787,6 @@ mod tests {
             Some("123456:ABCdef"),
             &[],
             &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -891,7 +830,6 @@ mod tests {
             None,
             &[],
             &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -920,7 +858,6 @@ mod tests {
             None,
             &[],
             &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -962,7 +899,6 @@ mod tests {
             Some("123456:ABCdef"),
             &[12345678_i64, 100200300_i64],
             &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -1001,7 +937,6 @@ mod tests {
             Some("123456:ABCdef"),
             &[12345678_i64],
             &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -1033,7 +968,6 @@ mod tests {
             Some("123456:ABCdef"),
             &[],
             &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -1061,7 +995,6 @@ mod tests {
             None,
             &[],
             &NetworkPolicy::Restrictive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -1085,7 +1018,6 @@ mod tests {
             None,
             &[],
             &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
             MemoryProvider::File,
             None,
             None,
@@ -1102,10 +1034,9 @@ mod tests {
     }
 
     #[test]
-    fn init_generates_policy_yaml_for_openshell_mode() {
+    fn init_never_generates_policy_yaml() {
         let dir = tempdir().unwrap();
         let overrides = InitOverrides {
-            sandbox_mode: SandboxMode::Openshell,
             network_policy: NetworkPolicy::Permissive,
             telegram_token: Some("123456:ABCdef".to_string()),
             allowed_chat_ids: vec![],
@@ -1120,49 +1051,16 @@ mod tests {
             stt: SttConfig::default(),
         };
         init_agent(&dir.path().join("agents"), "test-agent", Some(&overrides)).unwrap();
-        let policy_path = dir.path().join("agents/test-agent/policy.yaml");
         assert!(
-            policy_path.exists(),
-            "policy.yaml must be generated for openshell mode"
-        );
-        let content = std::fs::read_to_string(&policy_path).unwrap();
-        assert!(
-            content.contains("version: 1"),
-            "policy must be valid OpenShell format"
+            !dir.path().join("agents/test-agent/policy.yaml").exists(),
+            "OpenShell policy files are retired; init must not write one"
         );
     }
 
     #[test]
-    fn init_skips_policy_yaml_for_none_mode() {
+    fn init_writes_sandbox_name_and_no_mode_to_agent_yaml() {
         let dir = tempdir().unwrap();
         let overrides = InitOverrides {
-            sandbox_mode: SandboxMode::None,
-            network_policy: NetworkPolicy::Permissive,
-            telegram_token: None,
-            allowed_chat_ids: vec![],
-            model: None,
-            learning: LearningConfig::default(),
-            env: HashMap::new(),
-            memory_provider: MemoryProvider::File,
-            memory_api_key: None,
-            memory_bank_id: None,
-            memory_recall_budget: DEFAULT_RECALL_BUDGET,
-            memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
-            stt: SttConfig::default(),
-        };
-        init_agent(&dir.path().join("agents"), "test-agent", Some(&overrides)).unwrap();
-        let policy_path = dir.path().join("agents/test-agent/policy.yaml");
-        assert!(
-            !policy_path.exists(),
-            "policy.yaml must NOT exist for none mode"
-        );
-    }
-
-    #[test]
-    fn init_writes_sandbox_mode_to_agent_yaml() {
-        let dir = tempdir().unwrap();
-        let overrides = InitOverrides {
-            sandbox_mode: SandboxMode::None,
             network_policy: NetworkPolicy::Permissive,
             telegram_token: None,
             allowed_chat_ids: vec![],
@@ -1180,8 +1078,17 @@ mod tests {
         let yaml =
             std::fs::read_to_string(dir.path().join("agents/test-agent/agent.yaml")).unwrap();
         assert!(
-            yaml.contains("mode: none"),
-            "agent.yaml must contain sandbox mode: none"
+            yaml.contains("sandbox:\n  name: "),
+            "agent.yaml must declare the sandbox name, got:\n{yaml}"
+        );
+        // The written config must round-trip: `mode:` under `sandbox:` is a
+        // hard error now, so a stray key would fail the parse below.
+        let parsed: right_agent_config::AgentConfig = serde_saphyr::from_str(&yaml).unwrap();
+        let sandbox = parsed.sandbox.expect("sandbox section must be written");
+        assert_eq!(sandbox.name.as_deref(), Some("right-test-agent"));
+        assert!(
+            !yaml.contains("policy_file:"),
+            "the retired policy_file key must never be written, got:\n{yaml}"
         );
     }
 
@@ -1189,7 +1096,6 @@ mod tests {
     fn init_agent_seeds_allowlist_yaml_from_overrides() {
         let dir = tempdir().unwrap();
         let overrides = InitOverrides {
-            sandbox_mode: SandboxMode::None,
             network_policy: NetworkPolicy::Restrictive,
             telegram_token: Some("123:ABC".to_string()),
             allowed_chat_ids: vec![42, -1001234],
@@ -1226,7 +1132,6 @@ mod tests {
         let agents_parent = tmp.path();
 
         let overrides = InitOverrides {
-            sandbox_mode: SandboxMode::default(),
             network_policy: NetworkPolicy::default(),
             telegram_token: Some("t".into()),
             allowed_chat_ids: vec![1],
@@ -1263,7 +1168,6 @@ mod tests {
         let agents_parent = tmp.path();
 
         let overrides = InitOverrides {
-            sandbox_mode: SandboxMode::default(),
             network_policy: NetworkPolicy::default(),
             telegram_token: None,
             allowed_chat_ids: vec![],
@@ -1309,7 +1213,6 @@ mod tests {
         env.insert("FOO".to_string(), "bar".to_string());
 
         let overrides = InitOverrides {
-            sandbox_mode: SandboxMode::None,
             network_policy: NetworkPolicy::Permissive,
             telegram_token: Some("999888:XYZtoken".to_string()),
             allowed_chat_ids: vec![111, 222],
@@ -1337,8 +1240,8 @@ mod tests {
             "agent.yaml must contain network_policy: permissive, got:\n{yaml}"
         );
         assert!(
-            yaml.contains("mode: none"),
-            "agent.yaml must contain sandbox mode: none, got:\n{yaml}"
+            yaml.contains("sandbox:\n  name: "),
+            "agent.yaml must declare the sandbox name, got:\n{yaml}"
         );
         assert!(
             yaml.contains("telegram_token: \"999888:XYZtoken\""),

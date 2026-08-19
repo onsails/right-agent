@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::BotType;
 use super::handler::{
-    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, RightHome, SshConfigPath,
+    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, RightHome,
 };
 use super::mention::BotIdentity;
 use super::router::HandlerCtx;
@@ -88,13 +88,12 @@ pub(crate) async fn setup_telegram(
     agent_dir: PathBuf,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     home: PathBuf,
-    ssh_config_path: Option<PathBuf>,
+    sandbox: Option<crate::sandbox::Sandbox>,
     show_thinking: bool,
     model: Arc<arc_swap::ArcSwap<Option<String>>>,
     shutdown: CancellationToken,
     idle_ts: Arc<IdleTimestamp>,
     internal_client: Arc<right_mcp::internal_client::InternalClient>,
-    resolved_sandbox: Option<String>,
     hindsight_wrapper: Option<std::sync::Arc<right_memory::ResilientHindsight>>,
     prefetch_cache: Option<right_memory::prefetch::PrefetchCache>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
@@ -131,7 +130,6 @@ pub(crate) async fn setup_telegram(
         .unwrap_or_default();
     let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> = Arc::new(DashMap::new());
     let agent_dir_arc: Arc<AgentDir> = Arc::new(AgentDir(agent_dir));
-    let ssh_config_arc: Arc<SshConfigPath> = Arc::new(SshConfigPath(ssh_config_path));
     let home_arc: Arc<RightHome> = Arc::new(RightHome(home));
     let auth_watcher_arc: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -145,7 +143,7 @@ pub(crate) async fn setup_telegram(
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
         show_thinking,
         model,
-        resolved_sandbox,
+        sandbox,
         hindsight: hindsight_wrapper,
         prefetch_cache,
         upgrade_lock,
@@ -190,7 +188,6 @@ pub(crate) async fn setup_telegram(
         worker_map,
         agent_dir: Arc::clone(&agent_dir_arc),
         home: home_arc,
-        ssh_config: ssh_config_arc,
         intercept_slots: intercept_slots_arc,
         internal_api: internal_api_arc,
         settings: settings_arc,

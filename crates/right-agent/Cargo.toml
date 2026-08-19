@@ -16,6 +16,7 @@ which = { workspace = true }
 tempfile = { workspace = true }
 right-config = { path = "../right-config", version = "*" }
 right-openshell = { path = "../right-openshell", version = "*" }
+right-sandbox = { path = "../right-sandbox", version = "*" }
 right-ui = { path = "../right-ui", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-stt = { path = "../right-stt", version = "*" }

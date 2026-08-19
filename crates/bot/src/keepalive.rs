@@ -3,15 +3,13 @@
 //! Runs every hour (default). Uses haiku model with max-turns=1 and strict MCP config,
 //! then inspects the `system/init` event for Right MCP connectivity.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt as _};
+use tokio::io::AsyncBufReadExt;
 use tokio_util::sync::CancellationToken;
 
 /// Default interval between keepalive pings.
@@ -49,12 +47,15 @@ const COMPETING_AUTH_ENV: &[&str] = &[
     "CLOUD_ML_REGION",
 ];
 
-/// Execution details for the init-time Claude API validation. The command uses
-/// the persisted per-agent token and the same host/SSH transport as bot turns.
+/// Execution details for the init-time Claude API validation.
+///
+/// The probe runs inside the agent's sandbox, exactly like a bot turn: there
+/// is no host transport, so the sandbox handle is required rather than
+/// optional. The caller (`right agent init`) attaches to the sandbox and
+/// fails fast if it cannot.
 pub struct InitAuthProbe {
     agent_dir: PathBuf,
-    ssh_config_path: Option<PathBuf>,
-    resolved_sandbox: Option<String>,
+    sandbox: crate::sandbox::Sandbox,
     model: Option<String>,
     candidate_token: Option<String>,
 }
@@ -62,22 +63,20 @@ pub struct InitAuthProbe {
 impl InitAuthProbe {
     pub fn new(
         agent_dir: PathBuf,
-        ssh_config_path: Option<PathBuf>,
-        resolved_sandbox: Option<String>,
+        sandbox: crate::sandbox::Sandbox,
         model: Option<String>,
     ) -> Self {
         Self {
             agent_dir,
-            ssh_config_path,
-            resolved_sandbox,
+            sandbox,
             model,
             candidate_token: None,
         }
     }
     /// Use an in-memory setup-token candidate for this validation only.
     ///
-    /// The candidate is never persisted. Host probes pass it through the
-    /// process environment and SSH probes pass it through stdin.
+    /// The candidate is never persisted; it reaches the guest as a per-exec
+    /// environment variable, never through argv or the script text.
     pub fn with_candidate_token(mut self, token: String) -> Self {
         self.candidate_token = Some(token);
         self
@@ -153,164 +152,53 @@ fn init_auth_probe_succeeded(stdout: &[u8]) -> bool {
             == Some("OK")
 }
 
-fn clear_competing_auth(command: &mut tokio::process::Command) {
-    for name in COMPETING_AUTH_ENV {
-        command.env_remove(name);
-    }
-}
-
-fn ssh_init_auth_wrapper(args: &[String]) -> String {
-    let mut script = String::from("unset CLAUDE_CODE_OAUTH_TOKEN");
+/// Guest script for the init-time auth probe.
+///
+/// Competing provider credentials are unset in the guest shell so the probe
+/// exercises the setup token and nothing else. The token itself arrives as a
+/// per-exec environment variable — never in the script text and never in the
+/// argv, both of which are readable by anything that can list guest processes
+/// — so the script only has to confirm it is present.
+fn init_auth_probe_script(args: &[String]) -> String {
+    let mut script = String::from("unset");
     for name in COMPETING_AUTH_ENV {
         script.push(' ');
         script.push_str(name);
     }
-    script.push_str("\nIFS= read -r CLAUDE_CODE_OAUTH_TOKEN || exit 1\n");
-    script.push_str("[ -n \"$CLAUDE_CODE_OAUTH_TOKEN\" ] || exit 1\n");
-    script.push_str("export CLAUDE_CODE_OAUTH_TOKEN\n");
+    script.push_str("\n[ -n \"$CLAUDE_CODE_OAUTH_TOKEN\" ] || exit 1\n");
     script.push_str("if command -v claude >/dev/null 2>&1; then CLAUDE_BIN=claude; ");
     script.push_str("elif command -v claude-bun >/dev/null 2>&1; then CLAUDE_BIN=claude-bun; ");
     script.push_str("else exit 127; fi\nexec \"$CLAUDE_BIN\"");
     if args.len() > 1 {
         script.push(' ');
         script.push_str(
-            &right_openshell::openshell::quote_ssh_remote_args(
-                args[1..].iter().map(String::as_str),
-            )
-            .expect("claude args should not contain nul bytes"),
+            &crate::cc::invocation::quote_guest_args(args[1..].iter().map(String::as_str))
+                .expect("claude args contain no NUL byte"),
         );
     }
     script
 }
 
-async fn resolve_host_claude_executable() -> anyhow::Result<PathBuf> {
-    for name in ["claude", "claude-bun"] {
-        let Ok(path) = which::which(name) else {
-            continue;
-        };
-        let mut command = tokio::process::Command::new(&path);
-        command.arg("--version");
-        command.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
-        clear_competing_auth(&mut command);
-        command.stdin(Stdio::null());
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::null());
-        let Ok(status) = command.status().await else {
-            continue;
-        };
-        if status.success() {
-            return Ok(path);
-        }
-    }
-    anyhow::bail!("Claude CLI is unavailable (tried `claude` and `claude-bun`)")
-}
-
 fn build_init_auth_command(
     args: &[String],
-    agent_dir: &Path,
-    ssh_config_path: Option<&Path>,
-    resolved_sandbox: Option<&str>,
+    sandbox: &crate::sandbox::Sandbox,
     token: &str,
-) -> Result<tokio::process::Command, crate::cc::invocation::SandboxedHostExecRefused> {
-    crate::cc::invocation::guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)?;
-    if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(
-            resolved_sandbox.expect("SSH probe must have a resolved sandbox"),
-        );
-        let mut command = tokio::process::Command::new("ssh");
-        command
-            .arg("-F")
-            .arg(ssh_config)
-            .arg(ssh_host)
-            .arg("--")
-            .arg(ssh_init_auth_wrapper(args));
-        command.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
-        clear_competing_auth(&mut command);
-        Ok(command)
-    } else {
-        let mut command = tokio::process::Command::new(&args[0]);
-        command.args(&args[1..]);
-        command.env("HOME", agent_dir);
-        command.env("USE_BUILTIN_RIPGREP", "0");
-        command.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
-        clear_competing_auth(&mut command);
-        command.env("CLAUDE_CODE_OAUTH_TOKEN", token);
-        command.current_dir(agent_dir);
-        Ok(command)
-    }
+) -> crate::cc::sandbox_process::SandboxCommand {
+    crate::cc::sandbox_process::SandboxCommand::shell(sandbox, init_auth_probe_script(args))
+        .env("CLAUDE_CODE_OAUTH_TOKEN", token)
+        .stdout(crate::cc::sandbox_process::Capture::Pipe)
+        .stderr(crate::cc::sandbox_process::Capture::Null)
 }
 
-async fn send_init_auth_token(
-    stdin: &mut tokio::process::ChildStdin,
-    token: &str,
-) -> anyhow::Result<()> {
-    stdin
-        .write_all(token.as_bytes())
-        .await
-        .context("failed to send Claude authentication credential")?;
-    stdin
-        .write_all(b"\n")
-        .await
-        .context("failed to finish Claude authentication credential")?;
-    stdin
-        .shutdown()
-        .await
-        .context("failed to close Claude authentication credential input")?;
-    Ok(())
-}
-
-async fn terminate_init_auth_process(
-    mut child: right_process::ProcessGroupChild,
-) -> anyhow::Result<()> {
-    let kill_result = child.kill().await;
-    let wait_result = child.wait().await;
-    drop(child);
-
-    kill_result.context("failed to kill Claude authentication validation process group")?;
-    wait_result.context("failed to reap Claude authentication validation process group")?;
-    Ok(())
-}
-
-async fn run_init_auth_command_with_timeout(
-    mut command: tokio::process::Command,
-    ssh_token: Option<&str>,
-    timeout: Duration,
+/// Decide the probe verdict from the finished guest process.
+///
+/// Split out from the run so the redaction property — a failure diagnostic
+/// never echoes the token or any byte the CLI or upstream produced — is
+/// testable without a live sandbox.
+fn init_auth_verdict(
+    output: crate::cc::sandbox_process::SandboxOutput,
 ) -> anyhow::Result<Vec<u8>> {
-    command.stdin(if ssh_token.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    });
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::null());
-
-    let mut child = right_process::ProcessGroupChild::spawn(command)
-        .context("failed to start Claude authentication validation")?;
-    if let Some(token) = ssh_token {
-        let Some(mut stdin) = child.stdin() else {
-            terminate_init_auth_process(child).await?;
-            anyhow::bail!("Claude authentication validation has no stdin");
-        };
-        if let Err(error) = send_init_auth_token(&mut stdin, token).await {
-            drop(stdin);
-            terminate_init_auth_process(child).await?;
-            return Err(error);
-        }
-    }
-
-    let wait_result = tokio::time::timeout(timeout, child.wait_with_output()).await;
-    let output = match wait_result {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            terminate_init_auth_process(child).await?;
-            return Err(error).context("Claude authentication validation process failed");
-        }
-        Err(_) => {
-            terminate_init_auth_process(child).await?;
-            anyhow::bail!("Claude authentication validation timed out");
-        }
-    };
-    if !output.status.success() || !init_auth_probe_succeeded(&output.stdout) {
+    if !output.success() || !init_auth_probe_succeeded(&output.stdout) {
         anyhow::bail!(
             "Claude authentication validation failed; rerun init with a fresh token from `claude setup-token`"
         );
@@ -319,52 +207,63 @@ async fn run_init_auth_command_with_timeout(
 }
 
 async fn run_init_auth_command(
-    command: tokio::process::Command,
-    ssh_token: Option<&str>,
+    command: crate::cc::sandbox_process::SandboxCommand,
+    timeout: Duration,
 ) -> anyhow::Result<Vec<u8>> {
-    run_init_auth_command_with_timeout(command, ssh_token, INIT_AUTH_PROBE_TIMEOUT).await
+    let child = command
+        .spawn()
+        .await
+        .context("failed to start Claude authentication validation")?;
+    match crate::cc::invocation::wait_with_output_or_kill(child, timeout)
+        .await
+        .context("Claude authentication validation process failed")?
+    {
+        crate::cc::invocation::ChildOutput::Completed(output) => init_auth_verdict(output),
+        crate::cc::invocation::ChildOutput::TimedOut => {
+            anyhow::bail!("Claude authentication validation timed out")
+        }
+    }
 }
 
-/// Validate a setup token with a real one-turn Claude API call.
-/// MCP, tools, and session persistence are disabled because init runs before
-/// the aggregator exists. A candidate supplied through
-/// [`InitAuthProbe::with_candidate_token`] remains in memory and is never
-/// persisted; otherwise the existing credential is loaded through a read-only
-/// database connection. Diagnostics intentionally discard command output so a
-/// CLI or upstream error can never echo the token.
-pub async fn validate_init_auth(probe: InitAuthProbe) -> anyhow::Result<()> {
-    let token = if let Some(candidate_token) = probe.candidate_token {
-        candidate_token
-    } else {
-        let connection = right_db::open_connection_readonly(&probe.agent_dir)
-            .await
-            .context("open agent database for Claude authentication validation")?;
-        right_mcp::credentials::get_auth_token(&connection)
-            .await
-            .context("load Claude authentication credential")?
-            .context("Claude authentication credential is missing")?
+/// Resolve the credential this probe should validate.
+///
+/// A candidate supplied through [`InitAuthProbe::with_candidate_token`] stays
+/// in memory and is never persisted; otherwise the stored credential is read
+/// through a read-only connection, so a failed validation cannot create or
+/// mutate the database or its sidecars.
+async fn resolve_init_auth_token(
+    agent_dir: &Path,
+    candidate: Option<String>,
+) -> anyhow::Result<String> {
+    let token = match candidate {
+        Some(candidate_token) => candidate_token,
+        None => {
+            let connection = right_db::open_connection_readonly(agent_dir)
+                .await
+                .context("open agent database for Claude authentication validation")?;
+            right_mcp::credentials::get_auth_token(&connection)
+                .await
+                .context("load Claude authentication credential")?
+                .context("Claude authentication credential is missing")?
+        }
     };
     if token.contains(['\r', '\n']) {
         anyhow::bail!("Claude authentication credential has an invalid format");
     }
+    Ok(token)
+}
 
-    let mut args = init_auth_probe_invocation(probe.model).into_args();
-    if probe.ssh_config_path.is_none() {
-        args[0] = resolve_host_claude_executable()
-            .await?
-            .to_string_lossy()
-            .into_owned();
-    }
-    let command = build_init_auth_command(
-        &args,
-        &probe.agent_dir,
-        probe.ssh_config_path.as_deref(),
-        probe.resolved_sandbox.as_deref(),
-        &token,
-    )
-    .map_err(anyhow::Error::from)?;
-    let ssh_token = probe.ssh_config_path.as_ref().map(|_| token.as_str());
-    run_init_auth_command(command, ssh_token).await?;
+/// Validate a setup token with a real one-turn Claude API call, run in the
+/// agent's sandbox.
+///
+/// MCP, tools, and session persistence are disabled because init runs before
+/// the aggregator exists. Diagnostics intentionally discard command output so
+/// a CLI or upstream error can never echo the token.
+pub async fn validate_init_auth(probe: InitAuthProbe) -> anyhow::Result<()> {
+    let token = resolve_init_auth_token(&probe.agent_dir, probe.candidate_token).await?;
+    let args = init_auth_probe_invocation(probe.model).into_args();
+    let command = build_init_auth_command(&args, &probe.sandbox, &token);
+    run_init_auth_command(command, INIT_AUTH_PROBE_TIMEOUT).await?;
     Ok(())
 }
 
@@ -411,9 +310,9 @@ fn health_probe_invocation(mcp_config_path: &str) -> crate::cc::invocation::Clau
 pub(crate) struct ClaudeHealth {
     agent_name: String,
     agent_dir: PathBuf,
-    ssh_config_path: Option<PathBuf>,
-    resolved_sandbox: Option<String>,
-    sandbox_exec: Option<right_openshell::sandbox_exec::SandboxExec>,
+    /// `None` once the sandbox backend has degraded. Nothing runs without it —
+    /// see [`crate::cc::invocation::guard_no_sandboxed_host_exec`].
+    sandbox: Option<crate::sandbox::Sandbox>,
     sandbox_runtime: Option<Arc<crate::sandbox_runtime::SandboxRuntimeHandle>>,
     repair_lock: tokio::sync::Mutex<()>,
     repair_notice_pending: AtomicBool,
@@ -423,29 +322,33 @@ impl ClaudeHealth {
     pub(crate) fn new(
         agent_name: String,
         agent_dir: PathBuf,
-        ssh_config_path: Option<PathBuf>,
-        resolved_sandbox: Option<String>,
-        sandbox_exec: Option<right_openshell::sandbox_exec::SandboxExec>,
+        sandbox: Option<crate::sandbox::Sandbox>,
         sandbox_runtime: Option<Arc<crate::sandbox_runtime::SandboxRuntimeHandle>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             agent_name,
             agent_dir,
-            ssh_config_path,
-            resolved_sandbox,
-            sandbox_exec,
+            sandbox,
             sandbox_runtime,
             repair_lock: tokio::sync::Mutex::new(()),
             repair_notice_pending: AtomicBool::new(false),
         })
     }
 
+    /// Guarded access to the sandbox, fail-closed: a degraded backend has no
+    /// host fallback, so every probe and repair step simply cannot run.
+    fn sandbox(&self) -> Result<&crate::sandbox::Sandbox, String> {
+        crate::cc::invocation::guard_no_sandboxed_host_exec(
+            &self.agent_name,
+            self.sandbox.as_ref(),
+        )
+        .map_err(|e| format!("{e:#}"))
+    }
+
     fn report_backend_failure(&self) {
-        // Sandboxed agents only: the supervisor verifies with a real gateway
-        // probe before degrading, so reporting liberally is safe.
-        if self.resolved_sandbox.is_some()
-            && let Some(rt) = &self.sandbox_runtime
-        {
+        // The supervisor verifies with a real gateway probe before degrading,
+        // so reporting liberally is safe.
+        if let Some(rt) = &self.sandbox_runtime {
             rt.report_suspected_failure();
         }
     }
@@ -554,42 +457,28 @@ impl ClaudeHealth {
     }
 }
 
-async fn remove_needs_auth_cache(health: &ClaudeHealth) -> Result<(), String> {
-    if let Some(sbox) = health.sandbox_exec.as_ref() {
-        let (output, code) = sbox
-            .exec(&["rm", "-f", "/sandbox/.claude/mcp-needs-auth-cache.json"])
-            .await
-            .map_err(|e| format!("sandbox cache cleanup exec failed: {e:#}"))?;
-        if code != 0 {
-            return Err(format!(
-                "sandbox cache cleanup exited {code}: {}",
-                output.trim()
-            ));
-        }
-        return Ok(());
-    }
+/// Guest path of the MCP `needs-auth` cache the repair path clears.
+const NEEDS_AUTH_CACHE_PATH: &str = "/sandbox/.claude/mcp-needs-auth-cache.json";
 
-    let path = health
-        .agent_dir
-        .join(".claude")
-        .join("mcp-needs-auth-cache.json");
-    match tokio::fs::remove_file(&path).await {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!(
-            "local cache cleanup failed at {}: {e:#}",
-            path.display()
-        )),
+async fn remove_needs_auth_cache(health: &ClaudeHealth) -> Result<(), String> {
+    let sandbox = health.sandbox()?;
+    let (output, code) = crate::sandbox::exec_argv(sandbox, &["rm", "-f", NEEDS_AUTH_CACHE_PATH])
+        .await
+        .map_err(|e| format!("sandbox cache cleanup exec failed: {e:#}"))?;
+    if code != 0 {
+        return Err(format!(
+            "sandbox cache cleanup exited {code}: {}",
+            output.trim()
+        ));
     }
+    Ok(())
 }
 
 async fn sync_after_cache_cleanup(health: &ClaudeHealth) -> Result<(), String> {
-    if let Some(sbox) = health.sandbox_exec.as_ref() {
-        crate::sync::sync_cycle(&health.agent_dir, sbox)
-            .await
-            .map_err(|e| format!("platform sync failed: {e:#}"))?;
-    }
-    Ok(())
+    let sandbox = health.sandbox()?;
+    crate::sync::sync_cycle(&health.agent_dir, sandbox)
+        .await
+        .map_err(|e| format!("platform sync failed: {e:#}"))
 }
 
 /// Spawn the keepalive loop as a background task.
@@ -683,30 +572,16 @@ async fn run_one_health_cycle(
 }
 
 async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, String> {
-    if health.ssh_config_path.is_some() && health.resolved_sandbox.is_none() {
-        return Err("sandbox mode but no resolved sandbox name".to_owned());
-    }
-
-    let mcp_path = crate::cc::invocation::mcp_config_path(
-        health.ssh_config_path.as_deref(),
-        &health.agent_dir,
-    );
-    let args = health_probe_invocation(&mcp_path).into_args();
-    let mut cmd = crate::cc::invocation::build_claude_command(
-        &args,
-        &health.agent_dir,
-        health.ssh_config_path.as_deref(),
-        health.resolved_sandbox.as_deref(),
-    )
-    .await
-    .map_err(|e| format!("{e:#}"))?;
-
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::null());
-
+    let sandbox = health.sandbox()?;
+    let args = health_probe_invocation(crate::sandbox::SANDBOX_MCP_JSON_PATH).into_args();
     let mut child =
-        right_process::ProcessGroupChild::spawn(cmd).map_err(|e| format!("spawn failed: {e:#}"))?;
+        crate::cc::invocation::build_claude_command(&args, &health.agent_dir, sandbox)
+            .await
+            .stdout(crate::cc::sandbox_process::Capture::Pipe)
+            .stderr(crate::cc::sandbox_process::Capture::Null)
+            .spawn()
+            .await
+            .map_err(|e| format!("spawn failed: {e:#}"))?;
     let stdout = child
         .stdout()
         .ok_or_else(|| "health probe missing stdout".to_string())?;
@@ -722,12 +597,7 @@ async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, S
         if let Some(status) = crate::cc::stream::parse_right_mcp_init_status(&line) {
             init_outcome = classify_init_status(status);
             if matches!(init_outcome, HealthProbeOutcome::NeedsRepair { .. }) {
-                if let Err(e) = child.kill().await {
-                    tracing::warn!(
-                        agent = %health.agent_name,
-                        "claude_health: failed to kill unhealthy probe: {e:#}"
-                    );
-                }
+                child.kill().await;
                 killed_for_repair = true;
             }
             break;
@@ -742,12 +612,12 @@ async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, S
             );
         }
     } else {
-        let status = child
+        let code = child
             .wait()
             .await
             .map_err(|e| format!("wait failed: {e:#}"))?;
-        if !status.success() {
-            return Err(format!("exit code: {}", status.code().unwrap_or(-1)));
+        if code != 0 {
+            return Err(format!("exit code: {code}"));
         }
     }
 
@@ -828,90 +698,37 @@ mod tests {
     }
 
     #[test]
-    fn init_auth_host_command_isolates_competing_auth() {
+    fn init_auth_guest_script_isolates_competing_auth_and_hides_the_token() {
         let args = init_auth_probe_invocation(None).into_args();
-        let command =
-            build_init_auth_command(&args, Path::new("/agent"), None, None, "setup-secret")
-                .unwrap();
-        let std_command = command.as_std();
-        let env: std::collections::HashMap<_, _> = std_command.get_envs().collect();
+        let script = init_auth_probe_script(&args);
 
-        assert_eq!(std_command.get_program(), "claude");
-        assert_eq!(
-            env.get(std::ffi::OsStr::new("CLAUDE_CODE_OAUTH_TOKEN")),
-            Some(&Some(std::ffi::OsStr::new("setup-secret")))
-        );
+        // The token is not an input to the script: it can only reach the guest
+        // through `SandboxCommand::env`, which is not readable from the guest
+        // process table the way argv and the script text are.
+        assert!(script.starts_with("unset ANTHROPIC_API_KEY"));
         for name in COMPETING_AUTH_ENV {
-            assert_eq!(env.get(std::ffi::OsStr::new(name)), Some(&None));
+            assert!(script.contains(name), "script must unset {name}");
         }
+        // CLAUDE_CODE_OAUTH_TOKEN is the one auth variable NOT unset — it is
+        // what the probe is validating.
+        assert!(!script.contains("unset CLAUDE_CODE_OAUTH_TOKEN"));
+        assert!(script.contains("[ -n \"$CLAUDE_CODE_OAUTH_TOKEN\" ] || exit 1"));
+        // The stdin handoff the SSH transport needed is gone.
+        assert!(!script.contains("read -r"));
+        assert!(script.contains("exec \"$CLAUDE_BIN\""));
+        assert!(script.contains("--output-format stream-json"));
     }
 
     #[test]
-    fn init_auth_ssh_argv_and_environment_contain_no_token() {
-        let token = "setup-secret-never-in-argv";
-        let args = init_auth_probe_invocation(None).into_args();
-        let command = build_init_auth_command(
-            &args,
-            Path::new("/agent"),
-            Some(Path::new("ssh-config")),
-            Some("agent"),
-            token,
-        )
-        .unwrap();
-        let std_command = command.as_std();
-        let argv = std_command
-            .get_args()
-            .map(|arg| arg.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        assert_eq!(std_command.get_program(), "ssh");
-        assert!(!argv.contains(token));
-        assert_eq!(
-            std_command
-                .get_envs()
-                .find(|(name, _)| *name == std::ffi::OsStr::new("CLAUDE_CODE_OAUTH_TOKEN")),
-            Some((std::ffi::OsStr::new("CLAUDE_CODE_OAUTH_TOKEN"), None))
-        );
-        let remote_script = std_command.get_args().last().unwrap().to_string_lossy();
-        assert!(remote_script.contains("IFS= read -r CLAUDE_CODE_OAUTH_TOKEN"));
-        assert!(remote_script.contains("unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY"));
-        for name in COMPETING_AUTH_ENV {
-            assert!(remote_script.contains(name));
-        }
-    }
-
-    #[tokio::test]
-    async fn init_auth_ssh_transport_sends_token_only_on_stdin() {
-        let token = "setup-secret-stdin-only";
-        let mut command = tokio::process::Command::new("sh");
-        command.env("EXPECTED_PROBE_TOKEN", token).arg("-c").arg(
-            "IFS= read -r received; [ \"$received\" = \"$EXPECTED_PROBE_TOKEN\" ] || exit 2; printf '%s\\n%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"apiKeySource\":\"none\"}' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"OK\"}'",
-        );
-        let argv = command
-            .as_std()
-            .get_args()
-            .map(|arg| arg.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(!argv.contains(token));
-
-        let stdout = run_init_auth_command(command, Some(token)).await.unwrap();
-        assert!(init_auth_probe_succeeded(&stdout));
-        assert!(!String::from_utf8_lossy(&stdout).contains(token));
-    }
-
-    #[tokio::test]
-    async fn init_auth_failure_diagnostics_redact_output_and_token() {
+    fn init_auth_failure_diagnostics_redact_output_and_token() {
         let token = "setup-secret-never-diagnose";
-        let mut command = tokio::process::Command::new("sh");
-        command
-            .arg("-c")
-            .arg("cat >/dev/null; printf 'upstream raw body setup-secret-never-diagnose'; printf 'stderr setup-secret-never-diagnose' >&2; exit 1");
+        let output = crate::cc::sandbox_process::SandboxOutput {
+            code: 1,
+            stdout: format!("upstream raw body {token}").into_bytes(),
+            stderr: format!("stderr {token}").into_bytes(),
+        };
 
-        let error = run_init_auth_command(command, Some(token))
-            .await
-            .expect_err("failed probe must return an error");
+        let error = init_auth_verdict(output).expect_err("failed probe must return an error");
         let diagnostic = format!("{error:#}");
         assert!(!diagnostic.contains(token));
         assert!(!diagnostic.contains("upstream raw body"));
@@ -919,42 +736,25 @@ mod tests {
         assert!(diagnostic.contains("Claude authentication validation failed"));
     }
 
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn init_auth_timeout_terminates_spawned_descendant() {
-        let temp_dir = tempfile::tempdir().expect("create temporary directory");
-        let pid_file = temp_dir.path().join("descendant.pid");
-        let mut command = tokio::process::Command::new("sh");
-        command.env("DESCENDANT_PID_FILE", &pid_file).arg("-c").arg(
-            "sleep 600 & descendant=$!; printf '%s' \"$descendant\" >\"$DESCENDANT_PID_FILE\"; wait",
-        );
+    #[test]
+    fn init_auth_verdict_rejects_zero_exit_with_unauthenticated_stream() {
+        let output = crate::cc::sandbox_process::SandboxOutput {
+            code: 0,
+            stdout: br#"{"type":"result","subtype":"success","is_error":false,"result":"OK"}"#
+                .to_vec(),
+            stderr: Vec::new(),
+        };
 
-        let error = run_init_auth_command_with_timeout(command, None, Duration::from_secs(1))
-            .await
-            .expect_err("probe must time out");
-        assert!(format!("{error:#}").contains("timed out"));
-
-        let descendant_pid = std::fs::read_to_string(&pid_file)
-            .expect("read descendant pid")
-            .parse::<u32>()
-            .expect("parse descendant pid");
-        let status_path = PathBuf::from(format!("/proc/{descendant_pid}/status"));
-        for _ in 0..100 {
-            let running = std::fs::read_to_string(&status_path)
-                .is_ok_and(|status| !status.lines().any(|line| line.starts_with("State:\tZ")));
-            if !running {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("spawned descendant {descendant_pid} survived probe timeout");
+        // No `system/init` with `apiKeySource: none` means the token was not
+        // what authenticated the call.
+        assert!(init_auth_verdict(output).is_err());
     }
+
     #[tokio::test]
     async fn init_auth_missing_database_does_not_create_files_or_sidecars() {
         let temp_dir = tempfile::tempdir().expect("create temporary directory");
-        let probe = InitAuthProbe::new(temp_dir.path().to_path_buf(), None, None, None);
 
-        let error = validate_init_auth(probe)
+        let error = resolve_init_auth_token(temp_dir.path(), None)
             .await
             .expect_err("missing database must fail validation");
 
@@ -978,12 +778,11 @@ mod tests {
         for (name, contents) in sidecars {
             std::fs::write(temp_dir.path().join(name), contents).expect("write sidecar sentinel");
         }
-        let probe = InitAuthProbe::new(temp_dir.path().to_path_buf(), None, None, None)
-            .with_candidate_token("invalid\ncredential".to_owned());
 
-        let error = validate_init_auth(probe)
-            .await
-            .expect_err("invalid candidate must fail before process launch");
+        let error =
+            resolve_init_auth_token(temp_dir.path(), Some("invalid\ncredential".to_owned()))
+                .await
+                .expect_err("invalid candidate must fail before process launch");
 
         assert!(format!("{error:#}").contains("invalid format"));
         assert!(!temp_dir.path().join("data.db").exists());
@@ -1007,9 +806,7 @@ mod tests {
             .expect("save stored token");
         drop(connection);
 
-        let probe = InitAuthProbe::new(temp_dir.path().to_path_buf(), None, None, None)
-            .with_candidate_token("invalid\ncredential".to_owned());
-        validate_init_auth(probe)
+        resolve_init_auth_token(temp_dir.path(), Some("invalid\ncredential".to_owned()))
             .await
             .expect_err("invalid candidate must fail validation");
 
@@ -1054,32 +851,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_probe_errors_when_sandbox_name_missing() {
-        let health = ClaudeHealth::new(
-            "agent-b".to_owned(),
-            PathBuf::from("/tmp/agent"),
-            Some(PathBuf::from("/tmp/ssh_config")),
-            None,
-            None,
-            None,
-        );
+    async fn every_repair_step_refuses_to_run_without_a_sandbox() {
+        let health = ClaudeHealth::new("agent-b".to_owned(), PathBuf::from("/tmp/agent"), None, None);
+        let refusal = "refusing to run agent 'agent-b' on the host: its sandbox is unavailable";
 
+        // Fail-closed: no host fallback exists for any of these.
+        assert_eq!(run_health_probe(&health).await, Err(refusal.to_owned()));
         assert_eq!(
-            run_health_probe(&health).await,
-            Err("sandbox mode but no resolved sandbox name".to_owned())
+            remove_needs_auth_cache(&health).await,
+            Err(refusal.to_owned())
+        );
+        assert_eq!(
+            sync_after_cache_cleanup(&health).await,
+            Err(refusal.to_owned())
         );
     }
 
     #[tokio::test]
     async fn repair_notice_is_one_shot() {
-        let health = ClaudeHealth::new(
-            "agent-b".to_owned(),
-            PathBuf::from("/tmp/agent"),
-            None,
-            None,
-            None,
-            None,
-        );
+        let health = ClaudeHealth::new("agent-b".to_owned(), PathBuf::from("/tmp/agent"), None, None);
 
         assert_eq!(health.consume_repair_notice(), None);
         health.mark_repaired_for_next_turn();
@@ -1089,14 +879,7 @@ mod tests {
 
     #[tokio::test]
     async fn repair_lock_rejects_concurrent_second_holder() {
-        let health = ClaudeHealth::new(
-            "agent-b".to_owned(),
-            PathBuf::from("/tmp/agent"),
-            None,
-            None,
-            None,
-            None,
-        );
+        let health = ClaudeHealth::new("agent-b".to_owned(), PathBuf::from("/tmp/agent"), None, None);
 
         let first = health.try_begin_repair_for_test();
         assert!(first.is_some());
@@ -1107,14 +890,7 @@ mod tests {
 
     #[tokio::test]
     async fn repair_timeout_releases_repair_lock() {
-        let health = ClaudeHealth::new(
-            "agent-b".to_owned(),
-            PathBuf::from("/tmp/agent"),
-            None,
-            None,
-            None,
-            None,
-        );
+        let health = ClaudeHealth::new("agent-b".to_owned(), PathBuf::from("/tmp/agent"), None, None);
 
         health
             .trigger_repair_with_timeout("test", Duration::from_millis(1), |_health| async {

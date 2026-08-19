@@ -421,11 +421,8 @@ pub enum AgentCommands {
         /// Network policy: restrictive or permissive
         #[arg(long)]
         network_policy: Option<right_agent::agent::types::NetworkPolicy>,
-        /// Sandbox mode: openshell or none
-        #[arg(long)]
-        sandbox_mode: Option<right_agent::agent::types::SandboxMode>,
         /// Restore agent from a backup directory
-        #[arg(long, conflicts_with_all = ["fresh", "network_policy", "sandbox_mode"])]
+        #[arg(long, conflicts_with_all = ["fresh", "network_policy"])]
         from_backup: Option<std::path::PathBuf>,
         /// Preserve the source backup's implicit Hindsight memory binding
         #[arg(
@@ -469,14 +466,6 @@ pub enum AgentCommands {
     },
     /// List discovered agents
     List,
-    /// SSH into an agent's sandbox
-    Ssh {
-        /// Agent name
-        name: String,
-        /// Command to run inside the sandbox (optional)
-        #[arg(last = true)]
-        command: Vec<String>,
-    },
     /// Back up an agent's sandbox and configuration
     Backup {
         /// Agent name
@@ -731,9 +720,6 @@ pub enum Commands {
         /// Network policy: restrictive (Anthropic/Claude only) or permissive (all HTTPS)
         #[arg(long)]
         network_policy: Option<right_agent::agent::types::NetworkPolicy>,
-        /// Sandbox mode: openshell or none
-        #[arg(long)]
-        sandbox_mode: Option<right_agent::agent::types::SandboxMode>,
         /// Recreate sandbox if it already exists (without prompting)
         #[arg(long)]
         force: bool,
@@ -1032,7 +1018,6 @@ async fn main() -> miette::Result<()> {
             tunnel_provider,
             yes,
             network_policy,
-            sandbox_mode,
             force,
         } => {
             let claude_setup_token = std::env::var("RIGHT_CLAUDE_SETUP_TOKEN").ok();
@@ -1046,7 +1031,6 @@ async fn main() -> miette::Result<()> {
                 &tunnel_provider,
                 yes,
                 network_policy,
-                sandbox_mode,
                 force,
             )
             .await
@@ -1120,7 +1104,6 @@ async fn main() -> miette::Result<()> {
                 force_recreate,
                 fresh,
                 network_policy,
-                sandbox_mode,
                 from_backup,
                 preserve_source_bindings,
                 rebind_to_target,
@@ -1154,7 +1137,6 @@ async fn main() -> miette::Result<()> {
                         force_recreate,
                         fresh,
                         network_policy,
-                        sandbox_mode,
                         telegram_token.as_deref(),
                         &claude_setup_token,
                         &telegram_allowed_chat_ids,
@@ -1181,7 +1163,6 @@ async fn main() -> miette::Result<()> {
                 }
                 Ok(())
             }
-            AgentCommands::Ssh { name, command } => cmd_agent_ssh(&home, &name, &command).await,
             AgentCommands::Backup {
                 name,
                 sandbox_only,
@@ -1488,15 +1469,10 @@ async fn main() -> miette::Result<()> {
                 let agent_config = right_agent::agent::discovery::parse_agent_config(&agent_dir)
                     .ok()
                     .flatten();
-                let mtls_dir = match &agent_config {
-                    Some(config)
-                        if *config.sandbox_mode() == right_agent::agent::SandboxMode::Openshell =>
-                    {
-                        match right_openshell::openshell::preflight_check() {
-                            right_openshell::openshell::OpenShellStatus::Ready(dir) => Some(dir),
-                            _ => None,
-                        }
-                    }
+                // Every agent is sandboxed, so the mTLS dir is available
+                // whenever the gateway preflight succeeds.
+                let mtls_dir = match right_openshell::openshell::preflight_check() {
+                    right_openshell::openshell::OpenShellStatus::Ready(dir) => Some(dir),
                     _ => None,
                 };
                 let right = right_backend::RightBackend::new(agents_dir.clone(), mtls_dir);
@@ -2010,7 +1986,7 @@ fn preflight_agent_init_tunnel(home: &Path) -> miette::Result<()> {
     validate_configured_tunnel(home).map(|_| ())
 }
 
-fn validate_no_sandbox_claude() -> miette::Result<PathBuf> {
+fn validate_host_claude() -> miette::Result<PathBuf> {
     for binary_name in ["claude", "claude-bun"] {
         let Ok(binary) = which::which(binary_name) else {
             continue;
@@ -2031,7 +2007,7 @@ fn validate_no_sandbox_claude() -> miette::Result<PathBuf> {
 
     Err(miette::miette!(
         help = "Install Claude Code and ensure a working `claude` or `claude-bun` is in PATH: https://docs.anthropic.com/en/docs/claude-code",
-        "Claude Code is required for agents with sandbox mode `none`, but no usable executable was found"
+        "Claude Code is required on the host for `right init`, but no usable executable was found"
     ))
 }
 
@@ -2058,7 +2034,6 @@ async fn cmd_init(
     tunnel_provider: &str,
     yes: bool,
     network_policy: Option<right_agent::agent::types::NetworkPolicy>,
-    sandbox_mode: Option<right_agent::agent::types::SandboxMode>,
     force: bool,
 ) -> miette::Result<()> {
     let interactive = !yes;
@@ -2096,7 +2071,7 @@ async fn cmd_init(
             }
         }
 
-        match validate_no_sandbox_claude() {
+        match validate_host_claude() {
             Ok(path) => block.push(
                 right_ui::status(right_ui::Glyph::Ok)
                     .noun("claude")
@@ -2159,7 +2134,6 @@ async fn cmd_init(
     // Non-interactive: use CLI flags or defaults.
     // Interactive: wizard with Esc-to-go-back between steps.
     let (
-        sandbox,
         network_policy_val,
         token,
         chat_ids,
@@ -2171,7 +2145,6 @@ async fn cmd_init(
     );
 
     if !interactive {
-        sandbox = sandbox_mode.unwrap_or(right_agent::agent::types::SandboxMode::Openshell);
         network_policy_val =
             network_policy.unwrap_or(right_agent::agent::types::NetworkPolicy::Permissive);
         token = telegram_token.map(|t| t.to_string());
@@ -2185,7 +2158,6 @@ async fn cmd_init(
         // Wizard state machine: Esc goes back to previous step.
         #[derive(Clone, Copy)]
         enum Step {
-            Sandbox,
             Network,
             Telegram,
             ChatIds,
@@ -2197,13 +2169,7 @@ async fn cmd_init(
         println!("{}", right_ui::section(theme, "agent"));
         println!("{}", right_ui::Rail::blank(theme));
 
-        let mut step = if sandbox_mode.is_some() {
-            Step::Network
-        } else {
-            Step::Sandbox
-        };
-        let mut w_sandbox =
-            sandbox_mode.unwrap_or(right_agent::agent::types::SandboxMode::Openshell);
+        let mut step = Step::Network;
         let mut w_network =
             network_policy.unwrap_or(right_agent::agent::types::NetworkPolicy::Permissive);
         let mut w_token: Option<String> = telegram_token.map(|t| t.to_string());
@@ -2218,33 +2184,16 @@ async fn cmd_init(
 
         loop {
             match step {
-                Step::Sandbox => {
-                    if let Some(m) = sandbox_mode {
-                        w_sandbox = m;
-                        step = Step::Network;
-                    } else if let Some(s) = right_agent::init::prompt_sandbox_mode()? {
-                        w_sandbox = s;
-                        step = Step::Network;
-                    } else {
-                        // Esc on first step — abort.
-                        return Err(miette::miette!("cancelled"));
-                    }
-                }
                 Step::Network => {
-                    if matches!(w_sandbox, right_agent::agent::types::SandboxMode::Openshell) {
-                        if let Some(p) = network_policy {
-                            w_network = p;
-                            step = Step::Telegram;
-                        } else if let Some(p) = right_agent::init::prompt_network_policy()? {
-                            w_network = p;
-                            step = Step::Telegram;
-                        } else {
-                            step = Step::Sandbox; // back
-                        }
-                    } else {
-                        w_network = network_policy
-                            .unwrap_or(right_agent::agent::types::NetworkPolicy::Permissive);
+                    if let Some(p) = network_policy {
+                        w_network = p;
                         step = Step::Telegram;
+                    } else if let Some(p) = right_agent::init::prompt_network_policy()? {
+                        w_network = p;
+                        step = Step::Telegram;
+                    } else {
+                        // Esc on the first step — abort.
+                        return Err(miette::miette!("cancelled"));
                     }
                 }
                 Step::Telegram => {
@@ -2305,7 +2254,6 @@ async fn cmd_init(
             }
         }
 
-        sandbox = w_sandbox;
         network_policy_val = w_network;
         token = w_token;
         chat_ids = w_chat_ids;
@@ -2327,10 +2275,6 @@ async fn cmd_init(
             "Right Agent home already initialized at {}. Use `right config` to change settings.",
             home.join("agents/right").display()
         ));
-    }
-
-    if matches!(sandbox, right_agent::agent::types::SandboxMode::None) {
-        validate_no_sandbox_claude()?;
     }
 
     // Tunnel setup and global config must succeed before the default agent is
@@ -2367,7 +2311,6 @@ async fn cmd_init(
         token.as_deref(),
         &chat_ids,
         &network_policy_val,
-        &sandbox,
         memory_provider,
         memory_api_key,
         memory_bank_id,
@@ -2404,66 +2347,59 @@ async fn cmd_init(
             .map_err(|error| miette::miette!("failed to migrate data.db: {error:#}"))?;
         persist_claude_setup_token(&agent_dir, &claude_setup_token).await?;
 
-        // Create sandbox if openshell mode.
-        if matches!(sandbox, right_agent::agent::types::SandboxMode::Openshell) {
-            let staging = agent_dir.join("staging");
-            right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;
+        // Every agent is sandboxed.
+        let staging = agent_dir.join("staging");
+        right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
-            let policy_path = agent_dir.join("policy.yaml");
-            // Must match `sandbox.name: right-{agent}` written by init_agent into agent.yaml.
-            let sb_name = format!("right-{}", "right");
-            let force_recreate = if force {
-                true
-            } else {
-                prompt_sandbox_recreate_if_exists(&sb_name, interactive)?
-            };
-            let theme = right_ui::detect();
-            println!(
-                "{}",
-                right_ui::status(right_ui::Glyph::Info)
-                    .noun("sandbox")
-                    .verb("creating")
-                    .render(theme)
-            );
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    right_openshell::openshell::ensure_sandbox(
-                        &sb_name,
-                        &policy_path,
-                        Some(&staging),
-                        force_recreate,
-                    )
-                    .await
-                })
-            })?;
-            apply_exact_right_mcp_policy_for_sandbox_sync(
-                &sb_name,
-                &policy_path,
-                network_policy_val,
-            )?;
-            println!(
-                "{}",
-                right_ui::status(right_ui::Glyph::Ok)
-                    .noun("sandbox")
-                    .verb("ready")
-                    .detail(&sb_name)
-                    .render(theme)
-            );
-
-            let run_dir = home.join("run");
-            std::fs::create_dir_all(run_dir.join("ssh"))
-                .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(
-                    right_openshell::openshell::generate_ssh_config(&sb_name, &run_dir.join("ssh")),
+        let policy_path = agent_dir.join("policy.yaml");
+        // Must match `sandbox.name: right-{agent}` written by init_agent into agent.yaml.
+        let sb_name = format!("right-{}", "right");
+        let force_recreate = if force {
+            true
+        } else {
+            prompt_sandbox_recreate_if_exists(&sb_name, interactive)?
+        };
+        let theme = right_ui::detect();
+        println!(
+            "{}",
+            right_ui::status(right_ui::Glyph::Info)
+                .noun("sandbox")
+                .verb("creating")
+                .render(theme)
+        );
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                right_openshell::openshell::ensure_sandbox(
+                    &sb_name,
+                    &policy_path,
+                    Some(&staging),
+                    force_recreate,
                 )
-            })?;
-        }
-        validate_agent_init_auth(home, &agent_def).await?;
+                .await
+            })
+        })?;
+        println!(
+            "{}",
+            right_ui::status(right_ui::Glyph::Ok)
+                .noun("sandbox")
+                .verb("ready")
+                .detail(&sb_name)
+                .render(theme)
+        );
+
+        let run_dir = home.join("run");
+        std::fs::create_dir_all(run_dir.join("ssh"))
+            .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(
+                right_openshell::openshell::generate_ssh_config(&sb_name, &run_dir.join("ssh")),
+            )
+        })?;
+        validate_agent_init_auth(&agent_def).await?;
     }
 
     let theme = right_ui::detect();
-    let mode = format!("{} ({})", sandbox, network_policy_val);
+    let mode = network_policy_val.to_string();
     let chat_ids_detail = if chat_ids.is_empty() {
         "0 allowed (blocks all)".to_string()
     } else {
@@ -2501,7 +2437,6 @@ async fn cmd_agent_init(
     force_recreate: bool,
     fresh: bool,
     network_policy: Option<right_agent::agent::types::NetworkPolicy>,
-    sandbox_mode: Option<right_agent::agent::types::SandboxMode>,
     telegram_token: Option<&str>,
     claude_setup_token: &str,
     telegram_allowed_chat_ids: &[i64],
@@ -2637,8 +2572,6 @@ async fn cmd_agent_init(
         // --telegram-token / --telegram-allowed-chat-ids take precedence
         // over saved values so the operator can rotate them at re-init
         // time without dropping into the wizard.
-        // sandbox_mode() borrows config; bind it before we move fields out.
-        let saved_sandbox_mode = *config.sandbox_mode();
         let merged_token = telegram_token
             .map(|t| t.to_string())
             .or(config.telegram_token);
@@ -2648,7 +2581,6 @@ async fn cmd_agent_init(
             config.allowed_chat_ids
         };
         right_agent::init::InitOverrides {
-            sandbox_mode: saved_sandbox_mode,
             network_policy: config.network_policy,
             telegram_token: merged_token,
             allowed_chat_ids: merged_chat_ids,
@@ -2720,8 +2652,6 @@ async fn cmd_agent_init(
                 );
             }
             right_agent::init::InitOverrides {
-                sandbox_mode: sandbox_mode
-                    .unwrap_or(right_agent::agent::types::SandboxMode::Openshell),
                 network_policy: network_policy
                     .unwrap_or(right_agent::agent::types::NetworkPolicy::Permissive),
                 telegram_token: telegram_token.map(|t| t.to_string()),
@@ -2739,7 +2669,6 @@ async fn cmd_agent_init(
         } else {
             #[derive(Clone, Copy)]
             enum Step {
-                Sandbox,
                 Network,
                 Telegram,
                 ChatIds,
@@ -2748,13 +2677,7 @@ async fn cmd_agent_init(
                 Done,
             }
 
-            let mut step = if sandbox_mode.is_some() {
-                Step::Network
-            } else {
-                Step::Sandbox
-            };
-            let mut w_sandbox =
-                sandbox_mode.unwrap_or(right_agent::agent::types::SandboxMode::Openshell);
+            let mut step = Step::Network;
             let mut w_network =
                 network_policy.unwrap_or(right_agent::agent::types::NetworkPolicy::Permissive);
             let mut w_token: Option<String> = telegram_token.map(|t| t.to_string());
@@ -2771,29 +2694,15 @@ async fn cmd_agent_init(
 
             loop {
                 match step {
-                    Step::Sandbox => {
-                        if let Some(s) = right_agent::init::prompt_sandbox_mode()? {
-                            w_sandbox = s;
-                            step = Step::Network;
+                    Step::Network => {
+                        if let Some(p) = network_policy {
+                            w_network = p;
+                            step = Step::Telegram;
+                        } else if let Some(p) = right_agent::init::prompt_network_policy()? {
+                            w_network = p;
+                            step = Step::Telegram;
                         } else {
                             return Err(miette::miette!("Setup cancelled."));
-                        }
-                    }
-                    Step::Network => {
-                        if matches!(w_sandbox, right_agent::agent::types::SandboxMode::Openshell) {
-                            if let Some(p) = network_policy {
-                                w_network = p;
-                                step = Step::Telegram;
-                            } else if let Some(p) = right_agent::init::prompt_network_policy()? {
-                                w_network = p;
-                                step = Step::Telegram;
-                            } else {
-                                step = Step::Sandbox;
-                            }
-                        } else {
-                            w_network = network_policy
-                                .unwrap_or(right_agent::agent::types::NetworkPolicy::Permissive);
-                            step = Step::Telegram;
                         }
                     }
                     Step::Telegram => {
@@ -2874,7 +2783,6 @@ async fn cmd_agent_init(
             }
 
             right_agent::init::InitOverrides {
-                sandbox_mode: w_sandbox,
                 network_policy: w_network,
                 telegram_token: w_token,
                 allowed_chat_ids: w_chat_ids,
@@ -2891,12 +2799,6 @@ async fn cmd_agent_init(
         }
     };
 
-    if matches!(
-        overrides.sandbox_mode,
-        right_agent::agent::types::SandboxMode::None
-    ) {
-        validate_no_sandbox_claude()?;
-    }
     let agent_dir = right_agent::init::init_agent(&agents_parent, name, Some(&overrides))?;
 
     // Run codegen so settings, schemas, skills are generated.
@@ -2928,65 +2830,54 @@ async fn cmd_agent_init(
         persist_claude_setup_token(&agent_dir, claude_setup_token).await?;
     }
 
-    // Create sandbox for openshell agents.
-    if matches!(
-        overrides.sandbox_mode,
-        right_agent::agent::types::SandboxMode::Openshell
-    ) {
-        let staging = agent_dir.join("staging");
-        right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;
+    // Every agent gets a sandbox.
+    let staging = agent_dir.join("staging");
+    right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
-        let policy_path = agent_dir.join("policy.yaml");
-        // Read the configured name (init_agent wrote it; the supervisor's
-        // name migration may have rewritten it since). Re-deriving from the
-        // agent name here would mis-target after such a rewrite.
-        let configured_name = right_agent::agent::discovery::parse_agent_config(&agent_dir)?
-            .and_then(|c| c.sandbox.as_ref().and_then(|s| s.name.clone()));
-        let sb_name =
-            right_openshell::openshell::resolve_sandbox_name(name, configured_name.as_deref());
-        // --force-recreate always recreates; fresh agent (didn't exist before) always creates;
-        // otherwise prompt if stale sandbox exists.
-        let recreate_sandbox = if force_recreate || !agent_existed {
-            // Check if sandbox exists — if so, we need to recreate. If not, false is fine
-            // (ensure_sandbox will create fresh).
-            let exists = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { check_sandbox_exists_async(&sb_name).await })
-            });
-            exists.unwrap_or(false)
-        } else {
-            prompt_sandbox_recreate_if_exists(&sb_name, interactive)?
-        };
-        println!("Creating OpenShell sandbox...");
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                right_openshell::openshell::ensure_sandbox(
-                    &sb_name,
-                    &policy_path,
-                    Some(&staging),
-                    recreate_sandbox,
-                )
-                .await
-            })
-        })?;
-        apply_exact_right_mcp_policy_for_sandbox_sync(
-            &sb_name,
-            &policy_path,
-            overrides.network_policy,
-        )?;
-
-        println!("  Sandbox '{sb_name}' ready");
-
-        // Generate SSH config.
-        let run_dir = home.join("run");
-        std::fs::create_dir_all(run_dir.join("ssh"))
-            .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(
-                right_openshell::openshell::generate_ssh_config(&sb_name, &run_dir.join("ssh")),
+    let policy_path = agent_dir.join("policy.yaml");
+    // Read the configured name (init_agent wrote it; the supervisor's
+    // name migration may have rewritten it since). Re-deriving from the
+    // agent name here would mis-target after such a rewrite.
+    let configured_name = right_agent::agent::discovery::parse_agent_config(&agent_dir)?
+        .and_then(|c| c.sandbox.as_ref().and_then(|s| s.name.clone()));
+    let sb_name = right_openshell::openshell::resolve_sandbox_name(name, configured_name.as_deref());
+    // --force-recreate always recreates; fresh agent (didn't exist before) always creates;
+    // otherwise prompt if stale sandbox exists.
+    let recreate_sandbox = if force_recreate || !agent_existed {
+        // Check if sandbox exists — if so, we need to recreate. If not, false is fine
+        // (ensure_sandbox will create fresh).
+        let exists = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { check_sandbox_exists_async(&sb_name).await })
+        });
+        exists.unwrap_or(false)
+    } else {
+        prompt_sandbox_recreate_if_exists(&sb_name, interactive)?
+    };
+    println!("Creating OpenShell sandbox...");
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            right_openshell::openshell::ensure_sandbox(
+                &sb_name,
+                &policy_path,
+                Some(&staging),
+                recreate_sandbox,
             )
-        })?;
-    }
+            .await
+        })
+    })?;
+
+    println!("  Sandbox '{sb_name}' ready");
+
+    // Generate SSH config.
+    let run_dir = home.join("run");
+    std::fs::create_dir_all(run_dir.join("ssh"))
+        .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(
+            right_openshell::openshell::generate_ssh_config(&sb_name, &run_dir.join("ssh")),
+        )
+    })?;
 
     let probe_agent = right_agent::agent::AgentDef {
         name: name.to_owned(),
@@ -2999,20 +2890,12 @@ async fn cmd_agent_init(
         bootstrap_path: None,
         heartbeat_path: None,
     };
-    validate_agent_init_auth(home, &probe_agent).await?;
+    validate_agent_init_auth(&probe_agent).await?;
 
     let cfg = right_agent::agent::discovery::parse_agent_config(&agent_dir)?
         .ok_or_else(|| miette::miette!("agent.yaml missing after init"))?;
 
-    let sandbox_str = format!("{}", cfg.sandbox_mode());
-    let sandbox_with_policy = if matches!(
-        cfg.sandbox_mode(),
-        right_agent::agent::types::SandboxMode::Openshell
-    ) {
-        format!("{} ({})", sandbox_str, cfg.network_policy)
-    } else {
-        sandbox_str
-    };
+    let sandbox_with_policy = format!("sandboxed ({})", cfg.network_policy);
 
     let chat_ids_detail = if cfg.allowed_chat_ids.is_empty() {
         "0 allowed (blocks all)".to_string()
@@ -3090,61 +2973,6 @@ async fn check_sandbox_exists_async(sandbox_name: &str) -> miette::Result<bool> 
     };
     let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
     right_openshell::openshell::is_sandbox_ready(&mut client, sandbox_name).await
-}
-
-fn write_bootstrap_right_mcp_policy(
-    policy_path: &Path,
-    network_policy: right_agent::agent::types::NetworkPolicy,
-) -> miette::Result<()> {
-    let policy_content = right_codegen::policy::generate_policy(
-        right_runtime_state::MCP_HTTP_PORT,
-        &network_policy,
-        right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
-    );
-    right_codegen::contract::write_regenerated(policy_path, &policy_content)
-}
-
-fn apply_exact_right_mcp_policy_for_sandbox_sync(
-    sandbox_name: &str,
-    policy_path: &Path,
-    network_policy: right_agent::agent::types::NetworkPolicy,
-) -> miette::Result<Vec<std::net::IpAddr>> {
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(apply_exact_right_mcp_policy_for_sandbox(
-            sandbox_name,
-            policy_path,
-            network_policy,
-        ))
-    })
-}
-
-async fn apply_exact_right_mcp_policy_for_sandbox(
-    sandbox_name: &str,
-    policy_path: &Path,
-    network_policy: right_agent::agent::types::NetworkPolicy,
-) -> miette::Result<Vec<std::net::IpAddr>> {
-    let mtls_dir = match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-        status => return Err(openshell_status_error(status)),
-    };
-
-    let mut grpc = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-    let sandbox_id =
-        right_openshell::openshell::resolve_sandbox_id(&mut grpc, sandbox_name).await?;
-    let host_ips = right_openshell::openshell::resolve_host_ips(&mut grpc, &sandbox_id).await?;
-    let policy_content = right_codegen::policy::generate_policy(
-        right_runtime_state::MCP_HTTP_PORT,
-        &network_policy,
-        right_codegen::policy::HostMcpAccess::Resolved(host_ips.clone()),
-    );
-    right_codegen::contract::write_and_apply_sandbox_policy(
-        sandbox_name,
-        policy_path,
-        &policy_content,
-    )
-    .await?;
-    tracing::info!(sandbox = %sandbox_name, ?host_ips, "applied exact Right MCP policy");
-    Ok(host_ips)
 }
 
 /// If a sandbox already exists, prompt the user to recreate or abort.
@@ -3344,10 +3172,6 @@ fn generic_provider_profiles(
     let mut providers = Vec::new();
 
     for (agent_name, config) in configs {
-        if !config.is_sandboxed() {
-            continue;
-        }
-
         for entry in config
             .sandbox
             .iter()
@@ -3601,9 +3425,6 @@ async fn ensure_agent_probe_transport(
         .config
         .as_ref()
         .ok_or_else(|| miette::miette!("agent.yaml is missing"))?;
-    if !config.is_sandboxed() {
-        return Ok(());
-    }
     let sandbox_name = right_openshell::openshell::resolve_sandbox_name(
         &agent.name,
         config
@@ -3676,16 +3497,13 @@ where
     persist(token.to_owned()).await
 }
 
-async fn repair_claude_auth(
-    home: &Path,
-    agent: &right_agent::agent::AgentDef,
-) -> miette::Result<()> {
+async fn repair_claude_auth(agent: &right_agent::agent::AgentDef) -> miette::Result<()> {
     let mut supplied = std::env::var("RIGHT_CLAUDE_SETUP_TOKEN").ok();
     loop {
         let token = resolve_claude_setup_token(supplied.take().as_deref(), true)?;
         match validate_then_persist_claude_candidate(
             &token,
-            |candidate| validate_agent_init_auth_candidate(home, agent, candidate),
+            |candidate| validate_agent_init_auth_candidate(agent, candidate),
             |candidate| async move { persist_claude_setup_token(&agent.path, &candidate).await },
         )
         .await
@@ -3743,12 +3561,6 @@ impl AgentReadinessBackend for LiveAgentReadiness<'_> {
         agent: &right_agent::agent::AgentDef,
         interactive: bool,
     ) -> miette::Result<()> {
-        let Some(config) = agent.config.as_ref() else {
-            return Err(miette::miette!("agent.yaml is missing"));
-        };
-        if !config.is_sandboxed() {
-            return Ok(());
-        }
         let mtls_dir = self
             .mtls_dir
             .ok_or_else(|| miette::miette!("OpenShell is not ready"))?;
@@ -3759,7 +3571,7 @@ impl AgentReadinessBackend for LiveAgentReadiness<'_> {
         &mut self,
         agent: &right_agent::agent::AgentDef,
     ) -> miette::Result<()> {
-        validate_agent_init_auth(self.home, agent).await
+        validate_agent_init_auth(agent).await
     }
 
     async fn repair(
@@ -3769,7 +3581,7 @@ impl AgentReadinessBackend for LiveAgentReadiness<'_> {
     ) -> miette::Result<()> {
         match action {
             ReadinessRepair::Telegram => repair_telegram_token(agent).await,
-            ReadinessRepair::Claude => repair_claude_auth(self.home, agent).await,
+            ReadinessRepair::Claude => repair_claude_auth(agent).await,
         }
     }
 }
@@ -3853,13 +3665,9 @@ async fn validate_up_readiness(
         }
     }
 
-    let any_sandboxed = agents.iter().any(|agent| {
-        agent
-            .config
-            .as_ref()
-            .map(|config| config.is_sandboxed())
-            .unwrap_or(true)
-    });
+    // Every agent is sandboxed, so the gateway is required as soon as there is
+    // one agent to start.
+    let any_sandboxed = !agents.is_empty();
     let mtls_dir = if any_sandboxed {
         match ensure_openshell_ready(interactive) {
             Ok(dir) => Some(dir),
@@ -3942,18 +3750,12 @@ async fn cmd_up(
     );
     t_phase = std::time::Instant::now();
 
-    let any_sandboxed = agents.iter().any(|agent| {
-        agent
-            .config
-            .as_ref()
-            .map(|config| config.is_sandboxed())
-            .unwrap_or(true)
-    });
+    let any_sandboxed = !agents.is_empty();
 
     // Provision RightClaw-owned provider profiles (right-*) to the gateway,
-    // once per gateway, before bots start. Only when sandboxed agents exist —
-    // no sandboxed agent means no managed profiles are needed, and we must not
-    // let provisioning gate `right up` for a host with zero sandboxed agents.
+    // once per gateway, before bots start. Only when there is an agent to
+    // start — zero agents means no managed profiles are needed, and we must not
+    // let provisioning gate `right up` for a host with no agents at all.
     // FAIL FAST on error.
     if any_sandboxed {
         use right_openshell::openshell::{OpenShellStatus, connect_grpc, preflight_check};
@@ -4142,18 +3944,16 @@ fn openshell_status_error(status: right_openshell::openshell::OpenShellStatus) -
     match status {
         right_openshell::openshell::OpenShellStatus::Ready(_) => unreachable!(),
         right_openshell::openshell::OpenShellStatus::NotInstalled => miette::miette!(
-            help = "Install from https://github.com/NVIDIA/OpenShell, or set `sandbox: mode: none` in agent.yaml",
+            help = "Install from https://github.com/NVIDIA/OpenShell — every agent runs sandboxed",
             "OpenShell is not installed"
         ),
         right_openshell::openshell::OpenShellStatus::NoGateway(_) => miette::miette!(
             help = "Run `systemctl --user restart openshell-gateway`\n  \
-                    (the unit ships with the OpenShell installer),\n  \
-                    or set `sandbox: mode: none` in agent.yaml",
+                    (the unit ships with the OpenShell installer)",
             "OpenShell gateway is not running"
         ),
         right_openshell::openshell::OpenShellStatus::BrokenGateway(mtls_dir) => miette::miette!(
-            help = "Run `systemctl --user restart openshell-gateway` to regenerate the mTLS certs,\n  \
-                    or set `sandbox: mode: none` in agent.yaml",
+            help = "Run `systemctl --user restart openshell-gateway` to regenerate the mTLS certs",
             "OpenShell gateway exists but mTLS certificates are missing at {}\n\n  \
              The gateway may be in a broken state.",
             mtls_dir.display()
@@ -4549,10 +4349,6 @@ async fn cmd_agent_restore(
             backup_path.display()
         )
     })?;
-    let is_sandboxed = backup_config.is_sandboxed();
-    if !is_sandboxed {
-        validate_no_sandbox_claude()?;
-    }
 
     let effective_restore_binding_mode = if matches!(
         restore_binding_mode,
@@ -4615,268 +4411,203 @@ async fn cmd_agent_restore(
     // failure between here and the success return unifies cleanup of the
     // half-populated agent dir, instead of relying on ad-hoc per-callsite rollback.
     let result: miette::Result<()> = async {
-        copy_agent_restore_config_files(backup_path, &agent_dir, &backup_config)?;
+        copy_agent_restore_config_files(backup_path, &agent_dir)?;
         remove_database_sidecars(&agent_dir)?;
 
-        if is_sandboxed {
-            // 4. Sandboxed restore: normalize restored agent.yaml before codegen
-            // or sandbox creation can use it, then create new sandbox and upload
-            // tar contents.
-            restore::apply_memory_action(
-                &agent_dir.join("agent.yaml"),
-                backup_config.clone(),
-                restore_decision.memory_action.clone(),
-            )?;
+        // 4. Sandboxed restore: normalize restored agent.yaml before codegen
+        // or sandbox creation can use it, then create new sandbox and upload
+        // tar contents.
+        restore::apply_memory_action(
+            &agent_dir.join("agent.yaml"),
+            backup_config.clone(),
+            restore_decision.memory_action.clone(),
+        )?;
 
-            let config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
+        // Parsing the restored agent.yaml validates it before the sandbox is
+        // created; the values themselves come from `backup_config`.
+        right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
 
-            let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
-            let new_sandbox_name = right_openshell::openshell::fit_sandbox_name(&format!(
-                "right-{agent_name}-{timestamp}"
-            ));
+        let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
+        let new_sandbox_name = right_openshell::openshell::fit_sandbox_name(&format!(
+            "right-{agent_name}-{timestamp}"
+        ));
 
-            // We need codegen for staging dir. Create a minimal IDENTITY.md placeholder
-            // so discover_single_agent succeeds (the real one is inside the tar).
-            let identity_path = agent_dir.join("IDENTITY.md");
-            if !identity_path.exists() {
-                std::fs::write(&identity_path, "# Placeholder (restoring from backup)\n")
-                    .into_diagnostic()
-                    .map_err(|e| {
-                        miette::miette!("failed to write placeholder IDENTITY.md: {e:#}")
-                    })?;
-            }
-
-            let agent_def = right_agent::agent::discover_single_agent(&agent_dir)?;
-            let self_exe = std::env::current_exe()
+        // We need codegen for staging dir. Create a minimal IDENTITY.md placeholder
+        // so discover_single_agent succeeds (the real one is inside the tar).
+        let identity_path = agent_dir.join("IDENTITY.md");
+        if !identity_path.exists() {
+            std::fs::write(&identity_path, "# Placeholder (restoring from backup)\n")
                 .into_diagnostic()
-                .map_err(|e| miette::miette!("failed to resolve self exe: {e:#}"))?;
+                .map_err(|e| {
+                    miette::miette!("failed to write placeholder IDENTITY.md: {e:#}")
+                })?;
+        }
 
-            right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false).await?;
+        let agent_def = right_agent::agent::discover_single_agent(&agent_dir)?;
+        let self_exe = std::env::current_exe()
+            .into_diagnostic()
+            .map_err(|e| miette::miette!("failed to resolve self exe: {e:#}"))?;
 
-            // Prepare staging dir.
-            let staging = agent_dir.join("staging");
-            right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;
+        right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false).await?;
 
-            // Resolve policy path.
-            let policy_path = resolve_restored_policy_path(
-                &agent_dir,
-                config
-                    .as_ref()
-                    .and_then(|c| c.sandbox.as_ref())
-                    .and_then(|s| s.policy_file.as_deref()),
-            )?;
+        // Prepare staging dir.
+        let staging = agent_dir.join("staging");
+        right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
-            if !policy_path.exists() {
+        let policy_path = restored_policy_path(&agent_dir);
+
+        if !policy_path.exists() {
+            return Err(miette::miette!(
+                "policy file not found at {} — cannot create sandbox",
+                policy_path.display()
+            ));
+        }
+        // Verify OpenShell is reachable.
+        let mtls_dir = match right_openshell::openshell::preflight_check() {
+            right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+            right_openshell::openshell::OpenShellStatus::NotInstalled => {
                 return Err(miette::miette!(
-                    "policy file not found at {} — cannot create sandbox",
-                    policy_path.display()
+                    "openshell not installed — required for sandboxed agent restore"
                 ));
             }
-            write_bootstrap_right_mcp_policy(
-                &policy_path,
-                config.as_ref().map(|c| c.network_policy).unwrap_or_default(),
-            )?;
+            right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
+                return Err(miette::miette!(
+                    "openshell gateway not started — start it before restoring"
+                ));
+            }
+            right_openshell::openshell::OpenShellStatus::BrokenGateway(_) => {
+                return Err(miette::miette!(
+                    "openshell mTLS certs missing or corrupt — try reinstalling openshell"
+                ));
+            }
+        };
 
-            // Verify OpenShell is reachable.
-            let mtls_dir = match right_openshell::openshell::preflight_check() {
-                right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-                right_openshell::openshell::OpenShellStatus::NotInstalled => {
+        // Spawn sandbox.
+        println!(
+            "{}",
+            right_ui::status(right_ui::Glyph::Info)
+                .noun("sandbox")
+                .verb("creating")
+                .detail(&new_sandbox_name)
+                .render(theme)
+        );
+        let mut child = right_openshell::openshell::spawn_sandbox(
+            &new_sandbox_name,
+            &policy_path,
+            Some(&staging),
+            &[],
+        )?;
+        cleanup_plan.track_sandbox(new_sandbox_name.clone());
+
+        let mut grpc = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
+
+        // Wait for READY (race with child exit).
+        tokio::select! {
+            result = right_openshell::openshell::wait_for_ready(&mut grpc, &new_sandbox_name, 120, 2) => {
+                result?;
+                drop(child);
+            }
+            status = child.wait() => {
+                let status = status.map_err(|e| miette::miette!("sandbox create child wait failed: {e:#}"))?;
+                if !status.success() {
                     return Err(miette::miette!(
-                        "openshell not installed — required for sandboxed agent restore"
+                        "openshell sandbox create for '{}' exited with {status} before reaching READY",
+                        new_sandbox_name
                     ));
-                }
-                right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
-                    return Err(miette::miette!(
-                        "openshell gateway not started — start it before restoring"
-                    ));
-                }
-                right_openshell::openshell::OpenShellStatus::BrokenGateway(_) => {
-                    return Err(miette::miette!(
-                        "openshell mTLS certs missing or corrupt — try reinstalling openshell"
-                    ));
-                }
-            };
-
-            // Spawn sandbox.
-            println!(
-                "{}",
-                right_ui::status(right_ui::Glyph::Info)
-                    .noun("sandbox")
-                    .verb("creating")
-                    .detail(&new_sandbox_name)
-                    .render(theme)
-            );
-            let mut child = right_openshell::openshell::spawn_sandbox(
-                &new_sandbox_name,
-                &policy_path,
-                Some(&staging),
-                &[],
-            )?;
-            cleanup_plan.track_sandbox(new_sandbox_name.clone());
-
-            let mut grpc = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-
-            // Wait for READY (race with child exit).
-            tokio::select! {
-                result = right_openshell::openshell::wait_for_ready(&mut grpc, &new_sandbox_name, 120, 2) => {
-                    result?;
-                    drop(child);
-                }
-                status = child.wait() => {
-                    let status = status.map_err(|e| miette::miette!("sandbox create child wait failed: {e:#}"))?;
-                    if !status.success() {
-                        return Err(miette::miette!(
-                            "openshell sandbox create for '{}' exited with {status} before reaching READY",
-                            new_sandbox_name
-                        ));
-                    }
                 }
             }
+        }
 
-            // Wait for SSH transport.
-            let sandbox_id =
-                right_openshell::openshell::resolve_sandbox_id(&mut grpc, &new_sandbox_name)
-                    .await?;
-            right_openshell::openshell::wait_for_ssh(&mut grpc, &sandbox_id, 60, 2).await?;
-            apply_exact_right_mcp_policy_for_sandbox(
-                &new_sandbox_name,
-                &policy_path,
-                config.as_ref().map(|c| c.network_policy).unwrap_or_default(),
+        // Wait for SSH transport.
+        let sandbox_id =
+            right_openshell::openshell::resolve_sandbox_id(&mut grpc, &new_sandbox_name)
+                .await?;
+        right_openshell::openshell::wait_for_ssh(&mut grpc, &sandbox_id, 60, 2).await?;
+
+        // Generate SSH config.
+        let ssh_config_dir = home.join("run").join("ssh");
+        std::fs::create_dir_all(&ssh_config_dir)
+            .into_diagnostic()
+            .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
+        let ssh_config_path = right_openshell::openshell::generate_ssh_config(
+            &new_sandbox_name,
+            &ssh_config_dir,
+        )
+        .await?;
+        cleanup_plan.track_ssh_config(ssh_config_path.clone());
+
+        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&new_sandbox_name);
+
+        // Upload backup tar.
+        println!(
+            "{}",
+            right_ui::status(right_ui::Glyph::Info)
+                .noun("sandbox backup")
+                .verb("uploading")
+                .render(theme)
+        );
+        right_openshell::openshell::ssh_tar_upload(
+            &ssh_config_path,
+            &ssh_host,
+            &tar_path,
+            600,
+        )
+        .await
+        .map_err(|error| {
+            miette::miette!(
+                "Sandbox restore failed for agent '{}' in new sandbox '{}': {error:#}",
+                agent_name,
+                new_sandbox_name,
             )
-            .await?;
+        })?;
+        println!(
+            "{}",
+            right_ui::status(right_ui::Glyph::Ok)
+                .noun("sandbox files")
+                .verb("restored")
+                .render(theme)
+        );
 
-            // Generate SSH config.
-            let ssh_config_dir = home.join("run").join("ssh");
-            std::fs::create_dir_all(&ssh_config_dir)
-                .into_diagnostic()
-                .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
-            let ssh_config_path = right_openshell::openshell::generate_ssh_config(
-                &new_sandbox_name,
-                &ssh_config_dir,
-            )
-            .await?;
-            cleanup_plan.track_ssh_config(ssh_config_path.clone());
+        // Write sandbox.name into agent.yaml.
+        crate::wizard::update_agent_yaml_sandbox_name(&agent_dir, &new_sandbox_name)?;
+        println!(
+            "{}",
+            right_ui::status(right_ui::Glyph::Ok)
+                .noun("sandbox.name")
+                .verb("written to agent.yaml")
+                .detail(&new_sandbox_name)
+                .render(theme)
+        );
 
-            let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&new_sandbox_name);
-
-            // Upload backup tar.
-            println!(
-                "{}",
-                right_ui::status(right_ui::Glyph::Info)
-                    .noun("sandbox backup")
-                    .verb("uploading")
-                    .render(theme)
-            );
-            right_openshell::openshell::ssh_tar_upload(
-                &ssh_config_path,
-                &ssh_host,
-                &tar_path,
-                600,
-            )
-            .await
-            .map_err(|error| {
-                miette::miette!(
-                    "Sandbox restore failed for agent '{}' in new sandbox '{}': {error:#}",
-                    agent_name,
-                    new_sandbox_name,
-                )
-            })?;
-            println!(
-                "{}",
-                right_ui::status(right_ui::Glyph::Ok)
-                    .noun("sandbox files")
-                    .verb("restored")
-                    .render(theme)
-            );
-
-            // Write sandbox.name into agent.yaml.
-            crate::wizard::update_agent_yaml_sandbox_name(&agent_dir, &new_sandbox_name)?;
-            println!(
-                "{}",
-                right_ui::status(right_ui::Glyph::Ok)
-                    .noun("sandbox.name")
-                    .verb("written to agent.yaml")
-                    .detail(&new_sandbox_name)
-                    .render(theme)
-            );
-
-            right_agent::identity_mirror::sync_identity_mirror_from_sandbox(
-                &agent_dir,
-                &new_sandbox_name,
-            )
+        let restored_sandbox = right_sandbox::SandboxHandle::attach(&new_sandbox_name)
             .await
             .map_err(|e| {
                 miette::miette!(
-                    "sandbox restored but identity mirror sync failed for '{}': {e:#}",
+                    "sandbox restored but attach for identity mirror sync failed for '{}': {e:#}",
                     new_sandbox_name
                 )
             })?;
-            println!(
-                "{}",
-                right_ui::status(right_ui::Glyph::Ok)
-                    .noun("identity mirror")
-                    .verb("restored from sandbox")
-                    .render(theme)
-            );
+        right_agent::identity_mirror::sync_identity_mirror_from_sandbox(
+            &agent_dir,
+            &restored_sandbox,
+        )
+        .await
+        .map_err(|e| {
+            miette::miette!(
+                "sandbox restored but identity mirror sync failed for '{}': {e:#}",
+                new_sandbox_name
+            )
+        })?;
+        println!(
+            "{}",
+            right_ui::status(right_ui::Glyph::Ok)
+                .noun("identity mirror")
+                .verb("restored from sandbox")
+                .render(theme)
+        );
 
-            // Clean up staging dir and placeholder.
-            let _ = std::fs::remove_dir_all(&staging);
-        } else {
-            // 5. No-sandbox restore: unpack tar directly.
-            // The tar was created with `-C <agents_parent> <agent_name>`, so we
-            // strip the top-level directory to restore into potentially different name.
-            println!(
-                "{}",
-                right_ui::status(right_ui::Glyph::Info)
-                    .noun("sandbox.tar.gz")
-                    .verb("extracting")
-                    .render(theme)
-            );
-            let status = std::process::Command::new("tar")
-                .args([
-                    "xzpf",
-                    tar_path
-                        .to_str()
-                        .ok_or_else(|| miette::miette!("non-UTF-8 tar path"))?,
-                    "--strip-components=1",
-                    "-C",
-                    agent_dir
-                        .to_str()
-                        .ok_or_else(|| miette::miette!("non-UTF-8 agent dir"))?,
-                ])
-                .status()
-                .into_diagnostic()
-                .map_err(|e| miette::miette!("failed to spawn tar: {e:#}"))?;
-            if !status.success() {
-                return Err(miette::miette!(
-                    "tar extraction failed with status {status}"
-                ));
-            }
-            remove_database_sidecars(&agent_dir)?;
-            copy_database_snapshot_for_restore(backup_path, &agent_dir)?;
-
-            restore::apply_memory_action(
-                &agent_dir.join("agent.yaml"),
-                backup_config.clone(),
-                restore_decision.memory_action.clone(),
-            )?;
-
-            let config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
-            if config.is_none() {
-                return Err(miette::miette!(
-                    "agent.yaml restored but parsed config is unavailable at {}",
-                    agent_dir.display()
-                ));
-            }
-
-            println!(
-                "{}",
-                right_ui::status(right_ui::Glyph::Ok)
-                    .noun("agent files")
-                    .verb("restored")
-                    .render(theme)
-            );
-        }
+        // Clean up staging dir and placeholder.
+        let _ = std::fs::remove_dir_all(&staging);
 
         right_db::open_db(&agent_dir, true)
             .await
@@ -4892,7 +4623,7 @@ async fn cmd_agent_restore(
             false,
         )?;
         right_codegen::run_single_agent_codegen(home, &restored_agent, &self_exe, false).await?;
-        validate_agent_init_auth(home, &restored_agent).await?;
+        validate_agent_init_auth(&restored_agent).await?;
 
         Ok(())
     }
@@ -4944,54 +4675,39 @@ fn restore_recap(
     }
 }
 
-async fn validate_agent_init_auth(
-    home: &Path,
-    agent: &right_agent::agent::AgentDef,
-) -> miette::Result<()> {
-    validate_agent_init_auth_with_candidate(home, agent, None).await
+async fn validate_agent_init_auth(agent: &right_agent::agent::AgentDef) -> miette::Result<()> {
+    validate_agent_init_auth_with_candidate(agent, None).await
 }
 
 async fn validate_agent_init_auth_candidate(
-    home: &Path,
     agent: &right_agent::agent::AgentDef,
     candidate: String,
 ) -> miette::Result<()> {
-    validate_agent_init_auth_with_candidate(home, agent, Some(candidate)).await
+    validate_agent_init_auth_with_candidate(agent, Some(candidate)).await
 }
 
 async fn validate_agent_init_auth_with_candidate(
-    home: &Path,
     agent: &right_agent::agent::AgentDef,
     candidate: Option<String>,
 ) -> miette::Result<()> {
     let config = agent.config.as_ref().ok_or_else(|| {
         miette::miette!("agent.yaml missing before Claude authentication validation")
     })?;
-    let (ssh_config_path, resolved_sandbox) = if config.is_sandboxed() {
-        let sandbox_name = right_openshell::openshell::resolve_sandbox_name(
-            &agent.name,
-            config
-                .sandbox
-                .as_ref()
-                .and_then(|sandbox| sandbox.name.as_deref()),
-        );
-        (
-            Some(
-                home.join("run")
-                    .join("ssh")
-                    .join(format!("{sandbox_name}.ssh-config")),
-            ),
-            Some(sandbox_name),
-        )
-    } else {
-        (None, None)
+    // The probe runs in-guest, exactly like a bot turn: attach here and fail
+    // fast, because there is no host transport to fall back to.
+    let sandbox_name = match config.sandbox.as_ref().and_then(|s| s.name.as_deref()) {
+        Some(explicit) => right_sandbox::fit_sandbox_name(explicit),
+        None => right_sandbox::sandbox_name(&agent.name),
     };
-    let mut probe = right_bot::InitAuthProbe::new(
-        agent.path.clone(),
-        ssh_config_path,
-        resolved_sandbox,
-        config.model.clone(),
+    let sandbox = std::sync::Arc::new(
+        right_sandbox::SandboxHandle::attach(&sandbox_name)
+            .await
+            .map_err(|error| {
+                miette::miette!("attach to sandbox `{sandbox_name}` for Claude auth: {error:#}")
+            })?,
     );
+    let mut probe =
+        right_bot::InitAuthProbe::new(agent.path.clone(), sandbox, config.model.clone());
     if let Some(token) = candidate {
         probe = probe.with_candidate_token(token);
     }
@@ -4999,6 +4715,7 @@ async fn validate_agent_init_auth_with_candidate(
         .await
         .map_err(|error| miette::miette!("{error:#}"))
 }
+
 fn prompt_restore_binding_mode() -> miette::Result<restore::RestoreBindingMode> {
     let options = vec![
         "preserve source bindings",
@@ -5149,42 +4866,23 @@ fn copy_database_snapshot_for_restore(backup_dir: &Path, agent_dir: &Path) -> mi
     Ok(true)
 }
 
-fn resolve_restored_policy_path(
-    agent_dir: &Path,
-    policy_file: Option<&Path>,
-) -> miette::Result<PathBuf> {
-    let policy_file = policy_file.unwrap_or_else(|| Path::new("policy.yaml"));
-
-    validate_relative_agent_file(policy_file, "restored sandbox.policy_file")?;
-
-    Ok(agent_dir.join(policy_file))
+/// The restored agent's policy file. Policy lives at the fixed agent-local
+/// `policy.yaml`; the retired `sandbox.policy_file` key is inert.
+fn restored_policy_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join("policy.yaml")
 }
 
-fn copy_agent_backup_config_files(
-    agent_dir: &Path,
-    backup_dir: &Path,
-    config: Option<&right_agent::agent::types::AgentConfig>,
-) -> miette::Result<()> {
+fn copy_agent_backup_config_files(agent_dir: &Path, backup_dir: &Path) -> miette::Result<()> {
     for filename in ["agent.yaml", "policy.yaml", "allowlist.yaml"] {
         let rel = Path::new(filename);
         if copy_agent_file_if_exists(agent_dir, backup_dir, rel)? {
             println!("{filename} copied");
         }
     }
-
-    if let Some(policy_file) = custom_sandbox_policy_file(config)? {
-        copy_required_agent_file(agent_dir, backup_dir, &policy_file)?;
-        println!("{} copied", policy_file.display());
-    }
-
     Ok(())
 }
 
-fn copy_agent_restore_config_files(
-    backup_dir: &Path,
-    agent_dir: &Path,
-    config: &right_agent::agent::types::AgentConfig,
-) -> miette::Result<()> {
+fn copy_agent_restore_config_files(backup_dir: &Path, agent_dir: &Path) -> miette::Result<()> {
     for filename in ["agent.yaml", "policy.yaml", "allowlist.yaml"] {
         let rel = Path::new(filename);
         if copy_agent_file_if_exists(backup_dir, agent_dir, rel)? {
@@ -5194,39 +4892,7 @@ fn copy_agent_restore_config_files(
     if copy_database_snapshot_for_restore(backup_dir, agent_dir)? {
         println!("data.db restored");
     }
-
-    if let Some(policy_file) = custom_sandbox_policy_file(Some(config))? {
-        copy_required_agent_file(backup_dir, agent_dir, &policy_file)?;
-        println!("{} restored", policy_file.display());
-    }
-
     Ok(())
-}
-
-fn custom_sandbox_policy_file(
-    config: Option<&right_agent::agent::types::AgentConfig>,
-) -> miette::Result<Option<PathBuf>> {
-    let Some(config) = config else {
-        return Ok(None);
-    };
-    if !config.is_sandboxed() {
-        return Ok(None);
-    }
-
-    let Some(policy_file) = config
-        .sandbox
-        .as_ref()
-        .and_then(|sandbox| sandbox.policy_file.as_deref())
-    else {
-        return Ok(None);
-    };
-
-    validate_relative_agent_file(policy_file, "sandbox.policy_file")?;
-    if policy_file == Path::new("policy.yaml") {
-        return Ok(None);
-    }
-
-    Ok(Some(policy_file.to_path_buf()))
 }
 
 fn copy_agent_file_if_exists(
@@ -5335,8 +5001,6 @@ async fn cmd_agent_backup(
     let agent_dir = agents_dir.join(agent_name);
     let config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
 
-    let is_sandboxed = config.as_ref().map(|c| c.is_sandboxed()).unwrap_or(true);
-
     // 2. Create backup directory: ~/.right/backups/<agent>/<YYYYMMDD-HHMM>/
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
     let backup_base = right_config::backups_dir(home, agent_name);
@@ -5352,123 +5016,78 @@ async fn cmd_agent_backup(
 
     tracing::info!(agent = agent_name, backup_dir = %backup_dir.display(), "starting backup");
 
-    // 3. Sandbox tar download (if sandboxed)
-    if is_sandboxed {
-        let explicit_sandbox_name = config
-            .as_ref()
-            .and_then(|c| c.sandbox.as_ref())
-            .and_then(|s| s.name.as_deref());
-        let sb_name =
-            right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+    // 3. Sandbox tar download
+    let explicit_sandbox_name = config
+        .as_ref()
+        .and_then(|c| c.sandbox.as_ref())
+        .and_then(|s| s.name.as_deref());
+    let sb_name =
+        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
 
-        // Verify OpenShell is reachable
-        let mtls_dir = match right_openshell::openshell::preflight_check() {
-            right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-            right_openshell::openshell::OpenShellStatus::NotInstalled => {
-                return Err(miette::miette!(
-                    "openshell not installed — required for sandboxed agent backup"
-                ));
-            }
-            right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
-                return Err(miette::miette!(
-                    "openshell gateway not started — start it before backing up"
-                ));
-            }
-            right_openshell::openshell::OpenShellStatus::BrokenGateway(_) => {
-                return Err(miette::miette!(
-                    "openshell mTLS certs missing or corrupt — try reinstalling openshell"
-                ));
-            }
-        };
-
-        let mut grpc = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-
-        let ready = right_openshell::openshell::is_sandbox_ready(&mut grpc, &sb_name).await?;
-        if !ready {
+    // Verify OpenShell is reachable
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+        right_openshell::openshell::OpenShellStatus::NotInstalled => {
             return Err(miette::miette!(
-                help = "Start the agent with: right up",
-                "Sandbox '{}' is not ready — agent must be running to back up sandbox files",
-                sb_name,
+                "openshell not installed — required for sandboxed agent backup"
             ));
         }
-
-        let ssh_config = home
-            .join("run")
-            .join("ssh")
-            .join(format!("{}.ssh-config", sb_name));
-        if !ssh_config.exists() {
+        right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
             return Err(miette::miette!(
-                help = "Try restarting the agent",
-                "SSH config not found at {}",
-                ssh_config.display(),
+                "openshell gateway not started — start it before backing up"
             ));
         }
-
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&sb_name);
-        let dest_tar = backup_dir.join("sandbox.tar.gz");
-
-        tracing::info!(sandbox = %sb_name, dest = %dest_tar.display(), "downloading sandbox via SSH tar");
-        right_openshell::openshell::ssh_tar_download(
-            &ssh_config,
-            &ssh_host,
-            "sandbox",
-            &dest_tar,
-            include_rebuildable,
-            300,
-        )
-        .await?;
-        println!(
-            "sandbox.tar.gz written ({} bytes)",
-            std::fs::metadata(&dest_tar).map(|m| m.len()).unwrap_or(0)
-        );
-    } else {
-        // No-sandbox: tar the agent dir (excluding data.db — backed up separately via VACUUM)
-        let dest_tar = backup_dir.join("sandbox.tar.gz");
-        tracing::info!(agent_dir = %agent_dir.display(), dest = %dest_tar.display(), "archiving agent directory");
-        let mut tar_args = vec![
-            "czpf".to_string(),
-            dest_tar
-                .to_str()
-                .ok_or_else(|| miette::miette!("non-UTF-8 backup path"))?
-                .to_string(),
-        ];
-        right_agent::agent::push_no_sandbox_database_tar_excludes(&mut tar_args, agent_name);
-
-        if !include_rebuildable {
-            for path in right_openshell::openshell::DEFAULT_REBUILDABLE_BACKUP_EXCLUDES {
-                tar_args.push(format!("--exclude={agent_name}/{path}"));
-                tar_args.push(format!("--exclude={agent_name}/{path}/*"));
-            }
+        right_openshell::openshell::OpenShellStatus::BrokenGateway(_) => {
+            return Err(miette::miette!(
+                "openshell mTLS certs missing or corrupt — try reinstalling openshell"
+            ));
         }
+    };
 
-        tar_args.push("-C".to_string());
-        tar_args.push(
-            agent_dir
-                .parent()
-                .ok_or_else(|| miette::miette!("agent_dir has no parent"))?
-                .to_str()
-                .ok_or_else(|| miette::miette!("non-UTF-8 agents_dir"))?
-                .to_string(),
-        );
-        tar_args.push(agent_name.to_string());
+    let mut grpc = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
 
-        let status = std::process::Command::new("tar")
-            .args(&tar_args)
-            .status()
-            .into_diagnostic()
-            .map_err(|e| miette::miette!("failed to spawn tar: {e:#}"))?;
-        if !status.success() {
-            return Err(miette::miette!("tar exited with status {status}"));
-        }
-        println!(
-            "sandbox.tar.gz written ({} bytes)",
-            std::fs::metadata(&dest_tar).map(|m| m.len()).unwrap_or(0)
-        );
+    let ready = right_openshell::openshell::is_sandbox_ready(&mut grpc, &sb_name).await?;
+    if !ready {
+        return Err(miette::miette!(
+            help = "Start the agent with: right up",
+            "Sandbox '{}' is not ready — agent must be running to back up sandbox files",
+            sb_name,
+        ));
     }
+
+    let ssh_config = home
+        .join("run")
+        .join("ssh")
+        .join(format!("{}.ssh-config", sb_name));
+    if !ssh_config.exists() {
+        return Err(miette::miette!(
+            help = "Try restarting the agent",
+            "SSH config not found at {}",
+            ssh_config.display(),
+        ));
+    }
+
+    let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&sb_name);
+    let dest_tar = backup_dir.join("sandbox.tar.gz");
+
+    tracing::info!(sandbox = %sb_name, dest = %dest_tar.display(), "downloading sandbox via SSH tar");
+    right_openshell::openshell::ssh_tar_download(
+        &ssh_config,
+        &ssh_host,
+        "sandbox",
+        &dest_tar,
+        include_rebuildable,
+        300,
+    )
+    .await?;
+    println!(
+        "sandbox.tar.gz written ({} bytes)",
+        std::fs::metadata(&dest_tar).map(|m| m.len()).unwrap_or(0)
+    );
 
     // 4. Config files (unless --sandbox-only)
     if !sandbox_only {
-        copy_agent_backup_config_files(&agent_dir, &backup_dir, config.as_ref())?;
+        copy_agent_backup_config_files(&agent_dir, &backup_dir)?;
 
         let db_path = agent_dir.join("data.db");
         if db_path.exists() {
@@ -5525,7 +5144,6 @@ async fn cmd_agent_destroy(
     }
 
     let config = right_agent::agent::parse_agent_config(&agent_dir)?;
-    let is_sandboxed = config.as_ref().map(|c| c.is_sandboxed()).unwrap_or(true);
 
     let do_backup = if force {
         backup_flag
@@ -5536,17 +5154,13 @@ async fn cmd_agent_destroy(
         if let Ok(size) = dir_size(&agent_dir) {
             println!("  Size: {}", format_bytes(size));
         }
-        if is_sandboxed {
-            let explicit_sandbox_name = config
-                .as_ref()
-                .and_then(|c| c.sandbox.as_ref())
-                .and_then(|s| s.name.as_deref());
-            let sb_name =
-                right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
-            println!("  Sandbox: {sb_name}");
-        } else {
-            println!("  Sandbox: none");
-        }
+        let explicit_sandbox_name = config
+            .as_ref()
+            .and_then(|c| c.sandbox.as_ref())
+            .and_then(|s| s.name.as_deref());
+        let sb_name =
+            right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+        println!("  Sandbox: {sb_name}");
         let db_path = agent_dir.join("data.db");
         if db_path.exists()
             && let Ok(meta) = std::fs::metadata(&db_path)
@@ -5805,10 +5419,7 @@ async fn cmd_agent_rebootstrap(home: &Path, agent_name: &str, yes: bool) -> miet
         println!("{}", section(theme, &format!("rebootstrap: {agent_name}")));
         println!("{}", Rail::blank(theme));
 
-        let sandbox_detail = match &plan.sandbox_name {
-            Some(name) => format!("{} ({name})", plan.sandbox_mode),
-            None => plan.sandbox_mode.to_string(),
-        };
+        let sandbox_detail = plan.sandbox_name.clone();
         let mut plan_block = Block::new();
         plan_block.push(
             status(Glyph::Info)
@@ -6003,113 +5614,6 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn build_agent_ssh_command(
-    ssh_config: &Path,
-    ssh_host: &str,
-    command: &[String],
-) -> miette::Result<std::process::Command> {
-    let mut cmd = std::process::Command::new("ssh");
-    cmd.arg("-F").arg(ssh_config);
-    cmd.arg(ssh_host);
-    if !command.is_empty() {
-        cmd.arg("--");
-        cmd.arg(right_openshell::openshell::quote_ssh_remote_args(
-            command.iter().map(String::as_str),
-        )?);
-    }
-    Ok(cmd)
-}
-
-async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> miette::Result<()> {
-    use std::os::unix::process::CommandExt;
-
-    // 1. Discover agent
-    let agents = right_agent::agent::discover_agents(&right_config::agents_dir(home))?;
-    let agent = agents
-        .iter()
-        .find(|a| a.name == agent_name)
-        .ok_or_else(|| {
-            let available: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
-            miette::miette!(
-                "Agent '{}' not found. Available: {}",
-                agent_name,
-                available.join(", ")
-            )
-        })?;
-
-    // 2. Check sandbox mode
-    if !matches!(
-        agent.sandbox_mode(),
-        right_agent::agent::types::SandboxMode::Openshell
-    ) {
-        return Err(miette::miette!(
-            "Agent '{}' runs without sandbox, SSH not available",
-            agent_name
-        ));
-    }
-
-    // 3. Check agent is running via process-compose
-    let pc = right_agent::runtime::PcClient::from_home(home)?.ok_or_else(|| {
-        miette::miette!(
-            help = "Start it with: right up",
-            "Agent '{}' is not running",
-            agent_name,
-        )
-    })?;
-    pc.health_check().await.map_err(|_| {
-        miette::miette!(
-            help = "Start it with: right up",
-            "Agent '{}' is not running",
-            agent_name,
-        )
-    })?;
-
-    let processes = pc.list_processes().await?;
-    let pc_process_name = format!("{}-bot", agent_name);
-    let proc = processes.iter().find(|p| p.name == pc_process_name);
-    match proc {
-        Some(p) if p.status != "Running" => {
-            return Err(miette::miette!(
-                help = "Start it with: right up",
-                "Agent '{}' is not running (status: {})",
-                agent_name,
-                p.status,
-            ));
-        }
-        None => {
-            return Err(miette::miette!(
-                help = "Start it with: right up",
-                "Agent '{}' is not running",
-                agent_name,
-            ));
-        }
-        Some(_) => {} // Running — continue
-    }
-
-    // 4. Locate SSH config
-    let explicit_sandbox_name = agent
-        .config
-        .as_ref()
-        .and_then(|c| c.sandbox.as_ref())
-        .and_then(|s| s.name.as_deref());
-    let sb_name =
-        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
-    let ssh_config = home.join(format!("run/ssh/{}.ssh-config", sb_name));
-    if !ssh_config.exists() {
-        return Err(miette::miette!(
-            help = "Try restarting the agent",
-            "SSH config not found at {}. Try restarting the agent.",
-            ssh_config.display(),
-        ));
-    }
-
-    let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&sb_name);
-    let mut cmd = build_agent_ssh_command(&ssh_config, &ssh_host, command)?;
-
-    let err = cmd.exec();
-    Err(miette::miette!("Failed to exec ssh: {err}"))
-}
-
 // Tests are placed mid-file historically; moving them is a structural
 // change out of scope for this cleanup pass.
 #[allow(clippy::items_after_test_module)]
@@ -6117,18 +5621,18 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
 mod tests {
     use super::{
         AgentReadinessBackend, ConfigCommands, MemoryCommands, ReadinessRepair, RestoreCleanupPlan,
-        build_agent_ssh_command, cleanup_failed_restore, cleanup_failed_restore_agent_dir,
+        cleanup_failed_restore, cleanup_failed_restore_agent_dir,
         copy_agent_backup_config_files, copy_agent_restore_config_files,
         copy_database_snapshot_for_restore, discover_up_agents, generic_provider_profiles,
         managed_profile_attachments, non_interactive_readiness_result, remove_database_sidecars,
-        resolve_agent_db, resolve_restored_policy_path, restore_recap, restored_mcp_auth_method,
+        resolve_agent_db, restore_recap, restored_mcp_auth_method, restored_policy_path,
         run_up_preflight, truncate_content, validate_agent_readiness_with,
         validate_configured_tunnel_with, validate_then_persist_claude_candidate,
-        write_bootstrap_right_mcp_policy, write_managed_settings,
+        write_managed_settings,
     };
 
     use right_agent_config::{
-        AgentConfig, GenericProvider, ProviderEntry, ProviderType, SandboxConfig, SandboxMode,
+        AgentConfig, GenericProvider, ProviderEntry, ProviderType, SandboxConfig,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -6142,8 +5646,6 @@ mod tests {
             identity_path: path.join("IDENTITY.md"),
             config: Some(AgentConfig {
                 sandbox: Some(SandboxConfig {
-                    mode: SandboxMode::None,
-                    policy_file: None,
                     name: None,
                     providers: Vec::new(),
                 }),
@@ -6268,7 +5770,7 @@ mod tests {
         fs::create_dir_all(agents_dir.join("malformed")).unwrap();
         fs::write(
             agents_dir.join("valid/agent.yaml"),
-            "telegram_token: \"123:test\"\nsandbox:\n  mode: none\n",
+            "telegram_token: \"123:test\"\nsandbox:\n  name: valid\n",
         )
         .unwrap();
         fs::write(agents_dir.join("malformed/agent.yaml"), "sandbox: [").unwrap();
@@ -6362,8 +5864,6 @@ mod tests {
     fn config_with_provider(provider: ProviderEntry) -> AgentConfig {
         AgentConfig {
             sandbox: Some(SandboxConfig {
-                mode: SandboxMode::Openshell,
-                policy_file: Some(PathBuf::from("policy.yaml")),
                 name: None,
                 providers: vec![provider],
             }),
@@ -6381,7 +5881,6 @@ mod tests {
                 upstream_hosts: vec!["api.acme.com".to_string()],
                 upstream_path_prefix: None,
             }),
-            shared_from: None,
         }
     }
 
@@ -6394,7 +5893,7 @@ mod tests {
         fs::create_dir_all(agents_dir.join("malformed")).unwrap();
         fs::write(
             agents_dir.join("valid/agent.yaml"),
-            "sandbox:\n  mode: none\n",
+            "sandbox:\n  name: valid\n",
         )
         .unwrap();
         fs::write(agents_dir.join("malformed/agent.yaml"), "sandbox: [").unwrap();
@@ -6556,7 +6055,6 @@ mod tests {
             type_: ProviderType::BuiltIn("anthropic".to_string()),
             label: None,
             generic: None,
-            shared_from: None,
         });
 
         let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)]).unwrap();
@@ -6571,7 +6069,6 @@ mod tests {
             type_: ProviderType::Generic,
             label: None,
             generic: None,
-            shared_from: None,
         });
 
         let err = generic_provider_profiles(&[("agent-a".to_string(), config)])
@@ -6583,11 +6080,11 @@ mod tests {
     }
 
     #[test]
-    fn generic_provider_profiles_skips_non_sandboxed_config() {
+    fn generic_provider_profiles_collects_every_agent_provider() {
+        // Every agent is sandboxed, so no config is skipped: a declared
+        // generic provider always yields a managed profile.
         let config = AgentConfig {
             sandbox: Some(SandboxConfig {
-                mode: SandboxMode::None,
-                policy_file: None,
                 name: None,
                 providers: vec![generic_provider("right-acme")],
             }),
@@ -6595,56 +6092,9 @@ mod tests {
         };
 
         let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)])
-            .expect("non-sandboxed providers should be skipped without error");
+            .expect("generic provider must produce a managed profile");
 
-        assert!(profiles.is_empty());
-    }
-
-    #[test]
-    fn agent_ssh_command_quotes_remote_argv_as_one_argument() {
-        let command = vec![
-            "probe_cmd".to_string(),
-            "alpha beta".to_string(),
-            "$(nope)".to_string(),
-            "semi;colon".to_string(),
-            "quote'arg".to_string(),
-        ];
-
-        let cmd =
-            build_agent_ssh_command(Path::new("config"), "openshell-example", &command).unwrap();
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(args[0], "-F");
-        assert_eq!(args[1], "config");
-        assert_eq!(args[2], "openshell-example");
-        assert_eq!(
-            args[3..].len(),
-            2,
-            "agent ssh must pass `--` plus one remote command argument"
-        );
-        assert_eq!(args[3], "--");
-
-        let probe = format!(
-            "probe_cmd() {{ for arg in \"$@\"; do command printf '<%s>\\n' \"$arg\"; done; }}; {}",
-            args[4]
-        );
-
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(probe)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "quoted command should parse under sh; stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8(output.stdout).unwrap(),
-            "<alpha beta>\n<$(nope)>\n<semi;colon>\n<quote'arg>\n"
-        );
+        assert_eq!(profiles.len(), 1);
     }
 
     #[test]
@@ -6672,26 +6122,6 @@ mod tests {
         assert_eq!(
             restored_mcp_auth_method(Some("headers"), None, Some(vec![header.clone()])),
             Some(right_mcp::proxy::AuthMethod::Headers(vec![header]))
-        );
-    }
-
-    #[test]
-    fn agent_ssh_command_omits_remote_command_for_interactive_login() {
-        let command = Vec::new();
-        let cmd =
-            build_agent_ssh_command(Path::new("config"), "openshell-example", &command).unwrap();
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-
-        assert_eq!(
-            args,
-            vec![
-                "-F".to_string(),
-                "config".to_string(),
-                "openshell-example".to_string(),
-            ]
         );
     }
 
@@ -6752,7 +6182,7 @@ mod tests {
         fs::create_dir_all(agent_dir.join("staging")).unwrap();
         fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n",
+            "sandbox:\n  name: test-agent\n",
         )
         .unwrap();
         fs::write(agent_dir.join("data.db"), "partial").unwrap();
@@ -6772,7 +6202,7 @@ mod tests {
         let ssh_config = tmp.path().join("run/ssh/right-drill.ssh-config");
         fs::create_dir_all(&agent_dir).unwrap();
         fs::create_dir_all(ssh_config.parent().unwrap()).unwrap();
-        fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+        fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  name: right-drill\n").unwrap();
         fs::write(&ssh_config, "Host test\n").unwrap();
         let mut plan = RestoreCleanupPlan::new(agent_dir.clone());
         plan.track_ssh_config(ssh_config.clone());
@@ -6792,7 +6222,7 @@ mod tests {
         fs::create_dir_all(ssh_config.parent().unwrap()).unwrap();
         fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n",
+            "sandbox:\n  name: test-agent\n",
         )
         .unwrap();
         fs::write(&ssh_config, "Host test\n").unwrap();
@@ -6934,79 +6364,16 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_policy_regeneration_overwrites_stale_right_mcp_ips() {
+    fn restored_policy_path_is_always_the_agent_local_policy_yaml() {
+        // `sandbox.policy_file` is retired: a restored agent can no longer
+        // redirect the policy path (relative, absolute, or `..` escaping).
         let tmp = TempDir::new().unwrap();
-        let policy_path = tmp.path().join("policies").join("custom-policy.yaml");
-        fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
-        fs::write(
-            &policy_path,
-            r#"version: 1
-network_policies:
-  right:
-    endpoints:
-      - host: "host.openshell.internal"
-        port: 8100
-        allowed_ips:
-          - "203.0.113.44/32"
-          - "172.16.0.0/12"
-        protocol: rest
-        access: full
-    binaries:
-      - path: "**"
-"#,
-        )
-        .unwrap();
 
-        write_bootstrap_right_mcp_policy(
-            &policy_path,
-            right_agent::agent::types::NetworkPolicy::Permissive,
-        )
-        .unwrap();
-
-        let rewritten = fs::read_to_string(&policy_path).unwrap();
-        assert!(!rewritten.contains("203.0.113.44/32"));
-        assert!(!rewritten.contains("172.16.0.0/12"));
-        let parsed: serde_json::Value =
-            serde_saphyr::from_str(&rewritten).expect("rewritten policy must be valid YAML");
-        let right_endpoint = &parsed["network_policies"]["right"]["endpoints"][0];
-        assert!(
-            right_endpoint.get("allowed_ips").is_none(),
-            "bootstrap Right MCP policy must omit stale allowed_ips"
-        );
+        assert_eq!(restored_policy_path(tmp.path()), tmp.path().join("policy.yaml"));
     }
 
     #[test]
-    fn restore_policy_path_rejects_absolute_paths() {
-        let tmp = TempDir::new().unwrap();
-        let err = resolve_restored_policy_path(
-            tmp.path(),
-            Some(PathBuf::from("/tmp/policy.yaml").as_path()),
-        )
-        .expect_err("absolute policy path must be rejected");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("must be relative"),
-            "error must explain relative path requirement, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn restore_policy_path_rejects_parent_dir_escape() {
-        let tmp = TempDir::new().unwrap();
-        let err = resolve_restored_policy_path(
-            tmp.path(),
-            Some(PathBuf::from("../policy.yaml").as_path()),
-        )
-        .expect_err("escaping policy path must be rejected");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("must not contain '..'"),
-            "error must explain parent-dir escape rejection, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn backup_config_files_include_custom_sandbox_policy_file() {
+    fn backup_config_files_ignore_retired_policy_file_key() {
         let tmp = TempDir::new().unwrap();
         let agent_dir = tmp.path().join("agents").join("custom-policy-agent");
         let backup_dir = tmp.path().join("backups").join("custom-policy-agent");
@@ -7014,7 +6381,7 @@ network_policies:
         fs::create_dir_all(&backup_dir).unwrap();
         fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  policy_file: policies/custom-policy.yaml\n",
+            "sandbox:\n  policy_file: policies/custom-policy.yaml\n",
         )
         .unwrap();
         fs::write(
@@ -7022,16 +6389,15 @@ network_policies:
             "version: 1\nnetwork_policies: {}\n",
         )
         .unwrap();
+        fs::write(agent_dir.join("policy.yaml"), "version: 1\n").unwrap();
 
-        let config = right_agent::agent::discovery::parse_agent_config(&agent_dir)
-            .unwrap()
-            .unwrap();
-        copy_agent_backup_config_files(&agent_dir, &backup_dir, Some(&config)).unwrap();
+        copy_agent_backup_config_files(&agent_dir, &backup_dir).unwrap();
 
         assert!(backup_dir.join("agent.yaml").exists());
+        assert!(backup_dir.join("policy.yaml").exists());
         assert!(
-            backup_dir.join("policies/custom-policy.yaml").exists(),
-            "backup must include the policy file referenced by sandbox.policy_file"
+            !backup_dir.join("policies/custom-policy.yaml").exists(),
+            "the retired sandbox.policy_file key must not pull extra files into the backup"
         );
     }
 
@@ -7044,7 +6410,7 @@ network_policies:
         fs::create_dir_all(&backup_dir).unwrap();
         fs::write(
             agent_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n",
+            "sandbox:\n  name: test-agent\n",
         )
         .unwrap();
         let allowlist = "\
@@ -7062,10 +6428,7 @@ groups:
 ";
         fs::write(agent_dir.join("allowlist.yaml"), allowlist).unwrap();
 
-        let config = right_agent::agent::discovery::parse_agent_config(&agent_dir)
-            .unwrap()
-            .unwrap();
-        copy_agent_backup_config_files(&agent_dir, &backup_dir, Some(&config)).unwrap();
+        copy_agent_backup_config_files(&agent_dir, &backup_dir).unwrap();
 
         assert_eq!(
             fs::read_to_string(backup_dir.join("allowlist.yaml")).unwrap(),
@@ -7075,7 +6438,7 @@ groups:
     }
 
     #[test]
-    fn restore_config_files_copy_custom_sandbox_policy_before_codegen() {
+    fn restore_config_files_ignore_retired_policy_file_key() {
         let tmp = TempDir::new().unwrap();
         let backup_dir = tmp.path().join("backup");
         let agent_dir = tmp.path().join("agents").join("restored-agent");
@@ -7083,7 +6446,7 @@ groups:
         fs::create_dir_all(&agent_dir).unwrap();
         fs::write(
             backup_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n  policy_file: policies/custom-policy.yaml\n",
+            "sandbox:\n  policy_file: policies/custom-policy.yaml\n",
         )
         .unwrap();
         fs::write(
@@ -7093,16 +6456,13 @@ groups:
         .unwrap();
         fs::write(backup_dir.join("data.db"), "db").unwrap();
 
-        let config = right_agent::agent::discovery::parse_agent_config(&backup_dir)
-            .unwrap()
-            .unwrap();
-        copy_agent_restore_config_files(&backup_dir, &agent_dir, &config).unwrap();
+        copy_agent_restore_config_files(&backup_dir, &agent_dir).unwrap();
 
         assert!(agent_dir.join("agent.yaml").exists());
         assert!(agent_dir.join("data.db").exists());
         assert!(
-            agent_dir.join("policies/custom-policy.yaml").exists(),
-            "restore must copy the referenced custom policy before sandbox creation"
+            !agent_dir.join("policies/custom-policy.yaml").exists(),
+            "the retired sandbox.policy_file key must not restore extra files"
         );
     }
 
@@ -7115,7 +6475,7 @@ groups:
         fs::create_dir_all(&agent_dir).unwrap();
         fs::write(
             backup_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n",
+            "sandbox:\n  name: test-agent\n",
         )
         .unwrap();
         fs::write(backup_dir.join("data.db"), "db").unwrap();
@@ -7134,10 +6494,7 @@ groups:
 ";
         fs::write(backup_dir.join("allowlist.yaml"), allowlist).unwrap();
 
-        let config = right_agent::agent::discovery::parse_agent_config(&backup_dir)
-            .unwrap()
-            .unwrap();
-        copy_agent_restore_config_files(&backup_dir, &agent_dir, &config).unwrap();
+        copy_agent_restore_config_files(&backup_dir, &agent_dir).unwrap();
 
         assert_eq!(
             fs::read_to_string(agent_dir.join("allowlist.yaml")).unwrap(),
@@ -7156,7 +6513,7 @@ groups:
 
         fs::write(
             backup_dir.join("agent.yaml"),
-            "sandbox:\n  mode: openshell\n",
+            "sandbox:\n  name: test-agent\n",
         )
         .unwrap();
         fs::write(backup_dir.join("policy.yaml"), "version: 1\n").unwrap();
@@ -7164,10 +6521,7 @@ groups:
         fs::write(backup_dir.join("SOUL.md"), "# wrong source\n").unwrap();
         fs::write(backup_dir.join("USER.md"), "# wrong source\n").unwrap();
 
-        let config = right_agent::agent::discovery::parse_agent_config(&backup_dir)
-            .unwrap()
-            .unwrap();
-        copy_agent_restore_config_files(&backup_dir, &agent_dir, &config).unwrap();
+        copy_agent_restore_config_files(&backup_dir, &agent_dir).unwrap();
 
         assert!(
             !agent_dir.join("IDENTITY.md").exists(),
@@ -7957,16 +7311,8 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
     })?;
 
     // Assemble system prompt on host.
-    let sandbox_mode = agent
-        .config
-        .as_ref()
-        .map(|c| *c.sandbox_mode())
-        .unwrap_or_default();
-    let base_prompt = right_codegen::generate_system_prompt(
-        &agent.name,
-        &sandbox_mode,
-        &agent.path.to_string_lossy(),
-    );
+    let base_prompt =
+        right_codegen::generate_system_prompt(&agent.name, &agent.path.to_string_lossy());
     let mut prompt = base_prompt;
     prompt.push_str("\n## Operating Instructions\n");
     prompt.push_str(right_codegen::OPERATING_INSTRUCTIONS);
@@ -8063,11 +7409,6 @@ async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<
         None => return Ok(()), // No agent.yaml — nothing to check.
     };
 
-    // Only relevant for sandboxed agents.
-    if !config.is_sandboxed() {
-        return Ok(());
-    }
-
     // Check OpenShell availability.
     let mtls_dir = match right_openshell::openshell::preflight_check() {
         right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
@@ -8111,12 +7452,7 @@ async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<
         };
 
     // Read new policy from disk.
-    let policy_path = config
-        .sandbox
-        .as_ref()
-        .and_then(|s| s.policy_file.as_ref())
-        .map(|p| agent_dir.join(p))
-        .unwrap_or_else(|| agent_dir.join("policy.yaml"));
+    let policy_path = agent_dir.join("policy.yaml");
 
     if !policy_path.exists() {
         // No policy file on disk — can't compare.
@@ -8219,13 +7555,7 @@ async fn perform_migration(
     let staging = agent_dir.join("staging");
     right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
-    let migration_config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
-    let policy_path = migration_config
-        .as_ref()
-        .and_then(|c| c.sandbox.as_ref())
-        .and_then(|s| s.policy_file.as_ref())
-        .map(|p| agent_dir.join(p))
-        .unwrap_or_else(|| agent_dir.join("policy.yaml"));
+    let policy_path = agent_dir.join("policy.yaml");
 
     let mut child =
         right_openshell::openshell::spawn_sandbox(&new_sandbox, &policy_path, Some(&staging), &[])?;
@@ -8257,16 +7587,6 @@ async fn perform_migration(
         right_openshell::openshell::resolve_sandbox_id(&mut grpc, &new_sandbox).await?;
     right_openshell::openshell::wait_for_ssh(&mut grpc, &sandbox_id, 60, 2).await?;
     println!("  SSH transport ready.");
-    apply_exact_right_mcp_policy_for_sandbox(
-        &new_sandbox,
-        &policy_path,
-        migration_config
-            .as_ref()
-            .map(|config| config.network_policy)
-            .unwrap_or_default(),
-    )
-    .await?;
-    println!("  Exact Right MCP policy applied.");
 
     // --- Step 4/6: Generate SSH config ---
     println!("Step 4/6: Generating SSH config...");
