@@ -152,6 +152,11 @@ pub(crate) struct InternalState {
     token_map: AgentTokenMap,
     token_map_path: PathBuf,
     pub(crate) agents_dir: PathBuf,
+    /// Right's provider credential store — the single authority for provider
+    /// records and credentials (stage 3; replaces the OpenShell provider
+    /// gateway in these handlers). Never exposes a credential value on a read
+    /// path.
+    pub(crate) providers: std::sync::Arc<right_providers::ProviderStore>,
     /// Per-agent serialization for provider mutations. Keyed on agent name
     /// alone — every provider operation eventually does an RMW on the same
     /// `agents/<agent>/agent.yaml`, so a finer (agent, name) key would let
@@ -179,6 +184,7 @@ impl InternalState {
         token_map: AgentTokenMap,
         token_map_path: PathBuf,
         agents_dir: PathBuf,
+        providers: right_providers::ProviderStore,
     ) -> Self {
         Self {
             dispatcher,
@@ -187,8 +193,20 @@ impl InternalState {
             token_map,
             token_map_path,
             agents_dir,
+            providers: std::sync::Arc::new(providers),
             provider_locks: Default::default(),
         }
+    }
+}
+
+/// Open (creating if absent) the provider credential store at
+/// `<home>/providers.db`. FATAL on error: the store is the single authority
+/// for provider state, so serving the internal API without it would answer
+/// `/provider-list` with lies. FAIL FAST per AGENTS.rust.md §2.
+pub(crate) async fn open_provider_store(home: &std::path::Path) -> right_providers::ProviderStore {
+    match right_providers::ProviderStore::open(home).await {
+        Ok(store) => store,
+        Err(e) => panic!("cannot open providers.db under {}: {e:#}", home.display()),
     }
 }
 
@@ -199,6 +217,7 @@ pub(crate) fn internal_router(
     token_map: AgentTokenMap,
     token_map_path: PathBuf,
     agents_dir: PathBuf,
+    providers: right_providers::ProviderStore,
 ) -> Router {
     let state = InternalState {
         dispatcher,
@@ -207,6 +226,7 @@ pub(crate) fn internal_router(
         token_map,
         token_map_path,
         agents_dir,
+        providers: std::sync::Arc::new(providers),
         provider_locks: Default::default(),
     };
     Router::new()
@@ -1261,6 +1281,7 @@ mod tests {
             token_map,
             token_map_path,
             tmp.join("agents"),
+            open_provider_store(tmp).await,
         );
         (router, dispatcher)
     }
@@ -2366,6 +2387,7 @@ mod tests {
             token_map,
             token_map_path,
             tmp.path().join("agents"),
+            open_provider_store(tmp.path()).await,
         );
 
         let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;
@@ -2410,7 +2432,8 @@ mod tests {
             reconnect_managers,
             token_map.clone(),
             token_map_path,
-            agents_dir,
+            agents_dir.clone(),
+            open_provider_store(tmp.path()).await,
         );
 
         let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;
@@ -2467,7 +2490,8 @@ mod tests {
             reconnect_managers,
             token_map.clone(),
             token_map_path,
-            agents_dir,
+            agents_dir.clone(),
+            open_provider_store(tmp.path()).await,
         );
 
         let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;

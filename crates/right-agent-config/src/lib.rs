@@ -355,8 +355,15 @@ pub struct ProviderEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generic: Option<GenericProvider>,
     /// Present ⇒ this entry is a *borrowed* reference to a record owned by the
-    /// named agent. Absent ⇒ this agent owns the record. Owned vs borrowed
-    /// drives rotation rights, UI read-only state, and the destroy cascade.
+    /// named agent. Absent ⇒ this agent owns the record.
+    ///
+    /// LEGACY migration input only: since the microsandbox migration (stage
+    /// 3), `providers.db` (`right_providers::ProviderStore`) is authoritative
+    /// for ownership — `owner_agent` column plus `provider_borrows` rows —
+    /// and the internal provider API writers never emit this field. It is
+    /// still read by the stage-4/5 consumers (`agent::destroy` re-home and
+    /// the bot sandbox supervisor) until those are rewired; stage 4 removes
+    /// the field and its readers together.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_from: Option<String>,
 }

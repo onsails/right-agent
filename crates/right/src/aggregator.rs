@@ -784,6 +784,7 @@ pub(crate) async fn run_aggregator_http(
             .map_err(|e| miette::miette!("create UDS parent dir: {e:#}"))?;
     }
 
+    let providers = crate::internal_api::open_provider_store(&home).await;
     let internal_app = crate::internal_api::internal_router(
         dispatcher,
         refresh_senders,
@@ -791,6 +792,7 @@ pub(crate) async fn run_aggregator_http(
         token_map_for_reload,
         token_map_path,
         agents_dir.clone(),
+        providers,
     );
     let uds_listener = tokio::net::UnixListener::bind(&socket_path)
         .map_err(|e| miette::miette!("bind UDS {}: {e:#}", socket_path.display()))?;

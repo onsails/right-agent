@@ -578,7 +578,12 @@ impl ProviderStore {
         cred: Credential,
     ) -> Result<ProviderRecord, StoreError> {
         validate::validate_name(&rec.owner_agent, &rec.name)?;
-        validate::validate_label(&rec.label)?;
+        // `""` is the no-label marker, not a label: the wire shape carries
+        // `label: null` and the row stores `""`, so an absent dashboard label
+        // must not trip the 1-32-char label validator.
+        if !rec.label.is_empty() {
+            validate::validate_label(&rec.label)?;
+        }
         let columns = kind_columns(&rec.kind)?;
         let updated_at = now_unix()?;
 
@@ -628,6 +633,11 @@ impl ProviderStore {
 
     /// Replace the credential of an owned record. Borrowed records are
     /// read-only: only the owner rotates.
+    ///
+    /// FAIL FAST on a record whose kind no longer resolves (e.g. a built-in
+    /// slug that has left the catalog): the gateway-era handler surfaced this
+    /// as `unknown_builtin_slug` before touching any state, and writing a new
+    /// credential under an unresolvable definition would only hide the drift.
     pub async fn rotate(
         &self,
         agent: &str,
@@ -636,6 +646,9 @@ impl ProviderStore {
     ) -> Result<(), StoreError> {
         let resolved = resolve(&self.conn, agent, name).await?;
         reject_if_borrowed(&resolved)?;
+        // Force resolution of the kind's env var so an unknown built-in slug
+        // aborts here instead of after the credential write.
+        resolved.row.kind.env_var()?;
         let updated_at = now_unix()?;
         let changed = self
             .conn
@@ -930,6 +943,33 @@ impl ProviderStore {
         binding.allowed_hosts = allowed_hosts;
         binding.inject_query = query_injection;
         Ok(binding)
+    }
+
+    /// Seed a built-in row bypassing catalog validation.
+    ///
+    /// Test-only: models a record whose slug drifted out of the catalog after
+    /// creation, which `create` can never produce (it validates the slug).
+    /// The handler tests use it to prove list/rotate fail loud on such rows.
+    /// `env_var` is the value the row stored at creation time, so reads can
+    /// still report it after the catalog lookup starts failing.
+    #[cfg(feature = "test-support")]
+    pub async fn seed_builtin_unchecked(
+        &self,
+        agent: &str,
+        name: &str,
+        slug: &str,
+        env_var: &str,
+    ) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT INTO providers
+                     (owner_agent, name, kind, builtin_slug, env_var, label,
+                      upstream_hosts, upstream_path_prefix, credential, updated_at)
+                 VALUES (?1, ?2, 'builtin', ?3, ?4, '', '[]', NULL, 'x', 0)",
+                params![agent, name, slug, env_var],
+            )
+            .await?;
+        Ok(())
     }
 }
 

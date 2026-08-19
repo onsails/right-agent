@@ -58,14 +58,25 @@ export function evaluateCredentialSubmit(
   return { proceed: true, warning: null }
 }
 
-export function providerCompositionClass(provider: ProviderView): string {
-  if (provider.composed === null) return 'warn'
-  return provider.composed ? 'ok' : 'bad'
+/** Pill tone for the provider's tri-state health. */
+export function providerStatusClass(provider: ProviderView): string {
+  if (provider.status.kind === 'ready') return 'ok'
+  if (provider.status.kind === 'needs_value') return 'warn'
+  return 'bad'
 }
 
-export function providerCompositionLabel(provider: ProviderView): string {
-  if (provider.composed === null) return 'Unknown'
-  return provider.composed ? 'Composed' : 'Not composed'
+/** Human label for the provider's tri-state health. */
+export function providerStatusLabel(provider: ProviderView): string {
+  const s = provider.status
+  if (s.kind === 'ready') return 'Ready'
+  if (s.kind === 'needs_value') return 'Needs credential'
+  return `Error: ${s.message}`
+}
+
+/** A provider whose record is unusable (unresolvable definition or dead
+    credential) offers Re-create instead of Rotate/Edit. */
+export function isGhost(provider: ProviderView): boolean {
+  return provider.status.kind === 'error'
 }
 
 /** Microcopy shown under the Credential field (add/rotate). */

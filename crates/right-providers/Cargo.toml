@@ -16,6 +16,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+# Test-only hooks (e.g. seeding rows that bypass catalog validation).
+# Never enabled in production builds.
+test-support = []
+
 [dev-dependencies]
 anyhow = { workspace = true }
 tempfile = { workspace = true }

@@ -584,14 +584,14 @@ export interface ProviderView {
   env_var: string
   generic: ProviderGenericBody | null
   updated_at: string | null
-  composed: boolean | null
   /** Owner agent this provider is BORROWED from. Absent/null ⇒ this agent OWNS it. */
   shared_from?: string | null
+  /** Tri-state health (microsandbox migration stage 3; replaces the
+      OpenShell-era `composed` flag + four-variant gateway status). */
   status:
-    | { kind: 'healthy' }
-    | { kind: 'missing' }
-    | { kind: 'gateway_error'; message: string }
-    | { kind: 'unknown_builtin'; slug: string }
+    | { kind: 'ready' }
+    | { kind: 'needs_value' }
+    | { kind: 'error'; message: string }
 }
 
 export interface ProviderProfileView {

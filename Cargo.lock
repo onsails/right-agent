@@ -5889,6 +5889,7 @@ dependencies = [
  "right-mcp",
  "right-memory",
  "right-openshell",
+ "right-providers",
  "right-runtime-state",
  "right-stt",
  "right-ui",

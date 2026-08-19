@@ -53,8 +53,7 @@ function provider(overrides: Partial<ProviderView> = {}): ProviderView {
       upstream_path_prefix: '/v1',
     },
     updated_at: null,
-    composed: true,
-    status: { kind: 'healthy' },
+    status: { kind: 'ready' },
     ...overrides,
   }
 }
@@ -408,7 +407,7 @@ describe('ProvidersView', () => {
   it('pre-fills generic re-create forms with the prior upstream_hosts', async () => {
     apiMocks.providerList.mockResolvedValue({
       providers: [provider({
-        status: { kind: 'missing' },
+        status: { kind: 'error', message: 'credential gone' },
         generic: {
           env_var: 'FAL_KEY',
           upstream_hosts: ['fal.run', 'queue.fal.run', 'rest.fal.ai'],

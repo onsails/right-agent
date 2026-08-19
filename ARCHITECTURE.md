@@ -339,39 +339,32 @@ column-level definitions.
 
 ### Providers
 
-Provider credential management is owned by `right_openshell::providers`.
-Credentials never enter `agent.yaml`, backups, or host logs. Per-agent
-provider list lives in `agent.yaml::sandbox::providers: [...]`. Gateway
-holds the credential bytes. Sandbox sees opaque placeholder env vars
-substituted at the proxy on outbound HTTPS. Provider endpoints are
-OpenShell profile composition, never Right-folded `policy.yaml` stanzas;
-Right-owned built-in-derived and generic-authored profiles are provisioned
-through `right_openshell::managed_profiles`.
+Provider credential management is owned by `right_providers::ProviderStore`
+(`~/.right/providers.db`, SQLite mode 0600 — microsandbox migration stage 3).
+No credential value ever crosses a store read API: `ProviderRecord` carries
+no credential field and `source_ref_binding` is the only reader. Per-agent
+provider definitions live in `agent.yaml::sandbox::providers: [...]`;
+ownership is a `providers.db` column (`owner_agent` + `provider_borrows`),
+never the `agent.yaml` `shared_from` field (legacy migration input only —
+stage 4 deletes it; the internal API writers never emit it).
 
-Every provider attach path MUST guarantee `providers_v2_enabled` via
-`right_openshell::providers::ensure_v2_enabled`: the funnels are
-`reconcile_for_sandbox` (supervisor) and the dashboard mutation handlers. Composition success MUST be confirmed by
-`openshell::wait_for_provider_composed*`, which reads the **effective** policy
-(`get_effective_policy` = `GetSandboxConfig`) for the composed `_provider_<name>`
-rule; generic paths MUST use the endpoint-aware variant that also matches the
-expected upstream host/path. Composition is visible only in the effective policy, not the stored
-revision (`get_active_policy`); never infer success from `policy set --wait`.
-Multi-host generic providers MUST confirm every declared upstream host/path
-before writing config or reporting success.
+Provider health is the tri-state `ready` / `needs-value` / `error`. The
+OpenShell-era composition machinery (`ensure_v2_enabled`,
+`wait_for_provider_composed*`, effective-policy reads) is deleted; the
+internal provider API (`internal_api_providers.rs`) MUST NOT call
+`right_openshell`. Rotation and config-update fail fast on a record whose
+built-in slug no longer resolves (`unknown_builtin_slug`, HTTP 500); the
+list view marks such a row `error` instead of aborting.
 
-`ensure_profiles` is create-or-skip and MUST NOT re-import an existing id —
-it reports `DriftedSkipped`. Updating a referenced managed profile MUST go
-through `providers::update_referenced_profile` (secret-preserving).
+Cross-agent SHARING (`provider_share`/`_unshare`) attaches a borrowed
+reference pointing at the true owner (actor trusted in **both**); no secret
+is read back or copied. A borrowed record is read-only for its borrower
+(409 `borrowed_read_only`); owner deletion re-homes the record to a
+surviving borrower. Dashboard mutations serialize per agent via
+`provider_lock` (validate name first; share locks the DEST agent only).
 
-Cross-agent SHARING (`provider_share`/`_unshare`) multi-attaches one gateway
-record to N agents (actor trusted in **both**); no secret is read back.
-`agent.yaml` `shared_from` ⇒ borrowed (read-only), absent ⇒ owned. Shared
-records are refcount-deleted (removed at zero refs; owner-deletion re-homes
-to a survivor).
-
-See: `docs/architecture/providers.md` for the placeholder mechanism,
-substitution flow, reconciler walkthrough, cross-agent sharing, and
-policy interaction.
+See: `docs/architecture/providers.md` for the source-ref secret mechanism,
+store row model, cross-agent sharing, and the dashboard surface.
 
 ## External Integrations
 

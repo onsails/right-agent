@@ -1,5 +1,33 @@
 # Providers
 
+> **Stage 3 rewrite in flight (microsandbox migration).** The internal
+> provider API and dashboard handlers now run on
+> `right_providers::ProviderStore` (`~/.right/providers.db`, SQLite 0600);
+> the OpenShell gateway CRUD, profile-composition confirmation, and
+> `wait_for_provider_composed*` flows described below are deleted from those
+> handlers (supervisor/invocation wiring follows in stage 4). What changed:
+>
+> - **Authority.** Records and credentials live in `providers.db`; ownership
+>   is the `owner_agent` column plus `provider_borrows` rows, never
+>   `agent.yaml`'s `shared_from` (legacy migration input only; the internal
+>   API writers no longer emit it, stage 4 removes the field).
+> - **Wire shapes.** `ProviderView.status` is the tri-state
+>   `{kind: ready|needs_value|error}` (error carries `message`); the
+>   `composed: bool|null` field and the `healthy|missing|gateway_error|
+>   unknown_builtin` statuses are gone. Error→HTTP mapping is unchanged
+>   (409 `borrowed_read_only`/`copy_conflict`, 422
+>   `source_credential_unreadable`, 500 `unknown_builtin_slug`, 403
+>   `unauthorized`, …).
+> - **Sharing.** `/provider-share` inserts a borrow row pointing at the true
+>   owner and appends a definition-only entry to the destination's
+>   agent.yaml; no secret is read back or copied. Owner deletion re-homes
+>   the record to a surviving borrower.
+> - **Redaction.** Store read APIs structurally carry no credential;
+>   `ProviderStore::source_ref_binding` is the only reader and publishes the
+>   value into the spawning process's environment under
+>   `RIGHT_PROVIDER_<NAME>` (never returned to the caller).
+>
+
 > **Status:** descriptive doc. Re-read and update when modifying this
 > subsystem (see `AGENTS.md` → "Architecture docs split"). Code is
 > authoritative; this file may have drifted.
