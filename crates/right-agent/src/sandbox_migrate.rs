@@ -115,6 +115,19 @@ pub async fn restore_archive(sandbox: &SandboxHandle, archive: &Path) -> miette:
             )
         })?;
 
+    // Provisioning is what normally creates the agent's home, and it has not
+    // run yet on a freshly created sandbox — so the migration makes its own
+    // extraction target. Root-owned here; `hand_home_to_guest_user` reassigns
+    // everything except the platform tree once the archive is in place.
+    let make_home = ExecRequest {
+        cmd: "mkdir".to_owned(),
+        args: vec!["-p".to_owned(), GUEST_HOME.to_owned()],
+        user: Some("0".to_owned()),
+        timeout: Some(EXTRACT_TIMEOUT),
+        ..ExecRequest::default()
+    };
+    run_checked(sandbox, &make_home, "create the guest home").await?;
+
     let extract = ExecRequest {
         cmd: "tar".to_owned(),
         args: vec![

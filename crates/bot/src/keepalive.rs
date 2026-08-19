@@ -160,7 +160,12 @@ fn init_auth_probe_succeeded(stdout: &[u8]) -> bool {
 /// argv, both of which are readable by anything that can list guest processes
 /// — so the script only has to confirm it is present.
 fn init_auth_probe_script(args: &[String]) -> String {
-    let mut script = String::from("unset");
+    // Same reason as the turn path: a direct guest exec has no login shell, so
+    // /sandbox/.local/bin is off PATH and `claude` resolves to nothing.
+    let mut script = format!(
+        "if [ -r {env} ]; then . {env}; fi\nunset",
+        env = crate::sandbox::GUEST_ENV_SCRIPT,
+    );
     for name in COMPETING_AUTH_ENV {
         script.push(' ');
         script.push_str(name);
@@ -697,7 +702,14 @@ mod tests {
         // The token is not an input to the script: it can only reach the guest
         // through `SandboxCommand::env`, which is not readable from the guest
         // process table the way argv and the script text are.
-        assert!(script.starts_with("unset ANTHROPIC_API_KEY"));
+        // The env script is sourced first so `claude` is on PATH at all; the
+        // competing-credential unset still happens before anything runs.
+        assert!(script.contains(crate::sandbox::GUEST_ENV_SCRIPT));
+        assert!(script.contains("unset ANTHROPIC_API_KEY"));
+        assert!(
+            script.find(crate::sandbox::GUEST_ENV_SCRIPT) < script.find("exec \"$CLAUDE_BIN\""),
+            "PATH must be set up before the binary is resolved: {script}"
+        );
         for name in COMPETING_AUTH_ENV {
             assert!(script.contains(name), "script must unset {name}");
         }

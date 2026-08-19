@@ -77,8 +77,13 @@ pub fn agent_sandbox_spec(
     spec.resources = Resources::default();
     spec.egress = egress_for(network_policy);
     spec.secrets = secrets;
-    spec.workdir = Some(GUEST_HOME.to_owned());
-    spec.user = Some(GUEST_USER.to_owned());
+    // Deliberately no create-time `user` or `workdir`. Neither exists in the
+    // stock image: provisioning creates the unprivileged user and its home
+    // after boot. Setting them here makes the guest init fail before the agent
+    // relay comes up, which surfaces only as "sandbox process exited before
+    // agent relay became available" — the boot failure the pilot migration hit.
+    // The agent still runs unprivileged: that is a per-exec override, applied
+    // once provisioning has created the user.
     spec.validate()?;
     Ok(spec)
 }
@@ -87,13 +92,23 @@ pub fn agent_sandbox_spec(
 mod tests {
     use super::*;
 
+    /// The stock image has no `sandbox` user and no `/sandbox`; provisioning
+    /// creates both after boot. Pinning them at create time makes guest init
+    /// die before the agent relay is up, so the spec must leave them unset —
+    /// this is a real boot failure a pilot migration hit, not a style choice.
     #[test]
-    fn spec_carries_rights_guest_defaults() {
+    fn spec_does_not_pin_a_guest_user_the_image_lacks() {
         let spec = agent_sandbox_spec("right-finance", NetworkPolicy::Permissive, Vec::new())
             .expect("defaults are a valid spec");
         assert_eq!(spec.image, DEFAULT_SANDBOX_IMAGE);
-        assert_eq!(spec.user.as_deref(), Some(GUEST_USER));
-        assert_eq!(spec.workdir.as_deref(), Some(GUEST_HOME));
+        assert_eq!(
+            spec.user, None,
+            "the unprivileged user is a per-exec override, created by provisioning"
+        );
+        assert_eq!(
+            spec.workdir, None,
+            "{GUEST_HOME} does not exist until provisioning creates it"
+        );
         assert!(matches!(spec.egress, Egress::Permissive));
     }
 

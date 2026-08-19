@@ -40,6 +40,13 @@ pub(crate) const SANDBOX_HOME: &str = right_sandbox::GUEST_HOME;
 /// Path to the aggregator `mcp.json` inside the guest.
 pub(crate) const SANDBOX_MCP_JSON_PATH: &str = "/sandbox/mcp.json";
 
+/// Guest profile script that puts `/sandbox/.local/bin` on PATH.
+///
+/// Provisioning writes it and `.bashrc` sources it, but a direct guest exec
+/// gets no login shell — so anything needing the agent's own toolchain
+/// (`claude` above all) has to source this first.
+pub(crate) const GUEST_ENV_SCRIPT: &str = "/sandbox/.right/env.sh";
+
 /// Guest directory attachments are uploaded into.
 pub(crate) const SANDBOX_INBOX: &str = "/sandbox/inbox";
 
