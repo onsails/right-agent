@@ -213,7 +213,6 @@ mod provider_validation_tests {
     }
 }
 
-
 #[cfg(test)]
 mod provider_view_tests {
     use super::*;
@@ -367,23 +366,20 @@ mod store_err_mapping_tests {
         assert_eq!(
             status_of(StoreError::EnvVarCollision {
                 env_var: "X".into()
-            })
-            ,
+            }),
             StatusCode::CONFLICT
         );
         assert_eq!(
             status_of(StoreError::InvalidName {
                 name: "x".into(),
                 reason: "y".into()
-            })
-            ,
+            }),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
             status_of(StoreError::InvalidEnvVar {
                 env_var: "x".into()
-            })
-            ,
+            }),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
@@ -394,8 +390,7 @@ mod store_err_mapping_tests {
             status_of(StoreError::BorrowedReadOnly {
                 name: "x".into(),
                 owner: "y".into()
-            })
-            ,
+            }),
             StatusCode::CONFLICT
         );
         assert_eq!(
@@ -409,8 +404,7 @@ mod store_err_mapping_tests {
         assert_eq!(
             status_of(StoreError::SourceCredentialUnreadable {
                 source_provider: "x".into()
-            })
-            ,
+            }),
             StatusCode::UNPROCESSABLE_ENTITY
         );
     }
@@ -446,7 +440,6 @@ mod store_err_mapping_tests {
         );
     }
 }
-
 
 #[cfg(test)]
 mod plan_share_tests {
@@ -656,7 +649,6 @@ mod insert_tests {
         );
     }
 }
-
 
 #[cfg(test)]
 mod handler_tests {
@@ -870,8 +862,13 @@ mod handler_tests {
         let store = right_providers::ProviderStore::open(tmp.path())
             .await
             .expect("temp provider store");
-        seed_stale_builtin(&store, "hostagent", "hostagent-stale", "definitely-not-a-real-slug")
-            .await;
+        seed_stale_builtin(
+            &store,
+            "hostagent",
+            "hostagent-stale",
+            "definitely-not-a-real-slug",
+        )
+        .await;
 
         let app = make_provider_test_router(tmp.path()).await;
         let req = Request::builder()
@@ -936,8 +933,13 @@ mod handler_tests {
         let store = right_providers::ProviderStore::open(tmp.path())
             .await
             .expect("temp provider store");
-        seed_stale_builtin(&store, "hostagent", "hostagent-stale", "definitely-not-a-real-slug")
-            .await;
+        seed_stale_builtin(
+            &store,
+            "hostagent",
+            "hostagent-stale",
+            "definitely-not-a-real-slug",
+        )
+        .await;
 
         let app = make_provider_test_router(tmp.path()).await;
         let req = Request::builder()
@@ -989,8 +991,13 @@ mod handler_tests {
         let store = right_providers::ProviderStore::open(tmp.path())
             .await
             .expect("temp provider store");
-        seed_stale_builtin(&store, "hostagent", "hostagent-stale", "definitely-not-a-real-slug")
-            .await;
+        seed_stale_builtin(
+            &store,
+            "hostagent",
+            "hostagent-stale",
+            "definitely-not-a-real-slug",
+        )
+        .await;
 
         let app = make_provider_test_router(tmp.path()).await;
         let req = Request::builder()
@@ -1359,7 +1366,6 @@ mod handler_tests {
     }
 }
 
-
 #[cfg(test)]
 mod provider_types_tests {
     use super::*;
@@ -1476,11 +1482,7 @@ mod peers_tests {
         let tmp = tempfile::tempdir().unwrap();
         let agent_dir = tmp.path().join("nolst");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(
-            agent_dir.join("agent.yaml"),
-            "sandbox:\n  providers: []\n",
-        )
-        .unwrap();
+        std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  providers: []\n").unwrap();
         // Missing allowlist = secure default: deny all
         let err = require_trusted(tmp.path(), "nolst", 7).unwrap_err();
         assert!(matches!(err, ProviderApiError::Unauthorized { .. }));
@@ -1567,11 +1569,7 @@ mod peers_tests {
             "version: 2\nusers: not-a-list\n",
         )
         .unwrap();
-        std::fs::write(
-            bad_dir.join("agent.yaml"),
-            "sandbox:\n  providers: []\n",
-        )
-        .unwrap();
+        std::fs::write(bad_dir.join("agent.yaml"), "sandbox:\n  providers: []\n").unwrap();
 
         let store = open_store(tmp.path()).await;
         let peers = build_peers(&store, tmp.path(), 7, "current").await.unwrap();

@@ -158,12 +158,13 @@ impl RightBackend {
         }
     }
 
-    /// Test-only: probe skill packages on the host agent dir instead of the
-    /// agent's sandbox, so learning bookkeeping can be exercised without a
-    /// live gateway.
+    /// Test-only: answer skill-package probes with `exists` instead of asking
+    /// the agent's sandbox, so the learning bookkeeping around the probe can be
+    /// exercised without a live VM. Reads no filesystem — a host read would be
+    /// a different answer than the guest's, not a cheaper one.
     #[cfg(test)]
-    pub(crate) fn with_host_skill_probe(mut self) -> Self {
-        self.skill_probe = crate::learning::SkillPackageProbe::HostDir;
+    pub(crate) fn with_canned_skill_probe(mut self, exists: bool) -> Self {
+        self.skill_probe = crate::learning::SkillPackageProbe::Canned(exists);
         self
     }
 
@@ -1096,7 +1097,6 @@ impl RightBackend {
         if let Err(result) = crate::learning::validate_skill_package_state(
             self.skill_probe,
             agent_name,
-            self.mtls_dir.as_deref(),
             agent_dir,
             &params.skill_name,
             expectation,
@@ -1228,7 +1228,6 @@ impl RightBackend {
             && let Err(result) = crate::learning::validate_skill_package_state(
                 self.skill_probe,
                 agent_name,
-                self.mtls_dir.as_deref(),
                 agent_dir,
                 &params.skill_name,
                 SkillPackageExpectation::MustExist,

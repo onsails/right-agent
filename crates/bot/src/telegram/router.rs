@@ -289,10 +289,14 @@ pub(crate) mod test_support {
     }
 
     fn placeholder_ctx_with_allowlist(allowlist: AllowlistHandle) -> HandlerCtx {
+        // No sandbox can boot in a unit test: the handle carries bring-up's
+        // failure, exactly as it would after a failed bring-up in production.
+        let (sandbox_runtime, _rx) = crate::sandbox_runtime::SandboxRuntimeHandle::new(Err(
+            Arc::new(right_sandbox::SandboxCause::HypervisorUnavailable.diagnose()),
+        ));
         let settings = Arc::new(AgentSettings {
             show_thinking: false,
             model: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
-            sandbox: None,
             hindsight: None,
             prefetch_cache: None,
             upgrade_lock: Arc::new(tokio::sync::RwLock::new(())),
@@ -302,16 +306,10 @@ pub(crate) mod test_support {
             claude_health: crate::keepalive::ClaudeHealth::new(
                 "test".to_owned(),
                 PathBuf::from("/tmp/router-test"),
-                None,
-                None,
+                Arc::clone(&sandbox_runtime),
             ),
             shutdown: tokio_util::sync::CancellationToken::new(),
-            sandbox_runtime: {
-                let (h, _rx) = crate::sandbox_runtime::SandboxRuntimeHandle::new(
-                    crate::sandbox_runtime::SandboxHealth::Ready,
-                );
-                h
-            },
+            sandbox_runtime,
         });
         HandlerCtx {
             bot: super::super::bot::build_bot("0:fake_token_for_router_tests".to_owned()),
@@ -434,7 +432,9 @@ mod tests {
         use std::sync::atomic::Ordering;
         let ctx = test_support::placeholder_ctx_trusting(42);
         assert_eq!(ctx.idle_ts.0.load(Ordering::Relaxed), 0);
-        route_update(dm_update("message", 42), &ctx).await;
+        route_update(dm_update("message", 42), &ctx)
+            .await
+            .expect("routing a fresh message must succeed");
         assert!(
             ctx.idle_ts.0.load(Ordering::Relaxed) > 0,
             "a fresh Message must be routed to handle_message"
@@ -448,7 +448,9 @@ mod tests {
     async fn route_update_ignores_edited_message() {
         use std::sync::atomic::Ordering;
         let ctx = test_support::placeholder_ctx_trusting(42);
-        route_update(dm_update("edited_message", 42), &ctx).await;
+        route_update(dm_update("edited_message", 42), &ctx)
+            .await
+            .expect("an ignored update is still a successful route");
         assert_eq!(
             ctx.idle_ts.0.load(Ordering::Relaxed),
             0,

@@ -166,21 +166,36 @@ impl SandboxHandle {
     /// Succeeds when the sandbox does not exist, so it is safe to call after
     /// a failed bring-up.
     pub async fn destroy(&self) -> Result<(), SandboxError> {
-        let handle = match Sandbox::get(&self.name).await {
+        Self::delete(&self.name).await.map(|_| ())
+    }
+
+    /// Stop (killing if needed) and delete the sandbox named `name`.
+    ///
+    /// Returns whether a sandbox was actually removed: `Ok(false)` means no
+    /// sandbox existed under `name`. Callers that report deletion to a user
+    /// MUST propagate that distinction rather than claim a delete they did
+    /// not perform.
+    ///
+    /// Deletion never needs a live connection, so this deliberately does not
+    /// go through [`attach`](Self::attach): attaching *starts* a stopped
+    /// sandbox, and booting a microVM only to kill it wastes seconds of the
+    /// user's time on the `right agent destroy` path.
+    pub async fn delete(name: &str) -> Result<bool, SandboxError> {
+        let handle = match Sandbox::get(name).await {
             Ok(handle) => handle,
-            Err(MicrosandboxError::SandboxNotFound(_)) => return Ok(()),
-            Err(source) => return Err(operation_error(&self.name, "get", source)),
+            Err(MicrosandboxError::SandboxNotFound(_)) => return Ok(false),
+            Err(source) => return Err(operation_error(name, "get", source)),
         };
         if !SandboxPhase::from(handle.status_snapshot()).is_terminal() {
             handle
                 .kill_with_timeout(DESTROY_KILL_TIMEOUT)
                 .await
-                .map_err(|source| operation_error(&self.name, "kill", source))?;
+                .map_err(|source| operation_error(name, "kill", source))?;
         }
-        match Sandbox::remove(&self.name).await {
-            Ok(()) => Ok(()),
-            Err(MicrosandboxError::SandboxNotFound(_)) => Ok(()),
-            Err(source) => Err(operation_error(&self.name, "remove", source)),
+        match Sandbox::remove(name).await {
+            Ok(()) => Ok(true),
+            Err(MicrosandboxError::SandboxNotFound(_)) => Ok(false),
+            Err(source) => Err(operation_error(name, "remove", source)),
         }
     }
 
@@ -267,9 +282,10 @@ impl SandboxHandle {
             .sandbox
             .modify()
             .secret(|s| {
-                s.env(&binding.env_var).source(microsandbox::SecretSource::Env {
-                    var: binding.source_env_var.clone(),
-                })
+                s.env(&binding.env_var)
+                    .source(microsandbox::SecretSource::Env {
+                        var: binding.source_env_var.clone(),
+                    })
             })
             .dry_run()
             .await
@@ -329,9 +345,10 @@ impl SandboxHandle {
             .sandbox
             .modify()
             .secret(|s| {
-                s.env(&binding.env_var).source(microsandbox::SecretSource::Env {
-                    var: binding.source_env_var.clone(),
-                })
+                s.env(&binding.env_var)
+                    .source(microsandbox::SecretSource::Env {
+                        var: binding.source_env_var.clone(),
+                    })
             })
             .apply()
             .await
@@ -454,11 +471,7 @@ fn get_error(name: &str, source: MicrosandboxError) -> SandboxError {
         source => operation_error(name, "get", source),
     }
 }
-fn operation_error(
-    name: &str,
-    operation: &'static str,
-    source: MicrosandboxError,
-) -> SandboxError {
+fn operation_error(name: &str, operation: &'static str, source: MicrosandboxError) -> SandboxError {
     SandboxError::Operation {
         name: name.to_owned(),
         operation,

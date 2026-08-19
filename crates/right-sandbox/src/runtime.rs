@@ -59,7 +59,10 @@ pub fn diagnose_host() -> Result<(), SandboxError> {
             );
         }
     }
-    Err(SandboxError::HypervisorUnavailable { summary: summary.join("; "), fixes })
+    Err(SandboxError::HypervisorUnavailable {
+        summary: summary.join("; "),
+        fixes,
+    })
 }
 
 /// The actual install path, run at most once per process unless it fails.
@@ -74,9 +77,11 @@ async fn install_once() -> Result<(), SandboxError> {
         return Ok(());
     }
     tracing::info!("installing pinned microsandbox runtime into ~/.microsandbox");
-    setup::install().await.map_err(|source| SandboxError::RuntimeInstall {
-        source: Box::new(crate::error::SdkError(source)),
-    })?;
+    setup::install()
+        .await
+        .map_err(|source| SandboxError::RuntimeInstall {
+            source: Box::new(crate::error::SdkError(source)),
+        })?;
     if !setup::is_installed() {
         return Err(SandboxError::RuntimeInstallVerify);
     }
@@ -113,7 +118,6 @@ async fn acquire_install_lock() -> Result<InstallLock, SandboxError> {
         }
     }
 }
-
 
 /// The held advisory lock; drop releases it.
 struct InstallLock {

@@ -9,6 +9,21 @@ fn entry(n: &str) -> right_agent_config::ProviderEntry {
     }
 }
 
+/// A sandbox name no real sandbox can share.
+///
+/// `destroy_agent` deletes the sandbox named in `agent.yaml`, and the
+/// microsandbox catalog is host-global — it has no `--home` isolation to hide
+/// behind. A fixed name like `right-test-agent` would let a unit test delete a
+/// developer's real microVM, so every test that reaches the delete path uses a
+/// name that cannot exist.
+fn unique_sandbox_name(scope: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    format!("right-destroy-test-{scope}-{}-{nanos}", std::process::id())
+}
+
 #[test]
 fn refcount_keeps_record_when_another_agent_references_it() {
     let agents = vec![
@@ -59,7 +74,12 @@ async fn destroy_agent_removes_dir() {
 
     let agents_dir = home.join("agents").join("test-agent");
     std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  name: right-test-agent\n").unwrap();
+    let sandbox = unique_sandbox_name("removes-dir");
+    std::fs::write(
+        agents_dir.join("agent.yaml"),
+        format!("sandbox:\n  name: {sandbox}\n"),
+    )
+    .unwrap();
 
     let options = DestroyOptions {
         agent_name: "test-agent".into(),
@@ -73,8 +93,8 @@ async fn destroy_agent_removes_dir() {
         "PC not running, should not have stopped"
     );
     assert!(
-        result.sandbox_deleted,
-        "every agent is sandboxed: deletion is always attempted"
+        !result.sandbox_deleted,
+        "no sandbox exists under this name — destroy must not report a deletion it did not perform"
     );
     assert!(result.backup_path.is_none());
     assert!(result.dir_removed);
@@ -111,7 +131,12 @@ async fn destroy_skips_pc_when_no_runtime_state() {
 
     let agents_dir = home.join("agents").join("isolated");
     std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  name: right-isolated\n").unwrap();
+    let sandbox = unique_sandbox_name("isolated");
+    std::fs::write(
+        agents_dir.join("agent.yaml"),
+        format!("sandbox:\n  name: {sandbox}\n"),
+    )
+    .unwrap();
 
     // No <home>/run/state.json exists.
     assert!(!home.join("run").join("state.json").exists());
@@ -142,9 +167,10 @@ async fn destroy_with_backup_creates_backup_dir() {
 
     let agents_dir = home.join("agents").join("backup-test");
     std::fs::create_dir_all(&agents_dir).unwrap();
+    let sandbox = unique_sandbox_name("backup-test");
     std::fs::write(
         agents_dir.join("agent.yaml"),
-        "sandbox:\n  name: right-backup-test\n",
+        format!("sandbox:\n  name: {sandbox}\n"),
     )
     .unwrap();
     std::fs::write(agents_dir.join("IDENTITY.md"), "# Test agent").unwrap();
@@ -162,8 +188,14 @@ async fn destroy_with_backup_creates_backup_dir() {
     );
     let backup_path = result.backup_path.unwrap();
     assert!(backup_path.exists(), "backup dir should exist");
-    // The sandbox is unreachable in tests, so `sandbox.tar.gz` is absent and
-    // the backup degrades to the config-file copies.
+    // No sandbox exists under this run's unique name, so `sandbox.tar.gz` is
+    // absent and the backup is the config-file copies. A sandbox that exists
+    // but cannot be archived is a hard error instead — see
+    // `destroy_with_backup_aborts_before_destructive_steps_when_backup_fails`.
+    assert!(
+        !backup_path.join("sandbox.tar.gz").exists(),
+        "no sandbox to archive"
+    );
     assert!(
         backup_path.join("agent.yaml").exists(),
         "agent.yaml must always be copied into the backup"
@@ -176,8 +208,8 @@ async fn destroy_with_backup_creates_backup_dir() {
 
 // `destroy_with_backup_excludes_database_sidecars_from_no_sandbox_tar` is gone
 // with the host-tar backup branch it guarded: a sandboxless agent was the only
-// way to reach it. Sandbox backups come down as `sandbox.tar.gz` over SSH and
-// never tar the host agent directory.
+// way to reach it. Sandbox backups come down as `sandbox.tar.gz`, archived
+// inside the guest, and never tar the host agent directory.
 
 #[tokio::test]
 async fn destroy_with_backup_vacuum_copies_data_db() {
@@ -186,7 +218,12 @@ async fn destroy_with_backup_vacuum_copies_data_db() {
 
     let agents_dir = home.join("agents").join("backup-db");
     std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(agents_dir.join("agent.yaml"), "sandbox: {}\n").unwrap();
+    let sandbox = unique_sandbox_name("backup-db");
+    std::fs::write(
+        agents_dir.join("agent.yaml"),
+        format!("sandbox:\n  name: {sandbox}\n"),
+    )
+    .unwrap();
     let conn = right_db::open_connection(&agents_dir, true).await.unwrap();
     conn.execute(
         "INSERT INTO auth_tokens (token) VALUES (?1)",
@@ -221,7 +258,12 @@ async fn destroy_with_backup_copies_allowlist_yaml() {
 
     let agents_dir = home.join("agents").join("backup-allowlist");
     std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(agents_dir.join("agent.yaml"), "sandbox: {}\n").unwrap();
+    let sandbox = unique_sandbox_name("backup-allowlist");
+    std::fs::write(
+        agents_dir.join("agent.yaml"),
+        format!("sandbox:\n  name: {sandbox}\n"),
+    )
+    .unwrap();
     let allowlist = "\
 version: 1
 users:
@@ -249,6 +291,59 @@ groups:
         std::fs::read_to_string(backup_path.join("allowlist.yaml")).unwrap(),
         allowlist,
         "pre-destroy backup must preserve allowlist.yaml outside sandbox.tar.gz"
+    );
+}
+
+/// A destroy that was asked for a backup and could not produce one must stop
+/// before it deletes anything. `run_backup` is fatal end to end for exactly
+/// this reason: the earlier behaviour degraded to a partial backup and then
+/// destroyed the agent anyway.
+///
+/// The failure is forced on the host side (a regular file where the backup
+/// directory must be created) because a unit test has no live sandbox to fail
+/// against; the abort path it exercises is the same `?` every sandbox-archive
+/// failure takes.
+#[tokio::test]
+async fn destroy_with_backup_aborts_before_destructive_steps_when_backup_fails() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let home = dir.path();
+
+    let agents_dir = home.join("agents").join("backup-fails");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    let sandbox = unique_sandbox_name("backup-fails");
+    std::fs::write(
+        agents_dir.join("agent.yaml"),
+        format!("sandbox:\n  name: {sandbox}\n"),
+    )
+    .unwrap();
+    std::fs::write(agents_dir.join("IDENTITY.md"), "# irreplaceable").unwrap();
+
+    // `backups_dir(home, agent)` is `<home>/backups/<agent>`; a regular file
+    // there makes `create_dir_all` fail.
+    std::fs::create_dir_all(home.join("backups")).unwrap();
+    std::fs::write(home.join("backups").join("backup-fails"), "not a dir").unwrap();
+
+    let options = DestroyOptions {
+        agent_name: "backup-fails".into(),
+        backup: true,
+    };
+
+    let error = destroy_agent(home, &options)
+        .await
+        .expect_err("a backup that cannot be written must fail the destroy");
+    assert!(
+        format!("{error:#}").contains("backup dir"),
+        "error must name the failed backup step, got: {error:#}"
+    );
+
+    assert!(
+        agents_dir.exists(),
+        "agent directory must survive a failed backup"
+    );
+    assert_eq!(
+        std::fs::read_to_string(agents_dir.join("IDENTITY.md")).unwrap(),
+        "# irreplaceable",
+        "agent data must be untouched after a failed backup"
     );
 }
 

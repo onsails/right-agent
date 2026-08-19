@@ -8,48 +8,28 @@
 //! the sync task; on recovery it re-runs bring-up with backoff, respawns the
 //! sync task, and notifies affected chats.
 //!
-//! The supervisor is the sole writer of [`SandboxRuntimeHandle`].
+//! The supervisor is the sole writer of [`SandboxRuntimeHandle`]: bring-up's
+//! outcome is seeded into the handle at construction
+//! ([`SandboxRuntimeHandle::new`]), and every later publication —
+//! `set_ready` on recovery, `set_unavailable` on a verified failure — happens
+//! here. Consumers only read, and read per unit of work, because recovery
+//! publishes a *new* handle addressing a newly created VM.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use right_agent::agent::types::AgentConfig;
-use right_agent_config::NetworkPolicy;
 use right_providers::ProviderStore;
 use right_sandbox::{
-    DEFAULT_READY_TIMEOUT, Egress, Resources, SandboxCause, SandboxDiagnosis, SandboxError,
-    SandboxHandle, SandboxSpec,
+    DEFAULT_READY_TIMEOUT, SandboxCause, SandboxDiagnosis, SandboxError, SandboxHandle,
+    SandboxPhase, SandboxSpec, agent_sandbox_spec,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::sandbox::{SANDBOX_HOME, SANDBOX_INBOX, SANDBOX_OUTBOX, Sandbox};
+use crate::sandbox::{SANDBOX_INBOX, SANDBOX_OUTBOX, Sandbox};
 use crate::sandbox_runtime::SandboxRuntimeHandle;
 use crate::sync;
-
-/// Guest image every Agent Sandbox boots from.
-///
-/// A stock OCI image: Right maintains no image and no base snapshot, so the
-/// guest toolchain is installed imperatively after create.
-pub(crate) const DEFAULT_SANDBOX_IMAGE: &str = "node:22-slim";
-
-/// Unprivileged guest user the agent's `claude` runs as.
-///
-/// Provisioning runs as root and then `chmod a-w`s `/sandbox/.platform`, which
-/// only means anything because the agent itself is not root.
-pub(crate) const GUEST_USER: &str = "sandbox";
-
-/// Domain suffixes reachable under `network_policy: restrictive`.
-///
-/// Suffixes, not globs: `anthropic.com` also covers `*.anthropic.com`. The
-/// host destination group is always open on top of this, which is how the
-/// guest reaches the MCP aggregator.
-const RESTRICTIVE_EGRESS_ALLOW: &[&str] = &[
-    "anthropic.com",
-    "claude.com",
-    "claude.ai",
-    "storage.googleapis.com",
-];
 
 /// Borrowed inputs the sandbox bring-up sequence reads. All fields are
 /// read-only references into `run_async`'s locals.
@@ -85,22 +65,6 @@ fn diagnose(error: &SandboxError) -> SandboxDiagnosis {
         .diagnose()
 }
 
-/// Translate the agent's declared network policy into a typed egress value.
-///
-/// Egress is create-time only — the SDK cannot change network policy on a
-/// running sandbox — so changing this in `agent.yaml` needs a sandbox recreate.
-fn egress_for(network_policy: NetworkPolicy) -> Egress {
-    match network_policy {
-        NetworkPolicy::Permissive => Egress::Permissive,
-        NetworkPolicy::Restrictive => Egress::Restrictive {
-            allow: RESTRICTIVE_EGRESS_ALLOW
-                .iter()
-                .map(|domain| (*domain).to_owned())
-                .collect(),
-        },
-    }
-}
-
 /// Resolve every declared provider into a source-ref secret binding.
 ///
 /// Reading a binding publishes the credential into this process's environment
@@ -129,17 +93,29 @@ async fn secret_bindings(
     Ok(bindings)
 }
 
-/// Build the create-time specification for an agent's sandbox.
+/// Build an agent's create-time sandbox specification.
+///
+/// Resolving the agent's declared providers is the only part that needs the
+/// bot's store; every other field comes from the shared
+/// [`right_sandbox::agent_sandbox_spec`]. The bot's bring-up and the CLI's
+/// `agent restore` are the only two sandbox creators and both go through
+/// here, so a restored sandbox is identical to a bot-created one — egress and
+/// secret structure are create-time only, so drift there is unrecoverable
+/// without a recreate.
+pub async fn agent_sandbox_spec_for(
+    agent: &str,
+    sandbox_name: &str,
+    config: &AgentConfig,
+    providers: &ProviderStore,
+) -> miette::Result<SandboxSpec> {
+    let secrets = secret_bindings(agent, config, providers).await?;
+    agent_sandbox_spec(sandbox_name, config.network_policy, secrets)
+        .map_err(|e| miette::miette!("invalid sandbox spec for agent {agent}: {e:#}"))
+}
+
+/// The bring-up sequence's view of [`agent_sandbox_spec_for`].
 async fn sandbox_spec(ctx: &BringUpCtx<'_>) -> miette::Result<SandboxSpec> {
-    let mut spec = SandboxSpec::new(ctx.sandbox_name, DEFAULT_SANDBOX_IMAGE);
-    spec.resources = Resources::default();
-    spec.egress = egress_for(ctx.config.network_policy);
-    spec.secrets = secret_bindings(ctx.agent, ctx.config, ctx.providers).await?;
-    spec.workdir = Some(SANDBOX_HOME.to_owned());
-    spec.user = Some(GUEST_USER.to_owned());
-    spec.validate()
-        .map_err(|e| miette::miette!("invalid sandbox spec for agent {}: {e:#}", ctx.agent))?;
-    Ok(spec)
+    agent_sandbox_spec_for(ctx.agent, ctx.sandbox_name, ctx.config, ctx.providers).await
 }
 
 /// Bring the Agent Sandbox up.
@@ -327,6 +303,25 @@ fn spawn_sync_task(
     ))
 }
 
+/// Decide whether a failed health probe means "degrade".
+///
+/// Pure, so the phase policy is testable without a microVM. A sandbox that is
+/// still coming up (`Created`, `Starting`) is not a failure: degrading on it
+/// would take the agent offline for the seconds a normal boot takes, and the
+/// recovery loop would then "recover" a sandbox that was never broken. Every
+/// other error — unreachable runtime, crashed or stopped guest, metrics
+/// failure — degrades.
+fn degrade_decision(error: &SandboxError) -> Option<SandboxDiagnosis> {
+    if let SandboxError::NotRunning {
+        phase: SandboxPhase::Created | SandboxPhase::Starting,
+        ..
+    } = error
+    {
+        return None;
+    }
+    Some(diagnose(error))
+}
+
 /// Verify a suspected failure against the live sandbox.
 ///
 /// `Some(diagnosis)` means degrade. Health deliberately reports memory and
@@ -343,10 +338,19 @@ async fn probe_health(sandbox: &SandboxHandle) -> Option<SandboxDiagnosis> {
             );
             None
         }
-        Err(e) => {
-            tracing::warn!(sandbox = %sandbox.name(), "sandbox health probe failed: {e:#}");
-            Some(diagnose(&e))
-        }
+        Err(e) => match degrade_decision(&e) {
+            Some(diagnosis) => {
+                tracing::warn!(sandbox = %sandbox.name(), "sandbox health probe failed: {e:#}");
+                Some(diagnosis)
+            }
+            None => {
+                tracing::debug!(
+                    sandbox = %sandbox.name(),
+                    "sandbox health probe found a still-booting sandbox: {e:#}"
+                );
+                None
+            }
+        },
     }
 }
 

@@ -38,10 +38,9 @@ static FAKE_CLAUDE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
 
 // --- Plan 01 artifact tests (D-11: credential symlink, .claude.json, missing-creds) ---
 
-#[ignore = "ci-openshell: requires a live sandbox runtime — every agent is sandboxed"]
 /// After init, agent .claude.json should contain hasTrustDialogAccepted (HOME-02, PERM-02).
 #[test]
-fn ci_openshell_ci_openshell_init_agent_claude_json_has_trust() {
+fn init_agent_claude_json_has_trust() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -53,8 +52,6 @@ fn ci_openshell_ci_openshell_init_agent_claude_json_has_trust() {
             "-y",
             "--tunnel-hostname",
             "test.example.com",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .success();
@@ -82,11 +79,10 @@ fn ci_openshell_ci_openshell_init_agent_claude_json_has_trust() {
     );
 }
 
-#[ignore = "ci-openshell: requires a live sandbox runtime — every agent is sandboxed"]
 /// After init, agent .claude/.credentials.json should be a symlink to host creds
 /// when host creds exist. If they don't exist, the symlink won't be created (warning only).
 #[test]
-fn ci_openshell_ci_openshell_init_agent_credentials_is_symlink() {
+fn init_agent_credentials_is_symlink() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -98,8 +94,6 @@ fn ci_openshell_ci_openshell_init_agent_credentials_is_symlink() {
             "-y",
             "--tunnel-hostname",
             "test.example.com",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .success();

@@ -26,6 +26,21 @@ pub fn sandbox_name(agent_name: &str) -> String {
     fit_sandbox_name(&format!("right-{agent_name}"))
 }
 
+/// Resolve the sandbox name for an agent: explicit `sandbox.name` from
+/// `agent.yaml` when set, otherwise the deterministic [`sandbox_name`].
+///
+/// An explicit name is fitted rather than rejected, so an over-long legacy
+/// name still resolves to exactly one sandbox. Every lifecycle path — bot
+/// bring-up, `right agent destroy`, `right agent rebootstrap` — MUST resolve
+/// through this function: two call sites disagreeing about an agent's sandbox
+/// name is how a destroy orphans a microVM.
+pub fn resolve_sandbox_name(agent_name: &str, explicit_name: Option<&str>) -> String {
+    match explicit_name {
+        Some(explicit) => fit_sandbox_name(explicit),
+        None => sandbox_name(agent_name),
+    }
+}
+
 /// Fit `raw` into the SDK's sandbox-name space.
 ///
 /// Returns `raw` unchanged when it already validates. Otherwise invalid
@@ -113,6 +128,22 @@ mod tests {
         );
     }
 
+    /// Every lifecycle command resolves a name the same way, and an explicit
+    /// name that the SDK would reject is fitted, never passed through: a
+    /// create that fails on an invalid name orphans nothing, but a destroy
+    /// that looks up an unfitted name would miss the sandbox entirely.
+    #[test]
+    fn resolve_prefers_explicit_name_and_fits_it() {
+        assert_eq!(resolve_sandbox_name("finance", None), "right-finance");
+        assert_eq!(
+            resolve_sandbox_name("finance", Some("legacy-box")),
+            "legacy-box"
+        );
+        let fitted = resolve_sandbox_name("finance", Some("my sandbox!"));
+        assert_eq!(fitted, "my-sandbox");
+        assert_valid(&fitted);
+    }
+
     #[test]
     fn valid_names_pass_through_unchanged() {
         for name in ["right-a", "a", "right-Agent_1.2"] {
@@ -126,7 +157,10 @@ mod tests {
     fn invalid_characters_collapse_to_single_dash_runs() {
         assert_eq!(fit_sandbox_name("my agent!!"), "my-agent");
         assert_eq!(fit_sandbox_name("a  --  b"), "a-b");
-        assert_eq!(fit_sandbox_name("spaces\tand\nnewlines"), "spaces-and-newlines");
+        assert_eq!(
+            fit_sandbox_name("spaces\tand\nnewlines"),
+            "spaces-and-newlines"
+        );
     }
 
     #[test]

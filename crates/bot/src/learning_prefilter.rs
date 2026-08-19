@@ -4,8 +4,7 @@
 
 use crate::cc::worker_reply::is_rightx_skill;
 use crate::telegram::worker::ProbeAnchor;
-use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Decision returned by the prefilter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,7 +284,6 @@ fn bounded_text(value: &str, max_chars: usize, suffix: &str) -> String {
     out
 }
 
-
 /// Shell command run inside the sandbox to dump `rightx-*` skill frontmatter.
 /// The `[ -f ... ]` guard makes a no-match glob emit nothing (no error), and
 /// each skill is delimited by a `@@@SKILL <name>` marker on its own line.
@@ -351,20 +349,6 @@ pub(crate) async fn collect_rightx_skill_index(
         .map_err(|e| anyhow::anyhow!("sandbox exec: {e:?}"))
         .context("read sandbox skill index")?;
     dump_to_skill_index(&out, exit).context("read sandbox skill index")
-}
-
-fn read_bounded_skill_excerpt(path: &Path) -> std::io::Result<Option<String>> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() {
-        return Ok(None);
-    }
-
-    let file = std::fs::File::open(path)?;
-    let mut reader = std::io::BufReader::new(file).take(SKILL_EXCERPT_MAX_BYTES as u64);
-    let mut bytes = Vec::with_capacity(SKILL_EXCERPT_MAX_BYTES);
-    reader.read_to_end(&mut bytes)?;
-    let content = String::from_utf8_lossy(&bytes);
-    Ok(Some(bounded_skill_excerpt(&content)))
 }
 
 fn bounded_skill_excerpt(content: &str) -> String {

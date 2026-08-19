@@ -684,14 +684,9 @@ pub(crate) async fn recover_bootstrap_finalization(
     let conn = right_db::open_connection(agent_dir, false)
         .await
         .context("open lifecycle database for bootstrap finalization recovery")?;
-    let verification = verify_bootstrap_for_paths(
-        &conn,
-        agent_dir,
-        sandbox,
-        intent.chat_id,
-        intent.thread_id,
-    )
-    .await;
+    let verification =
+        verify_bootstrap_for_paths(&conn, agent_dir, sandbox, intent.chat_id, intent.thread_id)
+            .await;
     finish_bootstrap_recovery(agent_dir, &conn, &intent, verification).await
 }
 
@@ -2286,9 +2281,9 @@ pub fn spawn_worker(
             ) {
                 Ok(sandbox) => Some(sandbox),
                 Err(e) => {
-                    let has_attachments = batch
-                        .iter()
-                        .any(|msg| !msg.attachments.is_empty() || !msg.reply_to_attachments.is_empty());
+                    let has_attachments = batch.iter().any(|msg| {
+                        !msg.attachments.is_empty() || !msg.reply_to_attachments.is_empty()
+                    });
                     if has_attachments {
                         tracing::error!(?key, "attachment download refused: {e:#}");
                         let _ = send_tg(
@@ -4451,13 +4446,15 @@ async fn invoke_cc(
         operator_focus_section.as_deref(),
         Some(&notice_token),
     );
-    let command =
-        crate::cc::invocation::build_claude_script_command(assembly_script, &ctx.agent_db_dir, sandbox)
-            .await
-            .stdin_piped()
-            .stdout(crate::cc::sandbox_process::Capture::Pipe)
-            .stderr(crate::cc::sandbox_process::Capture::Pipe);
-
+    let command = crate::cc::invocation::build_claude_script_command(
+        assembly_script,
+        &ctx.agent_db_dir,
+        sandbox,
+    )
+    .await
+    .stdin_piped()
+    .stdout(crate::cc::sandbox_process::Capture::Pipe)
+    .stderr(crate::cc::sandbox_process::Capture::Pipe);
 
     let sandboxed = true;
     let log_ctx = InvocationLogContext::new(chat_id, eff_thread_id, session_uuid.clone(), turn_id);
@@ -6068,9 +6065,10 @@ mod tests {
     }
 
     fn worker_context_for_invoke_test(agent_dir: &Path) -> WorkerContext {
-        let (sandbox_runtime, _sandbox_rx) = crate::sandbox_runtime::SandboxRuntimeHandle::new(
-            crate::sandbox_runtime::SandboxHealth::Ready,
-        );
+        let (sandbox_runtime, _sandbox_rx) =
+            crate::sandbox_runtime::SandboxRuntimeHandle::new(Err(Arc::new(
+                right_sandbox::SandboxCause::HypervisorUnavailable.diagnose(),
+            )));
         WorkerContext {
             chat_id: 42,
             effective_thread_id: 0,
@@ -6105,8 +6103,7 @@ mod tests {
             claude_health: crate::keepalive::ClaudeHealth::new(
                 "test-agent".into(),
                 agent_dir.to_path_buf(),
-                None,
-                Some(Arc::clone(&sandbox_runtime)),
+                Arc::clone(&sandbox_runtime),
             ),
             shutdown: CancellationToken::new(),
             sandbox_runtime,
@@ -6975,12 +6972,11 @@ mod tests {
     async fn sandbox_bootstrap_probe_classifies_infrastructure_failure() {
         let agent_dir = tempfile::tempdir().unwrap();
 
-        let verification = verify_bootstrap_for_paths_with_probe(
-            agent_dir.path(),
-            None,
-            |_| async { Err(miette::miette!("gateway unavailable")) },
-        )
-        .await;
+        let verification =
+            verify_bootstrap_for_paths_with_probe(agent_dir.path(), None, |_| async {
+                Err(miette::miette!("gateway unavailable"))
+            })
+            .await;
 
         assert!(matches!(
             verification,
@@ -7009,10 +7005,11 @@ mod tests {
             std::fs::write(agent_dir.path().join(filename), "verified").unwrap();
         }
 
-        let verification = verify_bootstrap_for_paths_with_probe(agent_dir.path(), None, |_| async {
-            unreachable!("the probe must not run without a sandbox")
-        })
-        .await;
+        let verification =
+            verify_bootstrap_for_paths_with_probe(agent_dir.path(), None, |_| async {
+                unreachable!("the probe must not run without a sandbox")
+            })
+            .await;
 
         assert!(
             matches!(verification, BootstrapVerification::InfrastructureError(_)),

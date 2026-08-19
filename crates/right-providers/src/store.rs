@@ -397,7 +397,9 @@ async fn owned_row_for(
         "SELECT {} FROM providers WHERE owner_agent = ?1 AND name = ?2",
         OWNED_COLUMNS.as_str()
     );
-    let mut rows = conn.query_all(&sql, params![owner, name], owned_row).await?;
+    let mut rows = conn
+        .query_all(&sql, params![owner, name], owned_row)
+        .await?;
     Ok(rows.pop())
 }
 
@@ -436,12 +438,14 @@ async fn resolve(conn: &Connection, agent: &str, name: &str) -> Result<Resolved,
     };
     // A borrow row without its owning row is corruption, not a miss: the
     // borrower would otherwise silently lose a credential it still declares.
-    let row = owned_row_for(conn, &owner, name)
-        .await?
-        .ok_or_else(|| StoreError::storage(
+    let row = owned_row_for(conn, &owner, name).await?.ok_or_else(|| {
+        StoreError::storage(
             conn.path(),
-            format!("agent \"{agent}\" borrows \"{name}\" from \"{owner}\", which has no such record"),
-        ))?;
+            format!(
+                "agent \"{agent}\" borrows \"{name}\" from \"{owner}\", which has no such record"
+            ),
+        )
+    })?;
     Ok(Resolved {
         row,
         borrower: Some(agent.to_owned()),
@@ -457,7 +461,12 @@ async fn held_providers(conn: &Connection, agent: &str) -> Result<Vec<HeldProvid
              SELECT name, owner_agent FROM provider_borrows WHERE borrower_agent = ?1
              ORDER BY 1",
             params![agent],
-            |row| Ok(HeldProvider::new(row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok(HeldProvider::new(
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                ))
+            },
         )
         .await?;
     held.dedup_by(|a, b| a.name == b.name);
@@ -546,12 +555,11 @@ fn kind_columns(kind: &ProviderKind) -> Result<KindColumns, StoreError> {
                 Some(&spec.upstream_hosts),
                 spec.upstream_path_prefix.as_deref(),
             )?;
-            let upstream_hosts = serde_json::to_string(&hosts).map_err(|e| {
-                StoreError::InvalidName {
+            let upstream_hosts =
+                serde_json::to_string(&hosts).map_err(|e| StoreError::InvalidName {
                     name: spec.env_var.clone(),
                     reason: format!("upstream_hosts are not serializable: {e}"),
-                }
-            })?;
+                })?;
             Ok(KindColumns {
                 tag: KIND_GENERIC,
                 builtin_slug: None,
@@ -699,12 +707,14 @@ impl ProviderStore {
     ) -> Result<(), StoreError> {
         let resolved = resolve(&self.conn, agent, name).await?;
         reject_if_borrowed(&resolved)?;
-        let current = resolved.row.kind.generic().ok_or_else(|| {
-            StoreError::InvalidName {
+        let current = resolved
+            .row
+            .kind
+            .generic()
+            .ok_or_else(|| StoreError::InvalidName {
                 name: name.into(),
                 reason: "config-update only valid on generic providers".into(),
-            }
-        })?;
+            })?;
         if spec.env_var != current.env_var {
             return Err(StoreError::GenericEnvVarChangeRequiresCredential { name: name.into() });
         }

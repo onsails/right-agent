@@ -6285,6 +6285,7 @@ dependencies = [
  "anyhow",
  "microsandbox",
  "rcgen",
+ "right-agent-config",
  "rustls",
  "serde_json",
  "sha2 0.11.0",

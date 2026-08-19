@@ -195,9 +195,7 @@ fn build_init_auth_command(
 /// Split out from the run so the redaction property — a failure diagnostic
 /// never echoes the token or any byte the CLI or upstream produced — is
 /// testable without a live sandbox.
-fn init_auth_verdict(
-    output: crate::cc::sandbox_process::SandboxOutput,
-) -> anyhow::Result<Vec<u8>> {
+fn init_auth_verdict(output: crate::cc::sandbox_process::SandboxOutput) -> anyhow::Result<Vec<u8>> {
     if !output.success() || !init_auth_probe_succeeded(&output.stdout) {
         anyhow::bail!(
             "Claude authentication validation failed; rerun init with a fresh token from `claude setup-token`"
@@ -310,10 +308,9 @@ fn health_probe_invocation(mcp_config_path: &str) -> crate::cc::invocation::Clau
 pub(crate) struct ClaudeHealth {
     agent_name: String,
     agent_dir: PathBuf,
-    /// `None` once the sandbox backend has degraded. Nothing runs without it —
-    /// see [`crate::cc::invocation::guard_no_sandboxed_host_exec`].
-    sandbox: Option<crate::sandbox::Sandbox>,
-    sandbox_runtime: Option<Arc<crate::sandbox_runtime::SandboxRuntimeHandle>>,
+    /// The live sandbox is resolved from here per probe/repair step: recovery
+    /// publishes a new handle, and the keepalive task outlives many of them.
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     repair_lock: tokio::sync::Mutex<()>,
     repair_notice_pending: AtomicBool,
 }
@@ -322,35 +319,31 @@ impl ClaudeHealth {
     pub(crate) fn new(
         agent_name: String,
         agent_dir: PathBuf,
-        sandbox: Option<crate::sandbox::Sandbox>,
-        sandbox_runtime: Option<Arc<crate::sandbox_runtime::SandboxRuntimeHandle>>,
+        sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     ) -> Arc<Self> {
         Arc::new(Self {
             agent_name,
             agent_dir,
-            sandbox,
             sandbox_runtime,
             repair_lock: tokio::sync::Mutex::new(()),
             repair_notice_pending: AtomicBool::new(false),
         })
     }
 
-    /// Guarded access to the sandbox, fail-closed: a degraded backend has no
-    /// host fallback, so every probe and repair step simply cannot run.
-    fn sandbox(&self) -> Result<&crate::sandbox::Sandbox, String> {
-        crate::cc::invocation::guard_no_sandboxed_host_exec(
-            &self.agent_name,
-            self.sandbox.as_ref(),
-        )
-        .map_err(|e| format!("{e:#}"))
+    /// Guarded access to the currently published sandbox, fail-closed: a
+    /// degraded backend has no host fallback, so every probe and repair step
+    /// simply cannot run.
+    fn sandbox(&self) -> Result<crate::sandbox::Sandbox, String> {
+        let sandbox = self.sandbox_runtime.current_sandbox();
+        crate::cc::invocation::guard_no_sandboxed_host_exec(&self.agent_name, sandbox.as_ref())
+            .map(crate::sandbox::Sandbox::clone)
+            .map_err(|e| format!("{e:#}"))
     }
 
     fn report_backend_failure(&self) {
         // The supervisor verifies with a real gateway probe before degrading,
         // so reporting liberally is safe.
-        if let Some(rt) = &self.sandbox_runtime {
-            rt.report_suspected_failure();
-        }
+        self.sandbox_runtime.report_suspected_failure();
     }
 
     // Used to inject a one-shot repair notice into the next agent turn.
@@ -462,7 +455,7 @@ const NEEDS_AUTH_CACHE_PATH: &str = "/sandbox/.claude/mcp-needs-auth-cache.json"
 
 async fn remove_needs_auth_cache(health: &ClaudeHealth) -> Result<(), String> {
     let sandbox = health.sandbox()?;
-    let (output, code) = crate::sandbox::exec_argv(sandbox, &["rm", "-f", NEEDS_AUTH_CACHE_PATH])
+    let (output, code) = crate::sandbox::exec_argv(&sandbox, &["rm", "-f", NEEDS_AUTH_CACHE_PATH])
         .await
         .map_err(|e| format!("sandbox cache cleanup exec failed: {e:#}"))?;
     if code != 0 {
@@ -476,7 +469,7 @@ async fn remove_needs_auth_cache(health: &ClaudeHealth) -> Result<(), String> {
 
 async fn sync_after_cache_cleanup(health: &ClaudeHealth) -> Result<(), String> {
     let sandbox = health.sandbox()?;
-    crate::sync::sync_cycle(&health.agent_dir, sandbox)
+    crate::sync::sync_cycle(&health.agent_dir, &sandbox)
         .await
         .map_err(|e| format!("platform sync failed: {e:#}"))
 }
@@ -574,14 +567,13 @@ async fn run_one_health_cycle(
 async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, String> {
     let sandbox = health.sandbox()?;
     let args = health_probe_invocation(crate::sandbox::SANDBOX_MCP_JSON_PATH).into_args();
-    let mut child =
-        crate::cc::invocation::build_claude_command(&args, &health.agent_dir, sandbox)
-            .await
-            .stdout(crate::cc::sandbox_process::Capture::Pipe)
-            .stderr(crate::cc::sandbox_process::Capture::Null)
-            .spawn()
-            .await
-            .map_err(|e| format!("spawn failed: {e:#}"))?;
+    let mut child = crate::cc::invocation::build_claude_command(&args, &health.agent_dir, &sandbox)
+        .await
+        .stdout(crate::cc::sandbox_process::Capture::Pipe)
+        .stderr(crate::cc::sandbox_process::Capture::Null)
+        .spawn()
+        .await
+        .map_err(|e| format!("spawn failed: {e:#}"))?;
     let stdout = child
         .stdout()
         .ok_or_else(|| "health probe missing stdout".to_string())?;
@@ -850,9 +842,24 @@ mod tests {
         );
     }
 
+    /// A runtime handle with no sandbox published — the state the bot is in
+    /// while bring-up has failed or a recovery is in flight.
+    fn unavailable_runtime() -> Arc<crate::sandbox_runtime::SandboxRuntimeHandle> {
+        // The supervisor's failure receiver is irrelevant here: reports are
+        // coalesced with `try_send` and dropped when nobody listens.
+        let (handle, _rx) = crate::sandbox_runtime::SandboxRuntimeHandle::new(Err(Arc::new(
+            right_sandbox::SandboxCause::HypervisorUnavailable.diagnose(),
+        )));
+        handle
+    }
+
     #[tokio::test]
     async fn every_repair_step_refuses_to_run_without_a_sandbox() {
-        let health = ClaudeHealth::new("agent-b".to_owned(), PathBuf::from("/tmp/agent"), None, None);
+        let health = ClaudeHealth::new(
+            "agent-b".to_owned(),
+            PathBuf::from("/tmp/agent"),
+            unavailable_runtime(),
+        );
         let refusal = "refusing to run agent 'agent-b' on the host: its sandbox is unavailable";
 
         // Fail-closed: no host fallback exists for any of these.
@@ -867,9 +874,42 @@ mod tests {
         );
     }
 
+    /// Regression for the startup-snapshot bug: the keepalive task runs for the
+    /// bot's whole life, across sandbox recoveries that each publish a NEW
+    /// handle. It must therefore hold the runtime handle, not a sandbox: it
+    /// resolves nothing when built, and resolves once per probe/repair step.
+    #[tokio::test]
+    async fn every_step_resolves_the_sandbox_at_use_time() {
+        let runtime = unavailable_runtime();
+        let health = ClaudeHealth::new(
+            "agent-b".to_owned(),
+            PathBuf::from("/tmp/agent"),
+            Arc::clone(&runtime),
+        );
+        assert_eq!(
+            runtime.sandbox_reads(),
+            0,
+            "building ClaudeHealth must not snapshot the sandbox"
+        );
+
+        let _ = run_health_probe(&health).await;
+        let _ = remove_needs_auth_cache(&health).await;
+        let _ = sync_after_cache_cleanup(&health).await;
+
+        assert_eq!(
+            runtime.sandbox_reads(),
+            3,
+            "each step reads the handle published at that moment"
+        );
+    }
+
     #[tokio::test]
     async fn repair_notice_is_one_shot() {
-        let health = ClaudeHealth::new("agent-b".to_owned(), PathBuf::from("/tmp/agent"), None, None);
+        let health = ClaudeHealth::new(
+            "agent-b".to_owned(),
+            PathBuf::from("/tmp/agent"),
+            unavailable_runtime(),
+        );
 
         assert_eq!(health.consume_repair_notice(), None);
         health.mark_repaired_for_next_turn();
@@ -879,7 +919,11 @@ mod tests {
 
     #[tokio::test]
     async fn repair_lock_rejects_concurrent_second_holder() {
-        let health = ClaudeHealth::new("agent-b".to_owned(), PathBuf::from("/tmp/agent"), None, None);
+        let health = ClaudeHealth::new(
+            "agent-b".to_owned(),
+            PathBuf::from("/tmp/agent"),
+            unavailable_runtime(),
+        );
 
         let first = health.try_begin_repair_for_test();
         assert!(first.is_some());
@@ -890,7 +934,11 @@ mod tests {
 
     #[tokio::test]
     async fn repair_timeout_releases_repair_lock() {
-        let health = ClaudeHealth::new("agent-b".to_owned(), PathBuf::from("/tmp/agent"), None, None);
+        let health = ClaudeHealth::new(
+            "agent-b".to_owned(),
+            PathBuf::from("/tmp/agent"),
+            unavailable_runtime(),
+        );
 
         health
             .trigger_repair_with_timeout("test", Duration::from_millis(1), |_health| async {

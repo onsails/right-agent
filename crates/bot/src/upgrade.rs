@@ -41,18 +41,18 @@ pub(crate) async fn run_startup_upgrade(sandbox: &Sandbox, agent_name: &str) {
 /// Returns the `JoinHandle` so the caller can await it during shutdown,
 /// preventing a tokio runtime panic from in-flight `Interval::tick()` futures.
 pub(crate) fn spawn_upgrade_task(
-    sandbox: Sandbox,
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     agent_name: String,
     shutdown: CancellationToken,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run_upgrade_loop(&sandbox, &agent_name, shutdown, &upgrade_lock).await;
+        run_upgrade_loop(&sandbox_runtime, &agent_name, shutdown, &upgrade_lock).await;
     })
 }
 
 async fn run_upgrade_loop(
-    sandbox: &Sandbox,
+    sandbox_runtime: &crate::sandbox_runtime::SandboxRuntimeHandle,
     agent_name: &str,
     shutdown: CancellationToken,
     upgrade_lock: &tokio::sync::RwLock<()>,
@@ -76,7 +76,13 @@ async fn run_upgrade_loop(
             continue;
         };
 
-        run_upgrade(sandbox, agent_name).await;
+        // Resolved per attempt: a recovery between ticks retires the previous
+        // handle, and there is no host fallback when none is published.
+        let Some(sandbox) = sandbox_runtime.current_sandbox() else {
+            tracing::info!(agent = %agent_name, "skipping upgrade — sandbox unavailable");
+            continue;
+        };
+        run_upgrade(&sandbox, agent_name).await;
         // _guard dropped here — CC sessions unblock
     }
 }

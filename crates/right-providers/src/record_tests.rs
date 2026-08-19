@@ -76,7 +76,10 @@ fn generic_kind_reports_the_generic_slug_and_its_own_endpoints() {
     assert_eq!(kind.slug(), "generic");
     assert_eq!(kind.env_var().unwrap(), "FAL_KEY");
     assert_eq!(kind.allowed_hosts().unwrap(), vec!["fal.run"]);
-    assert_eq!(kind.generic().unwrap().upstream_path_prefix.as_deref(), Some("/v1"));
+    assert_eq!(
+        kind.generic().unwrap().upstream_path_prefix.as_deref(),
+        Some("/v1")
+    );
 }
 
 #[test]

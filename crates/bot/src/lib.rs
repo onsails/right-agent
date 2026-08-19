@@ -24,6 +24,7 @@ pub mod telegram;
 mod upgrade;
 pub use keepalive::{InitAuthProbe, validate_init_auth};
 pub use sandbox::Sandbox;
+pub use sandbox_supervisor::agent_sandbox_spec_for;
 pub use telegram::tg_bot::validate_telegram_token_live;
 
 use right_agent::agent::allowlist::{self, AllowlistHandle, AllowlistState};
@@ -158,56 +159,6 @@ pub struct BotArgs {
 /// restarted (the caller is expected to exit with [`CONFIG_RESTART_EXIT_CODE`]).
 pub async fn run(args: BotArgs) -> miette::Result<bool> {
     run_async(args).await
-}
-
-/// Backoff delays (ms) between retry attempts on the bot-startup
-/// `resolve_host_ips` call. The first attempt is immediate; failures
-/// sleep `BACKOFFS_MS[attempt - 1]` before the next attempt. Length of
-/// the slice is `attempts - 1`.
-pub(crate) const RESOLVE_HOST_IPS_BACKOFFS_MS: &[u64] = &[200, 500, 1000];
-
-/// Drive `attempt_fn` until it succeeds or `backoffs_ms.len() + 1` attempts
-/// have failed. Logs a `warn` per failed attempt and a final `error` if all
-/// attempts fail. The last error is propagated unchanged — FAIL FAST after
-/// retry budget is exhausted.
-///
-/// Only used at the bot-startup callsite of `resolve_host_ips`: a transient
-/// DNS hiccup, sandbox NSS warmup race, or OpenShell-alias rename should
-/// not brick the bot. Init/restore/migration callsites in `right` are
-/// interactive and intentionally fail fast.
-pub(crate) async fn run_with_backoff<T>(
-    op_name: &str,
-    agent: &str,
-    backoffs_ms: &[u64],
-    mut attempt_fn: impl AsyncFnMut() -> miette::Result<T>,
-) -> miette::Result<T> {
-    let max_attempts = backoffs_ms.len() + 1;
-    let mut last_err: Option<miette::Report> = None;
-    for attempt in 1..=max_attempts {
-        match attempt_fn().await {
-            Ok(val) => return Ok(val),
-            Err(e) => {
-                tracing::warn!(
-                    agent = %agent,
-                    attempt,
-                    max_attempts,
-                    "{op_name} failed: {e:#}",
-                );
-                last_err = Some(e);
-                if attempt < max_attempts {
-                    let delay_ms = backoffs_ms[attempt - 1];
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                }
-            }
-        }
-    }
-    let err = last_err.expect("loop runs at least once");
-    tracing::error!(
-        agent = %agent,
-        attempts = max_attempts,
-        "{op_name} exhausted retries: {err:#}",
-    );
-    Err(err)
 }
 
 async fn run_async(args: BotArgs) -> miette::Result<bool> {
@@ -671,11 +622,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         config: &config,
         providers: &providers,
     };
-    let (initial_health, sandbox) = match sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await?
-    {
-        Ok(sandbox_supervisor::SandboxBringUp { sandbox }) => {
-            (sandbox_runtime::SandboxHealth::Ready, Some(sandbox))
-        }
+    let initial_sandbox = match sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await? {
+        Ok(sandbox_supervisor::SandboxBringUp { sandbox }) => Ok(sandbox),
         Err(diagnosis) => {
             tracing::error!(
                 agent = %args.agent,
@@ -684,21 +632,16 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 "sandbox unavailable — starting DEGRADED (auto-recovers): {}",
                 diagnosis.summary
             );
-            (
-                sandbox_runtime::SandboxHealth::Unavailable {
-                    diagnosis: std::sync::Arc::new(diagnosis),
-                },
-                None,
-            )
+            Err(std::sync::Arc::new(diagnosis))
         }
     };
 
-    let (sandbox_runtime, failure_rx) = sandbox_runtime::SandboxRuntimeHandle::new(initial_health);
-    if let Some(sandbox) = sandbox.as_ref() {
-        // Populate handle.current_sandbox() on the Ready path. (new() seeds
-        // health from initial_health but leaves the sandbox slot empty.)
-        sandbox_runtime.set_ready(std::sync::Arc::clone(sandbox));
-    }
+    // The runtime handle is the single source of the live sandbox from here
+    // on: it is seeded with bring-up's outcome and the supervisor republishes
+    // a new handle on every recovery. Startup one-shots below read it once;
+    // long-lived tasks re-read it per unit of work.
+    let (sandbox_runtime, failure_rx) = sandbox_runtime::SandboxRuntimeHandle::new(initial_sandbox);
+    let sandbox = sandbox_runtime.current_sandbox();
     let sync_seed = sandbox.as_ref().map(|sbox| {
         tokio::spawn(sync::run_sync_task(
             agent_dir.clone(),
@@ -802,10 +745,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         });
     }
 
-    // Build the dashboard router AFTER the sandbox handle exists so the
-    // dashboard reuses the live handle instead of attaching per request.
-    // Spawn axum here and wait for its UDS bind before continuing with the
-    // rest of startup.
+    // Build the dashboard router AFTER the runtime handle exists so the
+    // dashboard resolves the live sandbox per request instead of attaching
+    // per request or holding a startup snapshot. Spawn axum here and wait for
+    // its UDS bind before continuing with the rest of startup.
     let dashboard_router =
         telegram::dashboard::build_dashboard_router(telegram::dashboard::DashboardState {
             agent_name: args.agent.clone(),
@@ -816,7 +759,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             home: home.clone(),
             agent_dir: agent_dir.clone(),
             sandbox_name: sandbox_name.clone(),
-            sandbox: sandbox.clone(),
             sandbox_runtime: std::sync::Arc::clone(&sandbox_runtime),
             allowlist: allowlist.clone(),
             foreground: Arc::clone(&dashboard_foreground),
@@ -856,8 +798,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let claude_health = keepalive::ClaudeHealth::new(
         args.agent.clone(),
         agent_dir.clone(),
-        sandbox.clone(),
-        Some(std::sync::Arc::clone(&sandbox_runtime)),
+        std::sync::Arc::clone(&sandbox_runtime),
     );
 
     // Build STT context once at startup — shared across all worker sessions via Arc.
@@ -887,7 +828,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         agent_dir.clone(),
         Arc::clone(&debug_flag),
         home.clone(),
-        sandbox.clone(),
         config.show_thinking,
         Arc::clone(&model_arc),
         shutdown.clone(),
@@ -937,14 +877,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Wait for axum to bind (ensures callback socket is ready) before registering the webhook
     let _ = axum_ready_rx.await;
 
-    // Spawn periodic attachment cleanup task
-    if let Some(sandbox) = sandbox.clone() {
-        telegram::attachments::spawn_cleanup_task(
-            agent_dir.clone(),
-            sandbox,
-            config.attachments.retention_days,
-        );
-    }
+    // Periodic attachment cleanup: resolves the live sandbox per sweep.
+    telegram::attachments::spawn_cleanup_task(
+        agent_dir.clone(),
+        std::sync::Arc::clone(&sandbox_runtime),
+        config.attachments.retention_days,
+    );
 
     // Startup upgrade: runs before cron/telegram — no lock contention.
     // (`upgrade_lock` is built above, before `setup_telegram`.)
@@ -964,14 +902,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let cron_learning = config.learning.clone();
     let cron_session_locks = Arc::clone(&session_locks);
     let cron_progress_state = progress_state.clone();
-    let cron_sandbox = sandbox.clone();
+    let cron_sandbox_runtime = std::sync::Arc::clone(&sandbox_runtime);
 
     let cron_handle = tokio::spawn(async move {
         cron::run_cron_task(
             cron_agent_dir,
             cron_agent_name,
             cron_model,
-            cron_sandbox,
+            cron_sandbox_runtime,
             cron_internal_client,
             cron_shutdown,
             cron_upgrade_lock,
@@ -1015,7 +953,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_bot = telegram::bot::build_bot(token.clone());
     let delivery_allowlist = allowlist.clone();
     let delivery_idle_ts = Arc::clone(&idle_timestamp);
-    let delivery_sandbox = sandbox.clone();
+    let delivery_sandbox_runtime = std::sync::Arc::clone(&sandbox_runtime);
     let delivery_internal_client = Arc::clone(&internal_client);
     let delivery_shutdown = shutdown.clone();
     let delivery_upgrade_lock = Arc::clone(&upgrade_lock);
@@ -1029,7 +967,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         delivery_bot.clone(),
         delivery_allowlist.clone(),
         Arc::clone(&delivery_idle_ts),
-        delivery_sandbox.clone(),
+        std::sync::Arc::clone(&delivery_sandbox_runtime),
         Arc::clone(&delivery_internal_client),
         Arc::clone(&delivery_upgrade_lock),
         Arc::clone(&delivery_session_locks),
@@ -1043,7 +981,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             delivery_bot,
             delivery_allowlist,
             delivery_idle_ts,
-        delivery_sandbox,
+            delivery_sandbox_runtime,
             delivery_internal_client,
             delivery_shutdown,
             delivery_upgrade_lock,
@@ -1059,7 +997,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let curator_agent_dir = agent_dir.clone();
         let curator_agent_db_dir = agent_dir.clone();
         let curator_agent_name = args.agent.clone();
-        let curator_sandbox = sandbox.clone();
+        let curator_sandbox_runtime = std::sync::Arc::clone(&sandbox_runtime);
         let curator_learning = config.learning.clone();
         let curator_debug = Arc::clone(&debug_flag);
         let curator_session_locks = Arc::clone(&session_locks);
@@ -1087,7 +1025,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                     agent_dir: curator_agent_dir.clone(),
                     agent_db_dir: curator_agent_db_dir.clone(),
                     agent_name: curator_agent_name.clone(),
-                    sandbox: curator_sandbox.clone(),
+                    // Resolved per tick: the curator ticker outlives any one
+                    // sandbox handle.
+                    sandbox: curator_sandbox_runtime.current_sandbox(),
                     internal_client: Arc::clone(&curator_internal_client),
                     model: curator_model_str,
                     debug_flag: Arc::clone(&curator_debug),
@@ -1118,15 +1058,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         });
     }
 
-    // Spawn periodic claude upgrade task.
-    let upgrade_handle = sandbox.as_ref().map(|sandbox| {
-        upgrade::spawn_upgrade_task(
-            std::sync::Arc::clone(sandbox),
-            args.agent.clone(),
-            shutdown.clone(),
-            Arc::clone(&upgrade_lock),
-        )
-    });
+    // Spawn periodic claude upgrade task. It resolves the live sandbox per
+    // upgrade attempt, so it keeps working across a recovery.
+    let upgrade_handle = upgrade::spawn_upgrade_task(
+        std::sync::Arc::clone(&sandbox_runtime),
+        args.agent.clone(),
+        shutdown.clone(),
+        Arc::clone(&upgrade_lock),
+    );
 
     // Token keepalive: periodic `claude -p "hi"` to prevent OAuth token
     // expiration. `claude_health` was built above (before `setup_telegram`).
@@ -1225,10 +1164,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // resolve before the tokio runtime is dropped. Without this, the runtime
     // drop panics: "A Tokio 1.x context was found, but it is being shutdown."
     let _ = keepalive_handle.await;
-    if let Some(handle) = upgrade_handle {
-        let _ = handle.await;
-    }
-
+    let _ = upgrade_handle.await;
 
     tracing::info!("graceful shutdown complete");
 
@@ -1436,52 +1372,6 @@ mod tests {
     //! would hang to timeout.
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
-
-    use super::{RESOLVE_HOST_IPS_BACKOFFS_MS, run_with_backoff};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// Helper retries on transient failures and returns the first success.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn retry_succeeds_after_transient_failures() {
-        let attempts = AtomicUsize::new(0);
-        let result: miette::Result<u32> =
-            run_with_backoff("test_op", "test-agent", &[10, 20, 40], async || {
-                let n = attempts.fetch_add(1, Ordering::SeqCst) + 1;
-                if n < 3 {
-                    Err(miette::miette!("transient {n}"))
-                } else {
-                    Ok(42u32)
-                }
-            })
-            .await;
-        assert_eq!(result.expect("must succeed"), 42);
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-    }
-
-    /// Helper exhausts retry budget and propagates the last error.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn retry_propagates_last_error_after_exhaustion() {
-        let attempts = AtomicUsize::new(0);
-        let result: miette::Result<u32> =
-            run_with_backoff("test_op", "test-agent", &[10, 20, 40], async || {
-                let n = attempts.fetch_add(1, Ordering::SeqCst) + 1;
-                Err(miette::miette!("attempt {n} failed"))
-            })
-            .await;
-        let err = result.expect_err("must fail after exhausting retries");
-        // Three backoffs == four attempts total.
-        assert_eq!(attempts.load(Ordering::SeqCst), 4);
-        assert!(
-            format!("{err:#}").contains("attempt 4 failed"),
-            "expected last error message preserved, got: {err:#}",
-        );
-    }
-
-    /// Production constants stay sane (3 retries, in ms, ascending).
-    #[tokio::test]
-    async fn resolve_host_ips_backoff_constants() {
-        assert_eq!(RESOLVE_HOST_IPS_BACKOFFS_MS, &[200u64, 500, 1000]);
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn drain_loop_pattern_exits_on_shutdown() {

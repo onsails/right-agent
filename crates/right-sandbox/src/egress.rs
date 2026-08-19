@@ -103,7 +103,11 @@ mod tests {
             ["Group(Host)", "Group(Public)", "Group(Host)"],
             "permissive = one narrow DNS rule + public + host: {destinations:?}"
         );
-        assert!(is_dns_rule(&policy.rules[0]), "first rule is DNS: {:?}", policy.rules[0]);
+        assert!(
+            is_dns_rule(&policy.rules[0]),
+            "first rule is DNS: {:?}",
+            policy.rules[0]
+        );
         assert!(
             policy
                 .rules

@@ -1488,13 +1488,4 @@ mod tests {
         assert!(!kept.iter().any(|tool| tool == channel_post));
         assert!(!full.iter().any(|tool| tool == channel_post));
     }
-
-    fn process_exists(pid: u32) -> bool {
-        std::process::Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    }
 }

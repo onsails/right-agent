@@ -617,8 +617,6 @@ async fn execute_job(
     session_locks: &crate::telegram::SessionLocks,
     progress_state: &crate::telegram::progress::ProgressState,
 ) {
-
-
     // Lock check (CRON-04)
     let lock_ttl = effective_lock_ttl(spec);
     if is_lock_fresh(agent_dir, job_name, lock_ttl) {
@@ -829,23 +827,26 @@ async fn execute_job(
     tracing::info!(job = %job_name, run_id = %run_id, "executing cron job");
 
     let run_started = tokio::time::Instant::now();
-    let mut child =
-        match crate::cc::invocation::build_claude_script_command(assembly_script, agent_dir, sandbox)
-            .await
-            .stdout(crate::cc::sandbox_process::Capture::Pipe)
-            .stderr(crate::cc::sandbox_process::Capture::Pipe)
-            .spawn()
-            .await
-        {
-            Err(e) => {
-                tracing::error!(job = %job_name, "spawn failed: {e:#}");
-                registered_cron.cleanup().await;
-                update_failed_run_record(&conn, &run_id, None).await;
-                std::fs::remove_file(&lock_path).ok();
-                return;
-            }
-            Ok(c) => c,
-        };
+    let mut child = match crate::cc::invocation::build_claude_script_command(
+        assembly_script,
+        agent_dir,
+        sandbox,
+    )
+    .await
+    .stdout(crate::cc::sandbox_process::Capture::Pipe)
+    .stderr(crate::cc::sandbox_process::Capture::Pipe)
+    .spawn()
+    .await
+    {
+        Err(e) => {
+            tracing::error!(job = %job_name, "spawn failed: {e:#}");
+            registered_cron.cleanup().await;
+            update_failed_run_record(&conn, &run_id, None).await;
+            std::fs::remove_file(&lock_path).ok();
+            return;
+        }
+        Ok(c) => c,
+    };
 
     // Stream stdout; break on the terminal result event (do not wait for EOF —
     // the guest stdout pipe can linger open after CC exits).
@@ -1778,7 +1779,7 @@ pub(crate) async fn run_cron_task(
     agent_dir: std::path::PathBuf,
     agent_name: String,
     model: Arc<arc_swap::ArcSwap<Option<String>>>,
-    sandbox: Option<crate::sandbox::Sandbox>,
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: Arc<right_mcp::internal_client::InternalClient>,
     shutdown: CancellationToken,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
@@ -1811,7 +1812,7 @@ pub(crate) async fn run_cron_task(
         &agent_dir,
         &agent_name,
         &model,
-        &sandbox,
+        &sandbox_runtime,
         &internal_client,
         &execute_handles,
         &upgrade_lock,
@@ -1825,7 +1826,7 @@ pub(crate) async fn run_cron_task(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &sandbox, &internal_client, &execute_handles, &upgrade_lock, &debug, &learning, &session_locks, &progress_state).await;
+                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &sandbox_runtime, &internal_client, &execute_handles, &upgrade_lock, &debug, &learning, &session_locks, &progress_state).await;
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
@@ -1965,7 +1966,7 @@ fn fire_one_shot_specs(
     agent_dir: &std::path::Path,
     agent_name: &str,
     model: &Arc<arc_swap::ArcSwap<Option<String>>>,
-    sandbox: &Option<crate::sandbox::Sandbox>,
+    sandbox_runtime: &Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: &Arc<right_mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
@@ -1990,7 +1991,9 @@ fn fire_one_shot_specs(
         // changes take effect on the next cron firing rather than next restart.
         // Per-cron model wins over the global agent model.
         let md: Option<String> = resolve_cron_model(&spec, model);
-        let sbx = sandbox.clone();
+        // Resolved at fire time, not at reconciler start: recovery publishes a
+        // new handle and the reconciler outlives many of them.
+        let sbx = sandbox_runtime.current_sandbox();
         let ic = Arc::clone(internal_client);
         let ul = Arc::clone(upgrade_lock);
         let dbg = debug.clone();
@@ -2035,7 +2038,7 @@ async fn reconcile_jobs(
     agent_dir: &std::path::Path,
     agent_name: &str,
     model: &Arc<arc_swap::ArcSwap<Option<String>>>,
-    sandbox: &Option<crate::sandbox::Sandbox>,
+    sandbox_runtime: &Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: &Arc<right_mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
@@ -2069,7 +2072,7 @@ async fn reconcile_jobs(
         agent_dir,
         agent_name,
         model,
-        sandbox,
+        sandbox_runtime,
         internal_client,
         execute_handles,
         upgrade_lock,
@@ -2093,7 +2096,7 @@ async fn reconcile_jobs(
         agent_dir,
         agent_name,
         model,
-        sandbox,
+        sandbox_runtime,
         internal_client,
         execute_handles,
         upgrade_lock,
@@ -2131,7 +2134,7 @@ async fn reconcile_jobs(
         let job_agent_dir = agent_dir.to_path_buf();
         let job_agent_name = agent_name.to_string();
         let job_model = Arc::clone(model);
-        let job_sandbox = sandbox.clone();
+        let job_sandbox_runtime = Arc::clone(sandbox_runtime);
         let job_execute_handles = Arc::clone(execute_handles);
         let job_internal_client = Arc::clone(internal_client);
         let job_upgrade_lock = Arc::clone(upgrade_lock);
@@ -2147,7 +2150,7 @@ async fn reconcile_jobs(
                 job_agent_dir,
                 job_agent_name,
                 job_model,
-                job_sandbox,
+                job_sandbox_runtime,
                 job_internal_client,
                 job_execute_handles,
                 job_upgrade_lock,
@@ -2183,9 +2186,9 @@ async fn reconcile_jobs(
             let ad = agent_dir.to_path_buf();
             let an = agent_name.to_string();
             let md: Option<String> = resolve_cron_model(spec, model);
-            let sbx = sandbox.clone();
+            let sbx = sandbox_runtime.current_sandbox();
             let ic = Arc::clone(internal_client);
-                let ul = Arc::clone(upgrade_lock);
+            let ul = Arc::clone(upgrade_lock);
             let dbg = debug.clone();
             let learn = learning.clone();
             let slk = session_locks.clone();
@@ -2229,7 +2232,7 @@ async fn run_job_loop(
     agent_dir: std::path::PathBuf,
     agent_name: String,
     model: Arc<arc_swap::ArcSwap<Option<String>>>,
-    sandbox: Option<crate::sandbox::Sandbox>,
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: Arc<right_mcp::internal_client::InternalClient>,
     execute_handles: ExecuteHandles,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
@@ -2281,7 +2284,8 @@ async fn run_job_loop(
         let ad = agent_dir.clone();
         let an = agent_name.clone();
         let md: Option<String> = resolve_cron_model(&spec, &model);
-        let sbx = sandbox.clone();
+        // Resolved per firing: the per-job loop outlives individual handles.
+        let sbx = sandbox_runtime.current_sandbox();
         let ic = Arc::clone(&internal_client);
         let ul = Arc::clone(&upgrade_lock);
         let dbg = debug.clone();
@@ -2510,8 +2514,7 @@ mod tests {
         // all is observable as a timeout instead of a fast refusal.
         let socket_dir = tempdir().expect("socket dir");
         let socket_path = socket_dir.path().join("internal.sock");
-        let _listener =
-            tokio::net::UnixListener::bind(&socket_path).expect("bind internal socket");
+        let _listener = tokio::net::UnixListener::bind(&socket_path).expect("bind internal socket");
 
         let learning = right_agent_config::LearningConfig {
             prefilter_enabled: false,
@@ -3303,12 +3306,18 @@ mod tests {
         let ic = Arc::new(right_mcp::internal_client::InternalClient::new(
             "/nonexistent.sock",
         ));
+        // No sandbox boots in a unit test: the handle carries bring-up's
+        // failure, so every job fires against an unavailable backend.
+        let (sandbox_runtime, _sandbox_rx) =
+            crate::sandbox_runtime::SandboxRuntimeHandle::new(Err(Arc::new(
+                right_sandbox::SandboxCause::HypervisorUnavailable.diagnose(),
+            )));
         let model_cell = Arc::new(arc_swap::ArcSwap::from_pointee(None::<String>));
         let cron_handle = tokio::spawn(run_cron_task(
             agent_dir,
             "test-agent".to_string(),
             model_cell,
-            None,
+            sandbox_runtime,
             ic,
             shutdown_clone,
             Arc::new(tokio::sync::RwLock::new(())),
@@ -3669,7 +3678,6 @@ mod target_snapshot_tests {
             .unwrap();
         assert_eq!(row, ("failed".to_string(), 0, "none".to_string()));
     }
-
 
     #[tokio::test]
     async fn persist_force_notify_silent_delivers_pending() {

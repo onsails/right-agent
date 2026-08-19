@@ -321,9 +321,11 @@ pub async fn deploy_directory(
         let results: Vec<miette::Result<()>> = stream::iter(file_entries)
             .map(|(host_path, rel_path)| async move {
                 let dest = format!("{platform_base}/{rel_path}");
-                sbox.fs_copy_from_host(&host_path, &dest).await.map_err(|e| {
-                    miette::miette!("upload {} -> {dest} failed: {e:#}", host_path.display())
-                })
+                sbox.fs_copy_from_host(&host_path, &dest)
+                    .await
+                    .map_err(|e| {
+                        miette::miette!("upload {} -> {dest} failed: {e:#}", host_path.display())
+                    })
             })
             .buffer_unordered(10)
             .collect()

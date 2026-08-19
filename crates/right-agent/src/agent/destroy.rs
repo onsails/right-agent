@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use right_sandbox::{SandboxError, SandboxHandle};
+
 use crate::agent::types::AgentConfig;
+use crate::sandbox_backup::archive_guest_home;
 
 /// Options for destroying an agent (resolved by caller — no TTY interaction).
 pub struct DestroyOptions {
@@ -9,10 +12,14 @@ pub struct DestroyOptions {
 }
 
 /// Result of a destroy operation — booleans reflect what actually happened.
+#[derive(Debug)]
 pub struct DestroyResult {
     /// Whether the agent process was stopped via process-compose.
     pub agent_stopped: bool,
-    /// Whether an OpenShell sandbox was deleted.
+    /// Whether the agent's Agent Sandbox was actually deleted.
+    ///
+    /// False when no sandbox existed under the agent's name, and never set
+    /// optimistically: a `true` here is a microVM that is provably gone.
     pub sandbox_deleted: bool,
     /// Path to backup if one was created.
     pub backup_path: Option<PathBuf>,
@@ -24,8 +31,11 @@ pub struct DestroyResult {
 
 /// Run a pre-destroy backup. Returns the backup directory path.
 ///
-/// Attempts an SSH tar of the sandbox, falling back to a config-only backup.
-/// Always copies agent.yaml, policy.yaml, allowlist.yaml, and VACUUM-copies data.db.
+/// Archives the Agent Sandbox to `sandbox.tar.gz`, then copies agent.yaml,
+/// policy.yaml, allowlist.yaml and VACUUM-copies data.db. Every step is
+/// fatal: `destroy_agent` calls this *before* it deletes anything, and a
+/// half-written backup that still lets the destroy proceed is how agent data
+/// disappears.
 async fn run_backup(
     home: &Path,
     agent_name: &str,
@@ -43,12 +53,10 @@ async fn run_backup(
 
     tracing::info!(agent = agent_name, backup_dir = %backup_dir.display(), "starting pre-destroy backup");
 
-    // Try SSH tar download from sandbox; skip if sandbox not ready
-    let sandbox_backed_up = try_sandbox_backup(home, agent_name, config, &backup_dir).await;
-    if !sandbox_backed_up {
+    if back_up_sandbox(agent_name, config, &backup_dir).await? == SandboxBackup::Absent {
         tracing::warn!(
             agent = agent_name,
-            "sandbox not available for backup — backing up config files only"
+            "no Agent Sandbox exists — backing up config files only"
         );
     }
 
@@ -80,59 +88,53 @@ async fn run_backup(
     Ok(backup_dir)
 }
 
-async fn try_sandbox_backup(
-    home: &Path,
+/// Whether the sandbox half of a pre-destroy backup produced an archive.
+#[derive(Debug, PartialEq, Eq)]
+enum SandboxBackup {
+    /// `sandbox.tar.gz` was written from the live guest.
+    Archived,
+    /// No sandbox exists under the agent's name, so there was nothing to
+    /// archive. Distinct from a failure: there is no data at risk.
+    Absent,
+}
+
+/// Archive the agent's guest home into `<backup_dir>/sandbox.tar.gz`.
+///
+/// Any failure other than "no such sandbox" is an error: the guest holds the
+/// agent's authoritative memory, skills and workspace, and `destroy_agent`
+/// deletes the microVM moments later. Silently degrading to a config-only
+/// backup — the pre-microsandbox behaviour — destroys that data.
+async fn back_up_sandbox(
     agent_name: &str,
     config: &Option<AgentConfig>,
     backup_dir: &Path,
-) -> bool {
+) -> miette::Result<SandboxBackup> {
     let explicit_sandbox_name = config
         .as_ref()
         .and_then(|c| c.sandbox.as_ref())
         .and_then(|s| s.name.as_deref());
-    let sb_name =
-        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+    let sb_name = right_sandbox::resolve_sandbox_name(agent_name, explicit_sandbox_name);
 
-    // Check OpenShell availability
-    let mtls_dir = match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-        _ => return false,
+    let sandbox = match SandboxHandle::attach(&sb_name).await {
+        Ok(sandbox) => sandbox,
+        Err(SandboxError::NotFound { .. }) => return Ok(SandboxBackup::Absent),
+        Err(error) => {
+            return Err(miette::miette!(
+                "cannot back up sandbox '{sb_name}' before destroying agent '{agent_name}': {error:#}"
+            ));
+        }
     };
 
-    // Check sandbox readiness
-    let mut grpc = match right_openshell::openshell::connect_grpc(&mtls_dir).await {
-        Ok(g) => g,
-        Err(_) => return false,
-    };
-    let ready = match right_openshell::openshell::is_sandbox_ready(&mut grpc, &sb_name).await {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
-    if !ready {
-        return false;
-    }
+    // A pre-destroy backup is the agent's last copy — the microVM is deleted
+    // moments later — so it keeps the rebuildable caches too, matching what
+    // the pre-microsandbox destroy archived.
+    archive_guest_home(&sandbox, &backup_dir.join("sandbox.tar.gz"), true)
+        .await
+        .map_err(|error| {
+            miette::miette!("back up agent '{agent_name}' before destroying it: {error:#}")
+        })?;
 
-    let ssh_config = home
-        .join("run")
-        .join("ssh")
-        .join(format!("{sb_name}.ssh-config"));
-    if !ssh_config.exists() {
-        return false;
-    }
-
-    let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&sb_name);
-    let dest_tar = backup_dir.join("sandbox.tar.gz");
-
-    right_openshell::openshell::ssh_tar_download(
-        &ssh_config,
-        &ssh_host,
-        "sandbox",
-        &dest_tar,
-        true,
-        300,
-    )
-    .await
-    .is_ok()
+    Ok(SandboxBackup::Archived)
 }
 
 /// What the destroy cascade must do to provider records when `deleting` is removed.
@@ -324,28 +326,35 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
             .as_ref()
             .and_then(|c| c.sandbox.as_ref())
             .and_then(|s| s.name.as_deref());
-        let sb_name = right_openshell::openshell::resolve_sandbox_name(
-            &options.agent_name,
-            explicit_sandbox_name,
-        );
-        right_openshell::openshell::delete_sandbox(&sb_name).await;
-        // `delete_sandbox` is best-effort and returns `()` — it only logs on
-        // CLI failure. We cannot observe success here, so report
-        // `sandbox_deleted = true` as a "delete attempted" signal and rely on
-        // the explicit detach in the provider cascade below to guard against
-        // a silent CLI failure leaving providers attached.
-        result.sandbox_deleted = true;
+        let sb_name =
+            right_sandbox::resolve_sandbox_name(&options.agent_name, explicit_sandbox_name);
+        // `sandbox_deleted` is what the CLI prints back to the user, so it
+        // tracks the observed outcome: a microVM that is provably gone, never
+        // "we asked". A failure here is non-fatal (the agent directory must
+        // still go) but must never be reported as a deletion.
+        match SandboxHandle::delete(&sb_name).await {
+            Ok(deleted) => {
+                result.sandbox_deleted = deleted;
+                if !deleted {
+                    tracing::info!(sandbox = %sb_name, "no sandbox to delete");
+                }
+            }
+            Err(error) => tracing::warn!(
+                sandbox = %sb_name,
+                error = %format!("{error:#}"),
+                "failed to delete Agent Sandbox; continuing destroy"
+            ),
+        }
         sb_name
     };
 
     // Cascade-clean provider records on the gateway (best-effort).
-    // `delete_sandbox` above SHOULD have removed attachments implicitly, but
-    // it is fire-and-forget (returns `()`, logs on failure). If the CLI
-    // silently failed (network blip, OpenShell down, exit code != 0), the
-    // sandbox — and therefore the attachments — would still exist, and the
-    // gateway would reject `DeleteProvider` with FailedPrecondition. To stay
-    // self-healing per AGENTS.md, we explicitly detach each of THIS agent's
-    // records first (NotFound = already detached, treat as success), mirroring
+    // Deleting the sandbox above removes its attachments with it, but that
+    // delete can fail (logged, non-fatal) and leave the sandbox — and
+    // therefore the attachments — alive, at which point the gateway rejects
+    // `DeleteProvider` with FailedPrecondition. To stay self-healing per
+    // AGENTS.md, we explicitly detach each of THIS agent's records first
+    // (NotFound = already detached, treat as success), mirroring
     // `handle_provider_remove`.
     //
     // A single gateway record may be referenced by several agents, so

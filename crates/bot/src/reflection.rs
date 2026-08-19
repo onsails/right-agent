@@ -340,11 +340,9 @@ async fn run_notice_resume(
     // 4. System-prompt assembly (match worker's pattern; no MCP refresh, no memory).
     let base_prompt = right_codegen::generate_system_prompt(&ctx.agent_name, "/sandbox");
 
-    let sandbox = crate::cc::invocation::guard_no_sandboxed_host_exec(
-        &ctx.agent_name,
-        ctx.sandbox.as_ref(),
-    )
-    .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
+    let sandbox =
+        crate::cc::invocation::guard_no_sandboxed_host_exec(&ctx.agent_name, ctx.sandbox.as_ref())
+            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
 
     let prompt_path = format!("/tmp/right-reflection-prompt-{}.md", ctx.session_uuid);
     let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
@@ -361,15 +359,18 @@ async fn run_notice_resume(
         Some(notice_token),
     );
 
-    let mut child =
-        crate::cc::invocation::build_claude_script_command(assembly_script, &ctx.agent_dir, sandbox)
-            .await
-            .stdin_piped()
-            .stdout(crate::cc::sandbox_process::Capture::Pipe)
-            .stderr(crate::cc::sandbox_process::Capture::Null)
-            .spawn()
-            .await
-            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
+    let mut child = crate::cc::invocation::build_claude_script_command(
+        assembly_script,
+        &ctx.agent_dir,
+        sandbox,
+    )
+    .await
+    .stdin_piped()
+    .stdout(crate::cc::sandbox_process::Capture::Pipe)
+    .stderr(crate::cc::sandbox_process::Capture::Null)
+    .spawn()
+    .await
+    .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
 
     // Pipe the prompt, then drop stdin to signal EOF.
     if let Some(mut stdin) = child.stdin() {

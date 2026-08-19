@@ -1,10 +1,10 @@
 use std::time::Duration;
 
+use crate::sandbox::{Sandbox, exec_argv};
 use right_dashboard::api_types::{IdentityFileResponse, IdentityFileSummary, IdentityResponse};
 use right_dashboard::identity_files::{
     IDENTITY_FILE_NAMES, IdentityFilesError, read_host_identity_file, validate_identity_file_name,
 };
-use crate::sandbox::{Sandbox, exec_argv};
 
 use super::DashboardState;
 
@@ -44,7 +44,7 @@ pub(super) async fn identity_response(
     // Every agent is sandboxed, so startup always captures a sandbox handle.
     // A missing one means the sandbox never came up: report it as unreachable
     // rather than passing host files off as live.
-    let Some(sandbox) = state.sandbox.as_ref() else {
+    let Some(sandbox) = state.sandbox() else {
         return host_mirror_unreachable_response(
             &state.agent_name,
             &state.agent_dir,
@@ -55,7 +55,7 @@ pub(super) async fn identity_response(
     // The combined read maps its own failure to a `sandbox_unreachable`
     // response, so any `Err` here is a host-mirror read failure that must
     // propagate rather than masquerade as unreachable.
-    read_sandbox_identity_files(&state.agent_name, &state.agent_dir, sandbox)
+    read_sandbox_identity_files(&state.agent_name, &state.agent_dir, &sandbox)
         .await
         .map_err(|error| IdentityFilesError::Io(std::io::Error::other(format!("{error:#}"))))
 }
@@ -65,7 +65,7 @@ pub(super) async fn identity_file_response(
     file_name: &str,
 ) -> Result<IdentityFileResponse, IdentityFilesError> {
     validate_identity_file_name(file_name)?;
-    let (file, warning) = match state.sandbox.as_ref() {
+    let (file, warning) = match state.sandbox() {
         // No sandbox handle: the sandbox never came up. Same shape as an
         // unreachable sandbox — host mirror, clearly labelled.
         None => (
@@ -78,7 +78,7 @@ pub(super) async fn identity_file_response(
             )?,
             Some("sandbox unreachable; showing host mirror when present".to_owned()),
         ),
-        Some(sandbox) => match read_sandbox_identity_file(sandbox, file_name).await {
+        Some(sandbox) => match read_sandbox_identity_file(&sandbox, file_name).await {
             Ok(Some(file)) => (file, None),
             // Absent in the sandbox: show the host mirror when present
             // (host_mirror) otherwise mark it not_authored.

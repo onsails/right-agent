@@ -202,7 +202,10 @@ mod tests {
         let mut spec = SandboxSpec::new("right-a", "node:22-slim");
         spec.env.push(("MSB_HOME".to_owned(), "/tmp/x".to_owned()));
         let err = spec.validate().expect_err("MSB_ env must fail");
-        assert!(matches!(err, SandboxError::InvalidSpec { field: "env", .. }));
+        assert!(matches!(
+            err,
+            SandboxError::InvalidSpec { field: "env", .. }
+        ));
     }
 
     #[test]
@@ -213,8 +216,16 @@ mod tests {
             binding.allowed_hosts = vec!["api.example.com".to_owned()];
             spec.secrets.push(binding);
         }
-        let err = spec.validate().expect_err("duplicate secret env vars must fail");
-        assert!(matches!(err, SandboxError::InvalidSpec { field: "secrets", .. }));
+        let err = spec
+            .validate()
+            .expect_err("duplicate secret env vars must fail");
+        assert!(matches!(
+            err,
+            SandboxError::InvalidSpec {
+                field: "secrets",
+                ..
+            }
+        ));
     }
 
     #[test]

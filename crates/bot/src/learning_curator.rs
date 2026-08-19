@@ -792,37 +792,35 @@ async fn run_report_only_pass(
         .stdout(crate::cc::sandbox_process::Capture::Pipe)
         .stderr(crate::cc::sandbox_process::Capture::Pipe);
 
-    let (actions_json, action_count, cost, cache_r, cache_c) =
-        match command.spawn().await {
-            Ok(child) => {
-                match crate::cc::invocation::wait_with_output_or_kill(child, CURATOR_TIMEOUT).await
-                {
-                    Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                        let usage = curator_usage_from_stdout(&stdout);
-                        if let Some(b) = usage.as_ref() {
-                            if let Err(e) =
-                                right_agent::usage::insert::insert_learning_curator(conn, b).await
-                            {
-                                tracing::warn!(agent = %ctx.agent_name, "report-only usage insert failed: {e:#}");
-                            }
+    let (actions_json, action_count, cost, cache_r, cache_c) = match command.spawn().await {
+        Ok(child) => {
+            match crate::cc::invocation::wait_with_output_or_kill(child, CURATOR_TIMEOUT).await {
+                Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                    let usage = curator_usage_from_stdout(&stdout);
+                    if let Some(b) = usage.as_ref() {
+                        if let Err(e) =
+                            right_agent::usage::insert::insert_learning_curator(conn, b).await
+                        {
+                            tracing::warn!(agent = %ctx.agent_name, "report-only usage insert failed: {e:#}");
                         }
-                        let plan =
-                            parse_curator_plan(&stdout).unwrap_or(CuratorPlan { actions: vec![] });
-                        let count = plan.actions.len() as i64;
-                        let json = serde_json::to_string(&plan.actions)
-                            .unwrap_or_else(|_| "[]".to_owned());
-                        let (cost_v, cr, cc) = usage_triple(usage.as_ref());
-                        (json, count, cost_v, cr, cc)
                     }
-                    _ => ("[]".to_owned(), 0, 0.0, 0, 0),
+                    let plan =
+                        parse_curator_plan(&stdout).unwrap_or(CuratorPlan { actions: vec![] });
+                    let count = plan.actions.len() as i64;
+                    let json =
+                        serde_json::to_string(&plan.actions).unwrap_or_else(|_| "[]".to_owned());
+                    let (cost_v, cr, cc) = usage_triple(usage.as_ref());
+                    (json, count, cost_v, cr, cc)
                 }
+                _ => ("[]".to_owned(), 0, 0.0, 0, 0),
             }
-            Err(e) => {
-                tracing::warn!(agent = %ctx.agent_name, "report-only spawn failed: {e:#}");
-                ("[]".to_owned(), 0, 0.0, 0, 0)
-            }
-        };
+        }
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "report-only spawn failed: {e:#}");
+            ("[]".to_owned(), 0, 0.0, 0, 0)
+        }
+    };
     active.cleanup().await;
 
     let record = CuratorRunRecord {

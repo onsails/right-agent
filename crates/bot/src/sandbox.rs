@@ -13,19 +13,29 @@ use std::time::Duration;
 
 use right_sandbox::{ExecRequest, SandboxHandle};
 
-/// The shared Agent Sandbox handle.
+/// A live Agent Sandbox handle.
 ///
-/// `Arc` because the same live handle is read by the supervisor, the message
-/// worker, cron, background runs, and the dashboard. `SandboxHandle` itself is
-/// cheap to clone at the SDK layer but is not `Clone`, so the `Arc` is the
-/// sharing seam.
+/// `Arc` because one handle is shared by everything working on the agent's
+/// behalf at a given moment; `SandboxHandle` itself is not `Clone`, so the
+/// `Arc` is the sharing seam.
+///
+/// A handle is **not** stable for the bot's lifetime: it wraps an SDK
+/// connection to one VM, and the supervisor publishes a replacement whenever
+/// it recreates the sandbox. The live one lives in
+/// [`crate::sandbox_runtime::SandboxRuntimeHandle`]; long-lived consumers
+/// hold that runtime handle and call `current_sandbox()` per unit of work
+/// (turn, cron job, delivery, dashboard request), keeping the result only for
+/// that unit.
 ///
 /// Re-exported as `right_bot::Sandbox` for the CLI, which attaches to the
 /// sandbox itself before handing it to [`crate::keepalive::InitAuthProbe`].
 pub type Sandbox = Arc<SandboxHandle>;
 
 /// The agent's home inside the guest. Everything the agent owns lives here.
-pub(crate) const SANDBOX_HOME: &str = "/sandbox";
+///
+/// Defined by [`right_sandbox::GUEST_HOME`], which is also the workdir every
+/// spec is created with — the two cannot drift.
+pub(crate) const SANDBOX_HOME: &str = right_sandbox::GUEST_HOME;
 
 /// Path to the aggregator `mcp.json` inside the guest.
 pub(crate) const SANDBOX_MCP_JSON_PATH: &str = "/sandbox/mcp.json";
@@ -45,7 +55,10 @@ pub(crate) const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// A non-zero exit code is data, not an error — callers decide. Only a
 /// transport/spawn failure is an `Err`.
-pub(crate) async fn exec_argv(sandbox: &SandboxHandle, argv: &[&str]) -> miette::Result<(String, i32)> {
+pub(crate) async fn exec_argv(
+    sandbox: &SandboxHandle,
+    argv: &[&str],
+) -> miette::Result<(String, i32)> {
     exec_argv_with_timeout(sandbox, argv, DEFAULT_EXEC_TIMEOUT).await
 }
 
@@ -60,7 +73,10 @@ pub(crate) async fn exec_argv_with_timeout(
         .exec(&exec_request(argv, timeout))
         .await
         .map_err(|e| miette::miette!("sandbox exec {argv:?} failed: {e:#}"))?;
-    Ok((String::from_utf8_lossy(&outcome.stdout).into_owned(), outcome.code))
+    Ok((
+        String::from_utf8_lossy(&outcome.stdout).into_owned(),
+        outcome.code,
+    ))
 }
 
 /// Build an [`ExecRequest`] from an argv slice.
@@ -68,9 +84,7 @@ pub(crate) async fn exec_argv_with_timeout(
 /// Split out so the request shape (guest cwd, no shell, hard timeout) is
 /// stated once.
 fn exec_request(argv: &[&str], timeout: Duration) -> ExecRequest {
-    let (cmd, args) = argv
-        .split_first()
-        .expect("exec argv must name a program");
+    let (cmd, args) = argv.split_first().expect("exec argv must name a program");
     ExecRequest {
         cmd: (*cmd).to_owned(),
         args: args.iter().map(|arg| (*arg).to_owned()).collect(),

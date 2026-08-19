@@ -1,13 +1,13 @@
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
+use crate::sandbox::{Sandbox, exec_argv};
 use right_dashboard::api_types::{
     PinSkillResponse, SkillDetailResponse, SkillGroups, SkillSummary, SkillsResponse,
 };
 use right_dashboard::skill_inventory::{
-    SkillInventoryError, classify_skill_group, parse_skill_description, read_host_skill_detail,
-    scan_host_skills, sort_skill_groups, validate_skill_name,
+    SkillInventoryError, classify_skill_group, parse_skill_description, sort_skill_groups,
+    validate_skill_name,
 };
-use crate::sandbox::{Sandbox, exec_argv};
 
 use super::DashboardState;
 
@@ -15,6 +15,11 @@ const SKILL_PREVIEW_LIMIT_BYTES: usize = 64 * 1024;
 const SKILL_DESCRIPTION_PREVIEW_LIMIT_BYTES: usize = 8 * 1024;
 const SANDBOX_SKILL_LIMIT_STR: &str = "200";
 const SANDBOX_SKILLS_PATH: &str = "/sandbox/.claude/skills";
+/// Detail reported by every skills route when the sandbox handle is absent.
+/// Carries the same `sandbox_unreachable` label the identity routes use: an
+/// unreachable sandbox is an error, never a host mirror served as truth (the
+/// learned `rightx-*` packages exist only in the guest).
+const SANDBOX_UNREACHABLE_DETAIL: &str = "sandbox_unreachable: no sandbox handle";
 // These two scripts MUST stay single-line: OpenShell's gRPC `ExecSandbox`
 // rejects any command argument containing a real newline/CR byte, and each is
 // passed as one `sh -c <script>` arg. Rust's `\`-line-continuation strips the
@@ -91,26 +96,18 @@ pub(super) enum SkillLifecycleReadError {
 pub(super) async fn skills_response(
     state: &DashboardState,
 ) -> Result<SkillsResponse, SkillsResponseError> {
-    if let Some(sandbox) = state.sandbox.as_ref() {
-        // Learned (`rightx-*`) skills live only inside the sandbox at
-        // `/sandbox/.claude/skills`. Falling back to the host filesystem on a
-        // scan failure would show "0 learned" — a wrong answer dressed as a
-        // valid one. Propagate the failure so the dashboard renders an error
-        // (and keeps any previously loaded skills) instead.
-        let mut response = scan_sandbox_skills(&state.agent_name, sandbox)
-            .await
-            .map_err(|error| SkillsResponseError::Sandbox(format!("{error:#}")))?;
-        try_enrich_skills_response(state, &mut response).await;
-        return Ok(response);
-    }
-
-    let mut response = scan_host_skills(
-        &state.agent_name,
-        &state.agent_dir,
-        right_codegen::BUILTIN_SKILL_NAMES,
-        "host",
-        SKILL_PREVIEW_LIMIT_BYTES,
-    )?;
+    // Learned (`rightx-*`) skills live only inside the sandbox at
+    // `/sandbox/.claude/skills`. Falling back to the host filesystem — on a
+    // scan failure or on a missing handle, which now means the sandbox never
+    // came up rather than "unsandboxed agent" — would show "0 learned": a
+    // wrong answer dressed as a valid one. Propagate instead, so the dashboard
+    // renders an error and keeps any previously loaded skills.
+    let sandbox = state
+        .sandbox()
+        .ok_or_else(|| SkillsResponseError::Sandbox(SANDBOX_UNREACHABLE_DETAIL.to_owned()))?;
+    let mut response = scan_sandbox_skills(&state.agent_name, &sandbox)
+        .await
+        .map_err(|error| SkillsResponseError::Sandbox(format!("{error:#}")))?;
     try_enrich_skills_response(state, &mut response).await;
     Ok(response)
 }
@@ -120,19 +117,12 @@ pub(super) async fn skill_detail_response(
     skill_name: &str,
 ) -> Result<SkillDetailResponse, SkillDetailError> {
     validate_skill_name(skill_name)?;
-    if let Some(sandbox) = state.sandbox.as_ref() {
-        let mut response = read_sandbox_skill_detail(&state.agent_name, sandbox, skill_name).await?;
-        try_enrich_skill_summary(state, &mut response.skill).await;
-        return Ok(response);
-    }
-
-    let mut response = read_host_skill_detail(
-        &state.agent_name,
-        &state.agent_dir,
-        skill_name,
-        right_codegen::BUILTIN_SKILL_NAMES,
-        SKILL_PREVIEW_LIMIT_BYTES,
-    )?;
+    // Same rule as the list route: a learned skill's SKILL.md exists only in
+    // the guest, so no handle means unreachable, not "read the host copy".
+    let sandbox = state
+        .sandbox()
+        .ok_or_else(|| SkillDetailError::Sandbox(SANDBOX_UNREACHABLE_DETAIL.to_owned()))?;
+    let mut response = read_sandbox_skill_detail(&state.agent_name, &sandbox, skill_name).await?;
     try_enrich_skill_summary(state, &mut response.skill).await;
     Ok(response)
 }
@@ -146,23 +136,9 @@ pub(super) async fn pin_skill_response(
     if !skill_name.starts_with("rightx-") {
         return Err(PinSkillError::NonRightx);
     }
-    // Guard against pinning an orphan lifecycle row whose SKILL.md was
-    // deleted out-of-band — surface as 404, not a silent pin. For
-    // sandboxed agents the learned-skill package lives in
-    // /sandbox/.claude/skills/<name>/SKILL.md, not under agent_dir, so
-    // probe the sandbox there instead of the host filesystem.
-    if let Some(sandbox) = state.sandbox.as_ref() {
-        probe_sandbox_skill_package(sandbox, skill_name).await?;
-    } else {
-        read_host_skill_detail(
-            &state.agent_name,
-            &state.agent_dir,
-            skill_name,
-            right_codegen::BUILTIN_SKILL_NAMES,
-            SKILL_PREVIEW_LIMIT_BYTES,
-        )?;
-    }
-
+    // Cheap local checks first, so a request that is wrong on its own terms
+    // (unknown or non-curator-managed row) still answers precisely while the
+    // sandbox is down.
     let agent_dir = state.agent_dir.clone();
     let skill_name = skill_name.to_owned();
     let conn = right_db::open_connection(&agent_dir, false).await?;
@@ -175,6 +151,16 @@ pub(super) async fn pin_skill_response(
     ) {
         return Err(PinSkillError::NotCuratorManaged);
     }
+    // Guard against pinning an orphan lifecycle row whose SKILL.md was deleted
+    // out-of-band — surface as 404, not a silent pin. The learned-skill package
+    // lives at /sandbox/.claude/skills/<name>/SKILL.md, so the probe runs in
+    // the guest; with no sandbox handle there is nothing to verify against, and
+    // the pin MUST NOT be written on the strength of a host read.
+    let sandbox = state
+        .sandbox()
+        .ok_or_else(|| PinSkillError::Sandbox(SANDBOX_UNREACHABLE_DETAIL.to_owned()))?;
+    probe_sandbox_skill_package(&sandbox, &skill_name).await?;
+
     right_lifecycle::set_pinned(&conn, &skill_name, pinned).await?;
     Ok(PinSkillResponse { skill_name, pinned })
 }
@@ -223,10 +209,7 @@ async fn probe_sandbox_skill_package(
     Ok(())
 }
 
-async fn scan_sandbox_skills(
-    agent: &str,
-    sandbox: &Sandbox,
-) -> miette::Result<SkillsResponse> {
+async fn scan_sandbox_skills(agent: &str, sandbox: &Sandbox) -> miette::Result<SkillsResponse> {
     let list_command = [
         "sh",
         "-c",
@@ -470,7 +453,6 @@ async fn spend_by_skill(
     let conn = right_db::open_connection_readonly(agent_dir).await?;
     Ok(right_dashboard::read_model::learning::skill_spend_by_skill(&conn).await?)
 }
-
 
 #[cfg(test)]
 mod script_constants_tests {

@@ -1,23 +1,9 @@
-use super::{RESTRICTIVE_EGRESS_ALLOW, diagnose, egress_for};
-use right_agent_config::NetworkPolicy;
-use right_sandbox::{Egress, SandboxCause, SandboxError, SandboxPhase};
+use super::{degrade_decision, diagnose};
+use right_sandbox::{SandboxCause, SandboxError, SandboxPhase};
 
-#[test]
-fn permissive_network_policy_opens_public_egress() {
-    assert_eq!(egress_for(NetworkPolicy::Permissive), Egress::Permissive);
-}
-
-#[test]
-fn restrictive_network_policy_allows_only_the_anthropic_suffixes() {
-    let Egress::Restrictive { allow } = egress_for(NetworkPolicy::Restrictive) else {
-        panic!("restrictive policy must not map to permissive egress");
-    };
-    assert_eq!(allow, RESTRICTIVE_EGRESS_ALLOW);
-    assert!(
-        !allow.iter().any(|domain| domain.starts_with("*.")),
-        "entries are domain suffixes, not globs: {allow:?}"
-    );
-}
+// The `network_policy` → egress mapping now lives with the shared spec
+// builder in `right-sandbox` (`agent::tests`), where the CLI's creator sees
+// the same assertions.
 
 #[test]
 fn a_stopped_sandbox_diagnoses_as_not_running() {
@@ -47,4 +33,54 @@ fn a_command_level_failure_is_inconclusive_not_a_backend_verdict() {
     });
 
     assert_eq!(diagnosis.cause, SandboxCause::Unreachable);
+}
+
+/// Restores the property the deleted `sandbox_supervisor_phase_tests.rs`
+/// guarded under the gateway taxonomy ("a transient provisioning phase does
+/// not degrade"), now expressed in microsandbox phases.
+#[test]
+fn a_still_booting_sandbox_does_not_degrade() {
+    for phase in [SandboxPhase::Created, SandboxPhase::Starting] {
+        let decision = degrade_decision(&SandboxError::NotRunning {
+            name: "right-agent".to_owned(),
+            phase,
+        });
+        assert!(
+            decision.is_none(),
+            "{phase} is a sandbox on its way up, not a failed one"
+        );
+    }
+}
+
+#[test]
+fn a_terminal_phase_degrades() {
+    for phase in [SandboxPhase::Stopped, SandboxPhase::Crashed] {
+        let diagnosis = degrade_decision(&SandboxError::NotRunning {
+            name: "right-agent".to_owned(),
+            phase,
+        })
+        .unwrap_or_else(|| panic!("{phase} must degrade"));
+        assert_eq!(
+            diagnosis.cause,
+            SandboxCause::SandboxNotRunning {
+                sandbox: "right-agent".to_owned()
+            }
+        );
+    }
+}
+
+/// A sandbox that cannot be reached at all is a failure regardless of phase:
+/// the transient-phase exemption must not swallow runtime errors.
+#[test]
+fn an_unreachable_runtime_degrades() {
+    let diagnosis = degrade_decision(&SandboxError::NotFound {
+        name: "right-agent".to_owned(),
+    })
+    .expect("a missing sandbox must degrade");
+    assert_eq!(
+        diagnosis.cause,
+        SandboxCause::SandboxNotFound {
+            sandbox: "right-agent".to_owned()
+        }
+    );
 }

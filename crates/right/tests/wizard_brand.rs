@@ -118,9 +118,8 @@ fn status_no_pc_running_renders_err_with_fix() {
 // assert_cmd runs the binary non-TTY, so Theme::Ascii is always active.
 // Rail::mark(Ascii) = "|*", Rail::blank(Ascii) = "|", section(Ascii, "x") starts with "| x ".
 
-#[ignore = "ci-openshell: requires a live sandbox runtime — every agent is sandboxed"]
 #[test]
-fn ci_openshell_ci_openshell_init_first_run_splash_and_recap() {
+fn init_first_run_splash_and_recap() {
     let home = isolated_home();
     right_with_init_auth()
         .args([
@@ -128,8 +127,6 @@ fn ci_openshell_ci_openshell_init_first_run_splash_and_recap() {
             home.path().to_str().unwrap(),
             "init",
             "-y",
-            "--sandbox-mode",
-            "none",
             "--tunnel-hostname",
             "test.example.com",
         ])
@@ -145,9 +142,8 @@ fn ci_openshell_ci_openshell_init_first_run_splash_and_recap() {
         .stdout(predicate::str::contains("|  next: right up"));
 }
 
-#[ignore = "ci-openshell: requires a live sandbox runtime — every agent is sandboxed"]
 #[test]
-fn ci_openshell_ci_openshell_init_rerun_writes_recap_again() {
+fn init_rerun_writes_recap_again() {
     // Two independent init runs (separate homes) both produce the recap.
     // (init_right_home guards against re-init on the same home without --force;
     // this test focuses on recap being present on any fresh run.)
@@ -159,8 +155,6 @@ fn ci_openshell_ci_openshell_init_rerun_writes_recap_again() {
                 home.path().to_str().unwrap(),
                 "init",
                 "-y",
-                "--sandbox-mode",
-                "none",
                 "--tunnel-hostname",
                 "test.example.com",
             ])
@@ -170,9 +164,8 @@ fn ci_openshell_ci_openshell_init_rerun_writes_recap_again() {
     }
 }
 
-#[ignore = "ci-openshell: requires a live sandbox runtime — every agent is sandboxed"]
 #[test]
-fn ci_openshell_ci_openshell_agent_init_recap_renders_block() {
+fn agent_init_recap_renders_block() {
     let home = isolated_home();
 
     // Bootstrap a global config first so agent init has somewhere to land.
@@ -182,8 +175,6 @@ fn ci_openshell_ci_openshell_agent_init_recap_renders_block() {
             home.path().to_str().unwrap(),
             "init",
             "-y",
-            "--sandbox-mode",
-            "none",
             "--tunnel-hostname",
             "test.example.com",
         ])
@@ -198,8 +189,6 @@ fn ci_openshell_ci_openshell_agent_init_recap_renders_block() {
             "init",
             "finance",
             "-y",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .success()
@@ -209,9 +198,8 @@ fn ci_openshell_ci_openshell_agent_init_recap_renders_block() {
         .stdout(predicate::str::contains("|  next: right up"));
 }
 
-#[ignore = "ci-openshell: requires a live sandbox runtime — every agent is sandboxed"]
 #[test]
-fn ci_openshell_ci_openshell_init_ascii_fallback() {
+fn init_ascii_fallback() {
     let home = isolated_home();
     let assert = right_with_init_auth()
         .env("TERM", "dumb")
@@ -221,8 +209,6 @@ fn ci_openshell_ci_openshell_init_ascii_fallback() {
             home.path().to_str().unwrap(),
             "init",
             "-y",
-            "--sandbox-mode",
-            "none",
             "--tunnel-hostname",
             "test.example.com",
         ])

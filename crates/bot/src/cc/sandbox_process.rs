@@ -332,7 +332,6 @@ pub(crate) enum SandboxProcessError {
     PumpGone,
 }
 
-
 /// One step of the event pump.
 enum PumpStep {
     /// The handle asked for a kill (explicitly, or by being dropped).
@@ -422,32 +421,19 @@ async fn write_stream(
 /// Writes go out through [`ChunkedStdin`], so any payload size is safe.
 /// Dropping the writer sends EOF.
 pub(crate) struct SandboxStdin {
-    writer: Option<WriteHalf<SimplexStream>>,
+    writer: WriteHalf<SimplexStream>,
 }
 
 impl SandboxStdin {
     fn new(sink: ChunkedStdin) -> Self {
         let (reader, writer) = tokio::io::simplex(STREAM_BUFFER_BYTES);
         tokio::spawn(forward_stdin(reader, sink));
-        Self {
-            writer: Some(writer),
-        }
+        Self { writer }
     }
 
     /// Write all of `data` to the guest's stdin.
     pub(crate) async fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
-        match self.writer.as_mut() {
-            Some(writer) => writer.write_all(data).await,
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "guest stdin is closed",
-            )),
-        }
-    }
-
-    /// Send EOF without waiting for the guest to exit.
-    pub(crate) fn close(&mut self) {
-        self.writer = None;
+        self.writer.write_all(data).await
     }
 }
 
@@ -476,7 +462,12 @@ async fn forward_stdin(mut reader: ReadHalf<SimplexStream>, sink: ChunkedStdin) 
 }
 /// Build the in-process pipe for one output stream. `Capture::Null` still gets
 /// a writer so the pump can drain the guest without blocking, but no reader.
-fn pipe(capture: Capture) -> (Option<ReadHalf<SimplexStream>>, Option<WriteHalf<SimplexStream>>) {
+fn pipe(
+    capture: Capture,
+) -> (
+    Option<ReadHalf<SimplexStream>>,
+    Option<WriteHalf<SimplexStream>>,
+) {
     match capture {
         Capture::Pipe => {
             let (reader, writer) = tokio::io::simplex(STREAM_BUFFER_BYTES);

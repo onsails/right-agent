@@ -12,10 +12,10 @@
 
 use std::time::Duration;
 
+use crate::error::SandboxError;
+use microsandbox::ExecHandle;
 use microsandbox::sandbox::ExecOptionsBuilder;
 use microsandbox::sandbox::exec::ExecSink;
-use microsandbox::ExecHandle;
-use crate::error::SandboxError;
 
 /// The SDK's protocol frame cap: one `ExecSink::write` becomes one frame.
 pub const PROTOCOL_FRAME_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -174,13 +174,11 @@ impl ExecStream {
     /// Take the stdin writer. `Some` exactly once, only when the request
     /// asked for [`Stdin::Pipe`].
     pub fn take_stdin(&mut self) -> Option<ChunkedStdin> {
-        self.inner
-            .take_stdin()
-            .map(|sink| ChunkedStdin {
-                name: self.name.clone(),
-                cmd: self.cmd.clone(),
-                sink,
-            })
+        self.inner.take_stdin().map(|sink| ChunkedStdin {
+            name: self.name.clone(),
+            cmd: self.cmd.clone(),
+            sink,
+        })
     }
 
     /// Drain the event stream and return the exit code. Output events are
@@ -272,9 +270,7 @@ impl ChunkedStdin {
 /// `kind` is carried separately on [`SandboxError::ExecSpawn`]; this formats
 /// only the human message plus the structured `errno_name`/`stage` when the
 /// agentd classifier populated them.
-pub(crate) fn format_exec_failed(
-    failed: &microsandbox::protocol::exec::ExecFailed,
-) -> String {
+pub(crate) fn format_exec_failed(failed: &microsandbox::protocol::exec::ExecFailed) -> String {
     match (&failed.errno_name, &failed.stage) {
         (Some(errno), Some(stage)) => format!("{} [{errno} at {stage}]", failed.message),
         (Some(errno), None) => format!("{} [{errno}]", failed.message),

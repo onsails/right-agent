@@ -26,7 +26,10 @@ pub const TLS_BYPASS_HOSTS: &[&str] = &["api.anthropic.com", "*.anthropic.com"];
 /// The full TLS bypass list: Anthropic hosts plus caller-supplied extras,
 /// deduplicated, order-preserved.
 pub fn tls_bypass_list(extra: &[String]) -> Vec<String> {
-    let mut list: Vec<String> = TLS_BYPASS_HOSTS.iter().map(|host| (*host).to_owned()).collect();
+    let mut list: Vec<String> = TLS_BYPASS_HOSTS
+        .iter()
+        .map(|host| (*host).to_owned())
+        .collect();
     for host in extra {
         if !list.contains(host) {
             list.push(host.clone());
@@ -217,10 +220,7 @@ mod tests {
 
     #[test]
     fn bypass_list_appends_extras_without_duplicates() {
-        let list = tls_bypass_list(&[
-            "internal.corp".to_owned(),
-            "api.anthropic.com".to_owned(),
-        ]);
+        let list = tls_bypass_list(&["internal.corp".to_owned(), "api.anthropic.com".to_owned()]);
         assert_eq!(
             list,
             ["api.anthropic.com", "*.anthropic.com", "internal.corp"],

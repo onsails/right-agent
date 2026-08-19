@@ -16,10 +16,9 @@
 
 use std::path::{Path, PathBuf};
 
-use tonic::transport::Channel;
+use right_sandbox::{GUEST_HOME, SandboxHandle};
 
 use crate::agent::types::AgentConfig;
-use right_openshell::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
 
 /// Identity files that bootstrap (re)creates and that this command rewinds.
 pub const IDENTITY_FILES: &[&str] = &["IDENTITY.md", "SOUL.md", "USER.md"];
@@ -63,12 +62,13 @@ pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
 
     let config: Option<AgentConfig> = crate::agent::parse_agent_config(&agent_dir)?;
 
-    let explicit_sandbox_name = config
-        .as_ref()
-        .and_then(|c| c.sandbox.as_ref())
-        .and_then(|s| s.name.as_deref());
-    let sandbox_name =
-        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+    let sandbox_name = right_sandbox::resolve_sandbox_name(
+        agent_name,
+        config
+            .as_ref()
+            .and_then(|c| c.sandbox.as_ref())
+            .and_then(|s| s.name.as_deref()),
+    );
 
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
     let backup_dir =
@@ -96,12 +96,12 @@ pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport
 
     let host_backed_up = backup_host_files(&plan.agent_dir, &plan.backup_dir)?;
 
-    let mut session = open_sandbox_session(&plan.sandbox_name).await?;
-    let sandbox_backed_up = backup_sandbox_files(&mut session, &plan.backup_dir).await?;
+    let sandbox = attach_sandbox(&plan.sandbox_name).await?;
+    let sandbox_backed_up = backup_sandbox_files(&sandbox, &plan.backup_dir).await?;
 
     // The sandbox is authoritative for sandboxed agents. Host identity,
     // sessions, and answers remain untouched unless its deletion completed.
-    delete_identity_from_sandbox(&mut session).await?;
+    delete_identity_from_sandbox(&sandbox).await?;
     delete_identity_from_host(&plan.agent_dir)?;
 
     write_bootstrap_md(&plan.agent_dir)?;
@@ -146,43 +146,23 @@ fn backup_host_files(agent_dir: &Path, backup_dir: &Path) -> miette::Result<Vec<
     Ok(copied)
 }
 
-/// Live gRPC handle to a sandbox we've already verified exists.
+/// Attach to the agent's Agent Sandbox.
 ///
-/// Reused across `backup_sandbox_files` and `delete_identity_from_sandbox` so
-/// `execute()` only pays for one preflight + connect + existence probe.
-struct SandboxSession {
-    name: String,
-    id: String,
-    client: OpenShellClient<Channel>,
+/// Every failure to reach the configured sandbox is an error: continuing
+/// would reset host state while leaving the authoritative sandbox identity
+/// intact — and `sync::reverse_sync_md` would then copy that identity back
+/// onto the host, so the agent would silently never re-bootstrap.
+async fn attach_sandbox(sandbox: &str) -> miette::Result<SandboxHandle> {
+    SandboxHandle::attach(sandbox).await.map_err(|e| {
+        miette::miette!(
+            "cannot reach configured sandbox '{sandbox}': {e:#}; refusing to reset host state"
+        )
+    })
 }
 
-/// Resolve `sandbox_name` to a connected gRPC client + sandbox id.
-///
-/// Every failure to reach or resolve the configured sandbox is an error:
-/// continuing would reset host state while leaving the authoritative sandbox
-/// identity intact.
-async fn open_sandbox_session(sandbox: &str) -> miette::Result<SandboxSession> {
-    let mtls_dir = match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(d) => d,
-        other => {
-            return Err(miette::miette!(
-                "OpenShell is not ready for configured sandbox '{sandbox}': {other:?}; refusing to reset host state"
-            ));
-        }
-    };
-
-    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-    if !right_openshell::openshell::sandbox_exists(&mut client, sandbox).await? {
-        return Err(miette::miette!(
-            "configured sandbox '{sandbox}' does not exist; refusing to reset host state"
-        ));
-    }
-    let id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
-    Ok(SandboxSession {
-        name: sandbox.to_string(),
-        id,
-        client,
-    })
+/// Guest path of an identity file.
+fn sandbox_identity_path(name: &str) -> String {
+    format!("{GUEST_HOME}/{name}")
 }
 
 /// Download identity files from sandbox into `<backup_dir>/sandbox/`.
@@ -190,7 +170,7 @@ async fn open_sandbox_session(sandbox: &str) -> miette::Result<SandboxSession> {
 /// Returns the list of files that were actually downloaded. A missing
 /// sandbox file is not an error; a download failure on a present file is.
 async fn backup_sandbox_files(
-    session: &mut SandboxSession,
+    sandbox: &SandboxHandle,
     backup_dir: &Path,
 ) -> miette::Result<Vec<&'static str>> {
     let sandbox_backup_dir = backup_dir.join("sandbox");
@@ -203,15 +183,14 @@ async fn backup_sandbox_files(
 
     let mut copied = Vec::new();
     for &name in IDENTITY_FILES {
-        let sandbox_path = format!("/sandbox/{name}");
-        let (_stdout, exit) = right_openshell::openshell::exec_in_sandbox(
-            &mut session.client,
-            &session.id,
-            &["test", "-f", &sandbox_path],
-            right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
-        )
-        .await?;
-        if exit != 0 {
+        let guest_path = sandbox_identity_path(name);
+        let present = sandbox.fs_exists(&guest_path).await.map_err(|e| {
+            miette::miette!(
+                "failed to stat {guest_path} in sandbox '{}': {e:#}",
+                sandbox.name()
+            )
+        })?;
+        if !present {
             tracing::debug!(
                 file = name,
                 "rebootstrap: sandbox file absent, skipping backup"
@@ -219,7 +198,15 @@ async fn backup_sandbox_files(
             continue;
         }
         let dst = sandbox_backup_dir.join(name);
-        right_openshell::openshell::download_file(&session.name, &sandbox_path, &dst).await?;
+        sandbox
+            .fs_copy_to_host(&guest_path, &dst)
+            .await
+            .map_err(|e| {
+                miette::miette!(
+                    "failed to back up sandbox {guest_path} to {}: {e:#}",
+                    dst.display()
+                )
+            })?;
         copied.push(name);
     }
     Ok(copied)
@@ -323,29 +310,42 @@ fn delete_identity_from_host(agent_dir: &Path) -> miette::Result<()> {
     Ok(())
 }
 
-/// Delete identity files from the sandbox via gRPC `exec_in_sandbox`.
+/// Delete identity files from the sandbox through the guest filesystem API.
 ///
-/// `rm -f` makes missing files non-fatal, so a reachable sandbox is naturally
-/// idempotent.
-async fn delete_identity_from_sandbox(session: &mut SandboxSession) -> miette::Result<()> {
-    let paths: Vec<String> = IDENTITY_FILES
-        .iter()
-        .map(|n| format!("/sandbox/{n}"))
-        .collect();
-    let mut cmd: Vec<&str> = vec!["rm", "-f"];
-    cmd.extend(paths.iter().map(|s| s.as_str()));
-
-    let (stdout, exit) = right_openshell::openshell::exec_in_sandbox(
-        &mut session.client,
-        &session.id,
-        &cmd,
-        right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
-    )
-    .await?;
-    if exit != 0 {
-        return Err(miette::miette!(
-            "rm in sandbox returned exit {exit}: {stdout}"
-        ));
+/// A file that is already absent is not an error, so a reachable sandbox is
+/// naturally idempotent. Every removal is verified before returning: this is
+/// the step the whole command's ordering guarantee rests on, and a silent
+/// no-op here would let the host reset run against a sandbox that still
+/// holds the authoritative identity.
+async fn delete_identity_from_sandbox(sandbox: &SandboxHandle) -> miette::Result<()> {
+    for &name in IDENTITY_FILES {
+        let guest_path = sandbox_identity_path(name);
+        let present = sandbox.fs_exists(&guest_path).await.map_err(|e| {
+            miette::miette!(
+                "failed to stat {guest_path} in sandbox '{}': {e:#}",
+                sandbox.name()
+            )
+        })?;
+        if present {
+            sandbox.fs_remove(&guest_path).await.map_err(|e| {
+                miette::miette!(
+                    "failed to remove {guest_path} from sandbox '{}': {e:#}",
+                    sandbox.name()
+                )
+            })?;
+        }
+        if sandbox.fs_exists(&guest_path).await.map_err(|e| {
+            miette::miette!(
+                "failed to re-stat {guest_path} in sandbox '{}': {e:#}",
+                sandbox.name()
+            )
+        })? {
+            return Err(miette::miette!(
+                "{guest_path} still present in sandbox '{}' after removal; \
+                 refusing to reset host state",
+                sandbox.name()
+            ));
+        }
     }
     Ok(())
 }
@@ -656,11 +656,19 @@ mod tests {
         record_user_name_answer(&conn, 7, 3, 98, 99).await;
         drop(conn);
 
+        // A name no real sandbox can share: the microsandbox catalog is
+        // host-global, and `execute` attaches to whatever it is given —
+        // a fixed `right-unavailable` would let this test boot and strip a
+        // developer's actual agent sandbox.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let plan = RebootstrapPlan {
             agent_name: "unavailable".into(),
             agent_dir: agent_dir.clone(),
             backup_dir: home.path().join("backup"),
-            sandbox_name: "right-unavailable".into(),
+            sandbox_name: format!("right-rebootstrap-absent-{}-{nanos}", std::process::id()),
         };
         let error = execute(&plan).await.unwrap_err();
         assert!(
@@ -695,6 +703,7 @@ mod tests {
 
     // The former `execute_none_mode_full_path` test covered `execute()` end to
     // end without a sandbox. Sandboxless agents are gone: `execute()` now always
-    // requires a reachable sandbox, and the full path is covered by the
-    // sandbox-backed integration test in `tests/rebootstrap_sandbox.rs`.
+    // requires a reachable Agent Sandbox, and the full path is covered by
+    // `ci_msb_execute_against_live_sandbox` in `tests/rebootstrap_sandbox.rs`,
+    // which boots a real microVM and is `#[ignore]`d behind the `ci-msb` marker.
 }

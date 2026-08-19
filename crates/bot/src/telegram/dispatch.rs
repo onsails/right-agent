@@ -88,7 +88,6 @@ pub(crate) async fn setup_telegram(
     agent_dir: PathBuf,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     home: PathBuf,
-    sandbox: Option<crate::sandbox::Sandbox>,
     show_thinking: bool,
     model: Arc<arc_swap::ArcSwap<Option<String>>>,
     shutdown: CancellationToken,
@@ -143,7 +142,6 @@ pub(crate) async fn setup_telegram(
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
         show_thinking,
         model,
-        sandbox,
         hindsight: hindsight_wrapper,
         prefetch_cache,
         upgrade_lock,

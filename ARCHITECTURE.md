@@ -257,7 +257,10 @@ background handoff lifecycle, and the per-session mutex on `--resume`.
 | Generated | `agents/<name>/.claude.json` | Trust, onboarding suppression (read-modify-write) | `MergedRMW` |
 | Generated | `agents/<name>/.mcp.json` | MCP server entries (only "right" — externals managed by Aggregator) | `Regenerated(BotRestart)` |
 | Agent-owned | `agents/<name>/TOOLS.md` | Agent-owned (created empty on init, then agent-edited) | `AgentOwned` |
-| Per-agent | `agents/<name>/policy.yaml` | OpenShell sandbox policy (generated on agent init, regenerated on bot startup) | `Regenerated(SandboxRecreate)` |
+
+`policy.yaml` is gone: egress is a typed value on the sandbox spec, applied
+at create time, so there is no generated policy file and no policy-apply
+category.
 
 See [Upgrade & Migration Model](#upgrade--migration-model) for category
 definitions.
@@ -301,8 +304,8 @@ transitions skip pinned rows. The dashboard is the only operator
 pin/unpin surface — do not add CLI pinning.
 
 The prefilter and probe-writer skill index is read from inside the sandbox
-(`/sandbox/.claude/skills/rightx-*`) via gRPC `exec_in_sandbox`; host path
-only for `sandbox: mode: none`. A prefilter skill-index read error returns
+(`/sandbox/.claude/skills/rightx-*`) via a guest exec — the only source;
+there is no host fallback. A prefilter skill-index read error returns
 `Skip`, never an empty index — empty would let the classifier recommend
 creating a skill that already exists.
 
@@ -492,10 +495,12 @@ Every per-agent codegen output belongs to exactly one category:
 | Category | Semantics | Examples |
 |---|---|---|
 | `Regenerated(BotRestart)` | Unconditional overwrite every bot start. Takes effect on next CC invocation. | settings.json, mcp.json, schemas, system-prompt.md |
-| `Regenerated(SandboxPolicyApply)` | Overwrite + `openshell policy set --wait`. Network-only. | policy.yaml (network section) |
-| `Regenerated(SandboxRecreate)` | Overwrite + triggers sandbox migration. Filesystem/landlock and other boot-time-only changes. | policy.yaml (filesystem section) |
 | `MergedRMW` | Read, merge, write. Preserves unknown fields. | .claude.json, agent.yaml (secret injection) |
 | `AgentOwned` | Created by init. Never touched again. | TOOLS.md, IDENTITY.md, SOUL.md, USER.md, MEMORY.md, settings.local.json |
+
+There is no sandbox-policy or sandbox-recreate category: egress and secret
+*structure* are create-time properties of the sandbox spec, so changing them
+in `agent.yaml` needs a sandbox recreate, not a regenerated file.
 
 Cross-agent outputs (process-compose.yaml, agent-tokens.json,
 cloudflared config) are all `Regenerated(BotRestart)` — reread on
@@ -549,27 +554,27 @@ identity-mirror semantics, and non-goals.
 
 ## Integration Tests Using Live Sandboxes
 
-Any test that needs a live OpenShell sandbox MUST create it via
-`right_openshell::test_support::TestSandbox::create("<test-name>")`
-(unique sandbox name, automatic cleanup under panic, gRPC-only command
-execution). Consumers outside `right-agent`'s own unit tests depend on
-the `test-support` feature.
+A live Agent Sandbox is a booted microVM, so every test that needs one is
+`#[ignore = "ci-msb: ..."]` with a `ci_msb_` name (the marker/prefix contract
+is enforced by `crates/right/tests/ci_ignored_contract.rs`). Run them with
+`cargo nextest run -p <crate> --run-ignored all`.
+
+Helpers live in `crates/right-sandbox/tests/common/mod.rs`:
+`ensure_runtime_installed()` behind a cross-process install lock,
+`acquire_vm_slot()` for the host-global concurrent-microVM cap
+(`RT_MSB_MAX_CONCURRENT_VMS`), and `SandboxGuard`, which owns a unique name
+and deletes the sandbox on drop — including during a panicking unwind.
 
 Rules:
 
-- Never hardcode sandbox names.
-- Never invoke the `openshell` CLI from tests. Use the `TestSandbox`
-  helper or the gRPC helpers in `right_openshell::openshell`.
-- Never add `#[ignore]` to sandbox tests. Dev machines have OpenShell.
-- `TestSandbox` holds a `SandboxTestSlot` for its lifetime. Direct tests
-  that bypass `TestSandbox` and call `spawn_sandbox` must acquire
-  `acquire_sandbox_slot()` themselves.
-- CI may set `RIGHT_MAX_CONCURRENT_SANDBOX_TESTS` low to throttle only
-  live sandbox creation while preserving normal Cargo test parallelism.
-  Use at least `2` in jobs with a process-lifetime shared sandbox.
-- CI may raise `RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS` and
-  `RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS` for cold OpenShell runners;
-  local defaults stay short (`120s` READY, `60s` SSH).
+- Never hardcode a sandbox name, in a live test *or* a unit test. The
+  microsandbox catalog is host-global with no `--home` isolation, so a fixed
+  name is a unit test that can delete a developer's real microVM. Derive one
+  per run from the PID and clock.
+- Never leak a microVM: acquire it through `SandboxGuard`, or destroy it in a
+  drop guard of your own.
+- Acquire a VM slot before booting; probe VMs are GiB-scale and several
+  worktrees may run probes at once.
 
 ## Security Model
 
@@ -734,16 +739,11 @@ lives in the backend; the UI optimizes for user clarity.
   Every resolved private/internal IP must be allowed. Do not hardcode
   host gateway IPs and do not permanently allow broad private/ULA ranges
   for Right MCP.
-- **Right MCP policy lifecycle**: codegen writes a bootstrap unresolved
-  Right MCP endpoint; runtime resolves `host.openshell.internal` inside
-  the sandbox, hot-applies all unique IPs as `/32`/`/128` before any
-  Claude invocation, and repeats on bot startup so backup/restore and
-  host migration self-heal stale IPs. See `docs/architecture/sandbox.md`
-  for the resolution sequence. `openshell forward` is not the Right MCP
-  route.
-- **Host MCP bind address**: the host-side Right MCP aggregator must
-  bind `0.0.0.0` for sandbox access. OpenShell always blocks
-  loopback/link-local/unspecified destinations.
+- **Host MCP bind address**: the host-side Right MCP aggregator binds
+  `127.0.0.1`, not `0.0.0.0`. The guest reaches it through the
+  `host.microsandbox.internal` alias, which resolves to a host loopback
+  address, so binding every interface would expose the aggregator to the
+  local network for no benefit.
 - **Sandbox user-local executables**: `/sandbox/.local/bin` is the only
   platform-supported install target (sourced via `/sandbox/.right/env.sh`
   from `/sandbox/.bashrc` and before sandboxed `claude -p`). npm uses

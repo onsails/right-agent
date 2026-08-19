@@ -827,5 +827,4 @@ percent % and backslash \\ and carriage\r and tab\t done\n";
         );
         assert!(output.stdout.is_empty());
     }
-
 }

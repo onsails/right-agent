@@ -1,11 +1,11 @@
 use std::time::Duration;
 
+use crate::sandbox::{Sandbox, exec_argv};
 use right_agent::doctor::{CheckStatus, DoctorCheck};
 use right_dashboard::api_types::{
     DoctorCheckResponse, DoctorResponse, SandboxDiskStats, SandboxMemoryStats, SandboxProcess,
     SandboxStatsResponse,
 };
-use crate::sandbox::{Sandbox, exec_argv};
 
 const SANDBOX_PROCESS_LIMIT: usize = 50;
 const SANDBOX_COMMAND_LIMIT_CHARS: usize = 160;
@@ -94,16 +94,16 @@ async fn read_sandbox_stats(
         limit.as_str(),
     ];
     let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
-    let (stdout, exit_code) = match tokio::time::timeout(timeout, exec_argv(sandbox, &command)).await
-    {
-        Ok(result) => result?,
-        Err(_) => {
-            return Err(miette::miette!(
-                "sandbox probe timed out after {}s",
-                super::DASHBOARD_SANDBOX_TIMEOUT_SECS
-            ));
-        }
-    };
+    let (stdout, exit_code) =
+        match tokio::time::timeout(timeout, exec_argv(sandbox, &command)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(miette::miette!(
+                    "sandbox probe timed out after {}s",
+                    super::DASHBOARD_SANDBOX_TIMEOUT_SECS
+                ));
+            }
+        };
     if exit_code != 0 {
         return Err(miette::miette!(
             "sandbox stats probe exited with code {exit_code}"

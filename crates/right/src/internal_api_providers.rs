@@ -102,9 +102,7 @@ fn store_err(err: StoreError) -> ProviderApiError {
         StoreError::NotFound { name } => ProviderApiError::NotFound { name },
         StoreError::NameCollision { name } => ProviderApiError::NameCollision { name },
         StoreError::EnvVarCollision { env_var } => ProviderApiError::EnvVarCollision { env_var },
-        StoreError::InvalidName { name, reason } => {
-            ProviderApiError::InvalidName { name, reason }
-        }
+        StoreError::InvalidName { name, reason } => ProviderApiError::InvalidName { name, reason },
         StoreError::InvalidEnvVar { env_var } => ProviderApiError::InvalidEnvVar { env_var },
         StoreError::UnknownBuiltinSlug { slug } => ProviderApiError::UnknownBuiltinSlug {
             name: String::new(),
@@ -179,13 +177,14 @@ fn record_view_type(record: &ProviderRecord) -> String {
 
 /// The `GenericProvider` block of a record, for views and yaml entries.
 fn record_generic(record: &ProviderRecord) -> Option<right_agent_config::GenericProvider> {
-    record.kind.generic().map(|spec| {
-        right_agent_config::GenericProvider {
+    record
+        .kind
+        .generic()
+        .map(|spec| right_agent_config::GenericProvider {
             env_var: spec.env_var.clone(),
             upstream_hosts: spec.upstream_hosts.clone(),
             upstream_path_prefix: spec.upstream_path_prefix.clone(),
-        }
-    })
+        })
 }
 
 /// The only precondition left on a provider operation: the agent exists and
@@ -294,9 +293,7 @@ fn record_yaml_entry(record: &ProviderRecord) -> right_agent_config::ProviderEnt
     right_agent_config::ProviderEntry {
         name: record.name.clone(),
         type_: match &record.kind {
-            ProviderKind::Builtin(slug) => {
-                right_agent_config::ProviderType::BuiltIn(slug.clone())
-            }
+            ProviderKind::Builtin(slug) => right_agent_config::ProviderType::BuiltIn(slug.clone()),
             ProviderKind::Generic(_) => right_agent_config::ProviderType::Generic,
         },
         label: record_label(record),
@@ -327,7 +324,6 @@ pub(crate) async fn handle_provider_list(
     let views = records.iter().map(record_view).collect();
     Ok(axum::Json(views))
 }
-
 
 // ── /provider-create ─────────────────────────────────────────────────────────
 
@@ -457,7 +453,11 @@ pub(crate) async fn handle_provider_rotate(
     // (resolve + reject_if_borrowed) inside `rotate`.
     state
         .providers
-        .rotate(&req.agent, &req.name, Credential::from(req.credential.clone()))
+        .rotate(
+            &req.agent,
+            &req.name,
+            Credential::from(req.credential.clone()),
+        )
         .await
         .map_err(store_err)?;
 
@@ -591,7 +591,6 @@ pub(crate) async fn handle_provider_config_update(
     Ok(axum::Json(record_view(&updated)))
 }
 
-
 // ── Provider sharing (borrow references) ────────────────────────────────────
 
 #[derive(Debug, serde::Deserialize)]
@@ -694,8 +693,7 @@ pub(crate) async fn handle_provider_unshare(
         .unshare(&req.borrower_agent, &req.provider)
         .await
         .map_err(store_err)?;
-    if let Err(e) =
-        remove_provider_from_yaml(&state.agents_dir, &req.borrower_agent, &req.provider)
+    if let Err(e) = remove_provider_from_yaml(&state.agents_dir, &req.borrower_agent, &req.provider)
     {
         // Compensate: re-attach the borrow so the store never drops a
         // reference the yaml still declares (mirrors the share handler's
@@ -786,7 +784,6 @@ pub(crate) async fn handle_provider_types() -> axum::Json<Vec<ProviderProfileVie
         .collect();
     axum::Json(views)
 }
-
 
 // ── /provider-peers discovery ────────────────────────────────────────────────
 
@@ -944,11 +941,15 @@ pub(crate) async fn handle_provider_peers(
     axum::Json(req): axum::Json<ProviderPeersReq>,
 ) -> Result<axum::Json<Vec<ProviderPeer>>, ProviderApiError> {
     require_trusted(&state.agents_dir, &req.for_agent, req.actor_user_id)?;
-    build_peers(&state.providers, &state.agents_dir, req.actor_user_id, &req.for_agent)
-        .await
-        .map(axum::Json)
+    build_peers(
+        &state.providers,
+        &state.agents_dir,
+        req.actor_user_id,
+        &req.for_agent,
+    )
+    .await
+    .map(axum::Json)
 }
-
 
 // ── agent.yaml writers (write_merged_rmw) ────────────────────────────────────
 
@@ -1231,7 +1232,6 @@ fn remove_provider_entry(original: &str, name: &str) -> String {
     out.push_str(&original[end_byte..]);
     out
 }
-
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 

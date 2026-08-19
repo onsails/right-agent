@@ -122,7 +122,6 @@ where
         .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
 }
 
-
 /// Per-agent codegen outputs. Source of truth for guard tests.
 ///
 /// Every file produced by [`crate::run_single_agent_codegen`] MUST

@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::agent::types::{
-    LearningConfig, MemoryProvider, NetworkPolicy, RecallBudget, SttConfig,
-};
+use crate::agent::types::{LearningConfig, MemoryProvider, NetworkPolicy, RecallBudget, SttConfig};
 
 /// Default recall budget used when the user doesn't override it.
 pub const DEFAULT_RECALL_BUDGET: RecallBudget = RecallBudget::Mid;

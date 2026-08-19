@@ -470,4 +470,3 @@ fn right_mcp_server_process_included_when_token_map_provided() {
         "bot must depend on mcp server"
     );
 }
-

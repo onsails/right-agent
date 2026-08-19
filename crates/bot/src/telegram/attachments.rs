@@ -770,7 +770,6 @@ pub(crate) async fn download_attachments(
     let tmp_dir = agent_dir.join("tmp/inbox");
     tokio::fs::create_dir_all(&tmp_dir).await?;
 
-
     let mut resolved = Vec::with_capacity(attachments.len());
     let mut markers = Vec::new();
 
@@ -1533,15 +1532,23 @@ async fn cleanup_host_paths(paths: &[std::path::PathBuf]) {
 }
 
 /// Spawn a background task that periodically cleans up old attachment files.
+///
+/// The sandbox is resolved per sweep: this task outlives individual handles,
+/// which the supervisor replaces on every recovery. A sweep with no sandbox
+/// published is skipped — the guest side has nothing reachable to prune.
 pub fn spawn_cleanup_task(
     agent_dir: std::path::PathBuf,
-    sandbox: crate::sandbox::Sandbox,
+    sandbox_runtime: std::sync::Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     retention_days: u32,
 ) {
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(CLEANUP_INTERVAL_SECS);
         loop {
             tokio::time::sleep(interval).await;
+            let Some(sandbox) = sandbox_runtime.current_sandbox() else {
+                tracing::debug!("skipping attachment cleanup — sandbox unavailable");
+                continue;
+            };
             if let Err(e) = run_cleanup(&agent_dir, &sandbox, retention_days).await {
                 tracing::warn!("attachment cleanup failed: {e:#}");
             }

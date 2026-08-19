@@ -62,9 +62,6 @@ pub struct AgentSettings {
     /// Lock-free swap cell — `/model` callback and `config_watcher` (model-only diff)
     /// store new values; CC invocations load on every call.
     pub model: std::sync::Arc<arc_swap::ArcSwap<Option<String>>>,
-    /// Live Agent Sandbox handle. `None` once the backend has degraded — no
-    /// turn runs without it (see `guard_no_sandboxed_host_exec`).
-    pub sandbox: Option<crate::sandbox::Sandbox>,
     /// Hindsight memory client (None when using file-based memory).
     pub hindsight: Option<std::sync::Arc<right_memory::ResilientHindsight>>,
     /// Prefetch cache for Hindsight recall results.
@@ -84,8 +81,9 @@ pub struct AgentSettings {
     pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
     /// Process shutdown token used to cancel detached user-turn repair work.
     pub(crate) shutdown: tokio_util::sync::CancellationToken,
-    /// Shared sandbox-backend health. Read before every sandboxed turn by the
-    /// pre-invocation health gate (Task 9) to fail-closed when Unavailable.
+    /// Shared sandbox-backend state. Read before every sandboxed turn by the
+    /// pre-invocation health gate (Task 9) to fail-closed when Unavailable,
+    /// and to resolve the live sandbox handle for the turn.
     pub sandbox_runtime: std::sync::Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
 }
 
@@ -333,7 +331,9 @@ pub(crate) async fn handle_message(
                     bot: ctx.bot.clone(),
                     agent_db_dir: ctx.agent_dir.0.clone(),
                     debug: Arc::clone(&settings.debug),
-                    sandbox: settings.sandbox.clone(),
+                    // Resolved once per turn from the runtime handle: the
+                    // supervisor publishes a new handle after every recovery.
+                    sandbox: settings.sandbox_runtime.current_sandbox(),
                     auth_watcher_active: Arc::clone(&ctx.intercept_slots.auth_watcher),
                     auth_code_tx: Arc::clone(&ctx.intercept_slots.auth_code),
                     show_thinking: settings.show_thinking,

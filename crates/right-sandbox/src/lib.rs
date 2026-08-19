@@ -10,12 +10,15 @@
 //! - [`ensure_runtime_installed`] + [`diagnose_host`] — bot startup preflight.
 //! - [`sandbox_name`]/[`fit_sandbox_name`] — deterministic agent → sandbox
 //!   naming within the SDK's 128-byte name space.
+//! - [`agent_sandbox_spec`] — the one create-time spec every Right agent's
+//!   sandbox is built from, shared by the bot and the CLI.
 //! - [`SandboxSpec`] — everything a create needs, with Right's defaults.
 //! - [`SandboxHandle::create_or_attach`]/[`SandboxHandle::attach`] — the
 //!   unified handle replacing `resolved_sandbox` + `ssh_config_path`.
 //! - [`SandboxError`]/[`SandboxCause`] — the error taxonomy the supervisor
 //!   and Telegram UX match on.
 
+mod agent;
 mod egress;
 mod error;
 mod exec;
@@ -28,6 +31,7 @@ mod runtime;
 mod secrets;
 mod spec;
 
+pub use agent::{DEFAULT_SANDBOX_IMAGE, GUEST_HOME, GUEST_USER, agent_sandbox_spec, egress_for};
 pub use egress::Egress;
 pub use error::{SandboxCause, SandboxDiagnosis, SandboxError, SdkError};
 pub use exec::{
@@ -36,7 +40,7 @@ pub use exec::{
 };
 pub use fs::{FsEntryInfo, FsEntryKind};
 pub use handle::{DEFAULT_READY_TIMEOUT, SandboxHandle, SandboxHealthReport};
-pub use names::{MAX_SANDBOX_NAME_BYTES, fit_sandbox_name, sandbox_name};
+pub use names::{MAX_SANDBOX_NAME_BYTES, fit_sandbox_name, resolve_sandbox_name, sandbox_name};
 pub use phase::SandboxPhase;
 pub use resources::{DEFAULT_CPUS, DEFAULT_MEMORY_MIB, DEFAULT_WRITABLE_LAYER_MIB, Resources};
 pub use runtime::{diagnose_host, ensure_runtime_installed};

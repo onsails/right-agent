@@ -4,7 +4,12 @@ use super::*;
 /// slug, env var, display name, and rendered category, in order. Any drift
 /// here is a dashboard-visible change to `/provider-types`.
 const EXPECTED: &[(&str, &str, &str, &str)] = &[
-    ("anthropic", "ANTHROPIC_API_KEY", "Anthropic API", "inference"),
+    (
+        "anthropic",
+        "ANTHROPIC_API_KEY",
+        "Anthropic API",
+        "inference",
+    ),
     ("openai", "OPENAI_API_KEY", "OpenAI", "inference"),
     ("nvidia", "NVIDIA_API_KEY", "NVIDIA", "inference"),
     ("codex", "OPENAI_API_KEY", "Codex", "agent"),

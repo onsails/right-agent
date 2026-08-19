@@ -146,7 +146,10 @@ async fn a_credential_less_record_reports_needs_value() -> Result<()> {
 #[tokio::test]
 async fn rotate_and_remove_report_not_found_for_an_unknown_record() -> Result<()> {
     let (_home, store) = store().await?;
-    let err = store.rotate("agent-a", "fal-a1b2c3", cred("v")).await.unwrap_err();
+    let err = store
+        .rotate("agent-a", "fal-a1b2c3", cred("v"))
+        .await
+        .unwrap_err();
     assert!(
         matches!(&err, StoreError::NotFound { name } if name == "fal-a1b2c3"),
         "got {err:?}"
@@ -159,7 +162,10 @@ async fn rotate_and_remove_report_not_found_for_an_unknown_record() -> Result<()
 async fn update_generic_is_owner_only_generic_only_and_env_var_stable() -> Result<()> {
     let (_home, store) = store().await?;
     store
-        .create(generic("agent-a", "generic-a1b2c3", "EXAMPLE_KEY"), cred("v"))
+        .create(
+            generic("agent-a", "generic-a1b2c3", "EXAMPLE_KEY"),
+            cred("v"),
+        )
         .await?;
     store
         .create(builtin("agent-a", "fal-d4e5f6"), cred("v"))
@@ -221,7 +227,10 @@ async fn update_generic_is_owner_only_generic_only_and_env_var_stable() -> Resul
         .await?;
     let record = store.get("agent-a", "generic-a1b2c3").await?;
     let spec = record.kind.generic().expect("generic record");
-    assert_eq!(spec.upstream_hosts, vec!["api.example.com", "cdn.example.com"]);
+    assert_eq!(
+        spec.upstream_hosts,
+        vec!["api.example.com", "cdn.example.com"]
+    );
     assert_eq!(spec.upstream_path_prefix, None);
     Ok(())
 }
@@ -240,7 +249,10 @@ async fn share_creates_a_read_only_borrowed_reference() -> Result<()> {
     assert_eq!(borrowed.env_var, "FAL_KEY");
 
     for err in [
-        store.rotate("right", "fal-a1b2c3", cred("v2")).await.unwrap_err(),
+        store
+            .rotate("right", "fal-a1b2c3", cred("v2"))
+            .await
+            .unwrap_err(),
         store.remove("right", "fal-a1b2c3").await.unwrap_err(),
     ] {
         assert!(
@@ -275,12 +287,24 @@ async fn share_rejects_self_and_duplicate_destinations() -> Result<()> {
         .create(builtin("agent-a", "fal-a1b2c3"), cred("v"))
         .await?;
 
-    let err = store.share("agent-a", "fal-a1b2c3", "agent-a").await.unwrap_err();
-    assert!(matches!(err, StoreError::ShareConflict { .. }), "got {err:?}");
+    let err = store
+        .share("agent-a", "fal-a1b2c3", "agent-a")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, StoreError::ShareConflict { .. }),
+        "got {err:?}"
+    );
 
     store.share("agent-a", "fal-a1b2c3", "right").await?;
-    let err = store.share("agent-a", "fal-a1b2c3", "right").await.unwrap_err();
-    assert!(matches!(err, StoreError::ShareConflict { .. }), "got {err:?}");
+    let err = store
+        .share("agent-a", "fal-a1b2c3", "right")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, StoreError::ShareConflict { .. }),
+        "got {err:?}"
+    );
     Ok(())
 }
 
@@ -294,7 +318,11 @@ async fn unshare_drops_the_reference_and_never_the_record() -> Result<()> {
 
     store.unshare("right", "fal-a1b2c3").await?;
     assert!(store.list("right").await?.is_empty());
-    assert_eq!(store.list("agent-a").await?.len(), 1, "owner keeps the record");
+    assert_eq!(
+        store.list("agent-a").await?.len(),
+        1,
+        "owner keeps the record"
+    );
 
     let err = store.unshare("agent-a", "fal-a1b2c3").await.unwrap_err();
     assert!(
@@ -318,10 +346,16 @@ async fn owner_removal_re_homes_to_a_surviving_borrower() -> Result<()> {
 
     assert!(store.list("agent-a").await?.is_empty(), "owner detached");
     let alpha = store.get("alpha", "fal-a1b2c3").await?;
-    assert_eq!(alpha.owner_agent, "alpha", "first survivor becomes the owner");
+    assert_eq!(
+        alpha.owner_agent, "alpha",
+        "first survivor becomes the owner"
+    );
     assert!(alpha.is_owned());
     let beta = store.get("beta", "fal-a1b2c3").await?;
-    assert_eq!(beta.owner_agent, "alpha", "remaining borrower follows the new owner");
+    assert_eq!(
+        beta.owner_agent, "alpha",
+        "remaining borrower follows the new owner"
+    );
     assert_eq!(beta.borrower_agent.as_deref(), Some("beta"));
 
     // The credential survived the re-home: the new owner can bind it.
@@ -402,7 +436,10 @@ async fn source_ref_binding_carries_names_and_hosts_only() -> Result<()> {
 async fn a_borrower_can_bind_the_owner_s_credential() -> Result<()> {
     let (_home, store) = store().await?;
     store
-        .create(generic("agent-a", "generic-b0rr0w", "BORROW_KEY"), cred("shared-value"))
+        .create(
+            generic("agent-a", "generic-b0rr0w", "BORROW_KEY"),
+            cred("shared-value"),
+        )
         .await?;
     store.share("agent-a", "generic-b0rr0w", "right").await?;
 

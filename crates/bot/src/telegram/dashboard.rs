@@ -155,13 +155,10 @@ pub(crate) struct DashboardState {
     /// Deterministic sandbox name for this agent. Always known, even while the
     /// sandbox itself is unavailable.
     pub sandbox_name: String,
-    /// Live sandbox handle, captured at startup. `None` means bring-up did not
-    /// succeed and the dashboard reports the sandbox as unreachable.
-    pub sandbox: Option<crate::sandbox::Sandbox>,
-    /// Live sandbox health. Read by `apply_sandbox_diagnosis` to override the
-    /// sandbox doctor check with the bot's cause-specific diagnosis when the
-    /// sandbox is unavailable. The `sandbox` snapshot above is a separate,
-    /// startup-captured value.
+    /// Live sandbox-backend state, published by the supervisor. The sandbox
+    /// handle itself is read per request via [`DashboardState::sandbox`]: the
+    /// supervisor installs a *new* handle after every recovery, so a snapshot
+    /// taken at startup would keep addressing a deleted VM.
     pub sandbox_runtime: std::sync::Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     pub allowlist: right_agent::agent::allowlist::AllowlistHandle,
     pub foreground: super::StopTokens,
@@ -172,6 +169,16 @@ pub(crate) struct DashboardState {
     pub mcp_oauth_allow_private_urls: bool,
     #[cfg(test)]
     pub doctor_checks: Option<Vec<right_agent::doctor::DoctorCheck>>,
+}
+
+impl DashboardState {
+    /// The sandbox handle published right now, or `None` when the backend is
+    /// unavailable (bring-up failed or a recovery is in flight). Every route
+    /// that touches the guest resolves through here so it never addresses a
+    /// retired handle.
+    pub(crate) fn sandbox(&self) -> Option<crate::sandbox::Sandbox> {
+        self.sandbox_runtime.current_sandbox()
+    }
 }
 
 pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
@@ -608,6 +615,17 @@ async fn handle_skill_detail(
         Err(skills::SkillDetailError::Inventory(
             right_dashboard::skill_inventory::SkillInventoryError::NotFound(_),
         )) => json_error(StatusCode::NOT_FOUND, "not_found", Some("skill not found")),
+        // The sandbox is the only source of truth for a skill package, so an
+        // unreachable one is reported as such rather than as a generic read
+        // failure the UI could mistake for "skill has no content".
+        Err(skills::SkillDetailError::Sandbox(detail)) => {
+            tracing::error!(agent = %state.agent_name, skill = %skill_name, "dashboard skill detail unavailable: {detail}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "skill_failed",
+                Some(detail.as_str()),
+            )
+        }
         Err(error) => {
             tracing::error!(agent = %state.agent_name, skill = %skill_name, "dashboard skill detail query failed: {error:#}");
             json_error(
@@ -662,6 +680,16 @@ async fn handle_pin_skill(
             "skill_not_curator_managed",
             Some("skill is not curator-managed"),
         ),
+        // Never a silent pin: a pin the sandbox could not verify is refused
+        // and reported, not written.
+        Err(skills::PinSkillError::Sandbox(detail)) => {
+            tracing::error!(agent = %state.agent_name, skill = %skill_name, "dashboard skill pin refused: {detail}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "skill_pin_failed",
+                Some(detail.as_str()),
+            )
+        }
         Err(error) => {
             tracing::error!(agent = %state.agent_name, skill = %skill_name, "dashboard skill pin failed: {error:#}");
             json_error(
@@ -823,7 +851,7 @@ async fn handle_health_sandbox(
         return error.into_response();
     }
 
-    Json(health::sandbox_stats_response(&state.agent_name, state.sandbox.as_ref()).await)
+    Json(health::sandbox_stats_response(&state.agent_name, state.sandbox().as_ref()).await)
         .into_response()
 }
 
@@ -992,7 +1020,7 @@ fn foreground_activity(state: &DashboardState) -> Vec<ForegroundActivity> {
 fn overview_sandbox_status(
     state: &DashboardState,
 ) -> right_dashboard::api_types::OverviewSandboxStatus {
-    match state.sandbox.as_ref() {
+    match state.sandbox() {
         Some(sandbox) => right_dashboard::api_types::OverviewSandboxStatus {
             state: "configured".to_string(),
             detail: Some(sandbox.name().to_string()),
@@ -1053,12 +1081,14 @@ mod tests {
             home: agent_dir.clone(),
             agent_dir: agent_dir.clone(),
             sandbox_name: "right-test-agent".to_owned(),
-            sandbox: None,
+            // No sandbox can boot in a unit test, so the fixture models the
+            // one state that is self-consistent without one: the supervisor
+            // published no handle and health says why.
             sandbox_runtime: {
-                let (h, _rx) = crate::sandbox_runtime::SandboxRuntimeHandle::new(
-                    crate::sandbox_runtime::SandboxHealth::Ready,
-                );
-                h
+                let (handle, _rx) = crate::sandbox_runtime::SandboxRuntimeHandle::new(Err(
+                    Arc::new(right_sandbox::SandboxCause::HypervisorUnavailable.diagnose()),
+                ));
+                handle
             },
             allowlist,
             foreground: Arc::new(DashMap::new()),
@@ -2642,28 +2672,14 @@ mod tests {
         }
     }
 
+    /// Learned `rightx-*` packages exist only inside the sandbox, so with no
+    /// sandbox handle the route reports the sandbox as unreachable instead of
+    /// answering from the host mirror — an inventory missing every learned
+    /// skill, labelled valid, is a wrong answer dressed as a valid one.
     #[tokio::test]
-    async fn skills_route_groups_host_skills_when_no_sandbox() {
+    async fn skills_route_reports_sandbox_unreachable_when_there_is_no_sandbox() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let skills_dir = temp.path().join(".claude").join("skills");
-        std::fs::create_dir_all(skills_dir.join("right-cron")).unwrap();
-        std::fs::write(
-            skills_dir.join("right-cron").join("SKILL.md"),
-            "---\nname: right-cron\ndescription: Core cron control.\n---\n# Cron\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(skills_dir.join("rightx-oauth-debugging")).unwrap();
-        std::fs::write(
-            skills_dir.join("rightx-oauth-debugging").join("SKILL.md"),
-            "---\nname: rightx-oauth-debugging\ndescription: Learned OAuth flow.\n---\n# OAuth\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(skills_dir.join("hub-browser")).unwrap();
-        std::fs::write(
-            skills_dir.join("hub-browser").join("SKILL.md"),
-            "---\nname: hub-browser\ndescription: Browser automation.\n---\n# Browser\n",
-        )
-        .unwrap();
+        write_skill(temp.path(), "rightx-oauth-debugging");
         let conn = right_db::open_connection(temp.path(), true)
             .await
             .expect("open migrated db");
@@ -2676,65 +2692,28 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["source"], "host");
-        assert_eq!(body["groups"]["core"][0]["name"], "right-cron");
-        assert_eq!(body["groups"]["core"][0]["state"], serde_json::Value::Null);
-        assert_eq!(body["groups"]["core"][0]["pinned"], false);
-        assert_eq!(
-            body["groups"]["learned"][0]["name"],
-            "rightx-oauth-debugging"
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "skills_failed");
+        assert!(
+            body["detail"]
+                .as_str()
+                .expect("detail is a string")
+                .contains("sandbox_unreachable"),
+            "detail must name the unreachable sandbox: {body}"
         );
-        assert_eq!(body["groups"]["learned"][0]["state"], "active");
-        assert_eq!(body["groups"]["learned"][0]["pinned"], true);
-        assert_eq!(body["groups"]["learned"][0]["created_by"], "curator");
-        assert_eq!(body["groups"]["other"][0]["name"], "hub-browser");
+        assert!(
+            body.get("groups").is_none(),
+            "no host-mirror inventory may be served: {body}"
+        );
     }
 
+    /// A skill's SKILL.md is authoritative only in the guest: with no sandbox
+    /// the detail route reports the unreachable sandbox rather than previewing
+    /// the host copy.
     #[tokio::test]
-    async fn skills_route_uses_neutral_lifecycle_when_db_missing() {
+    async fn skill_detail_route_reports_sandbox_unreachable_when_there_is_no_sandbox() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_skill(temp.path(), "rightx-oauth-debugging");
-
-        let (status, body) = get_json(
-            "/dashboard/alpha/api/v1/knowledge/skills",
-            Some(signed_init_data(42)),
-            temp.path().to_path_buf(),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            body["groups"]["learned"][0]["name"],
-            "rightx-oauth-debugging"
-        );
-        assert_eq!(
-            body["groups"]["learned"][0]["state"],
-            serde_json::Value::Null
-        );
-        assert_eq!(body["groups"]["learned"][0]["pinned"], false);
-        assert_eq!(
-            body["groups"]["learned"][0]["created_by"],
-            serde_json::Value::Null
-        );
-        assert_eq!(body["groups"]["learned"][0]["use_count"], 0);
-        assert_eq!(body["groups"]["learned"][0]["patch_count"], 0);
-    }
-
-    #[tokio::test]
-    async fn skill_detail_route_returns_host_skill_preview() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let skill_dir = temp
-            .path()
-            .join(".claude")
-            .join("skills")
-            .join("rightx-oauth-debugging");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: rightx-oauth-debugging\ndescription: Learned OAuth flow.\n---\n# OAuth\n",
-        )
-        .unwrap();
         let conn = right_db::open_connection(temp.path(), true)
             .await
             .expect("open migrated db");
@@ -2747,42 +2726,47 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["skill"]["name"], "rightx-oauth-debugging");
-        assert_eq!(body["skill"]["group"], "learned");
-        assert_eq!(body["skill"]["state"], "active");
-        assert_eq!(body["skill"]["pinned"], true);
-        assert_eq!(body["skill"]["created_by"], "probe_writer");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "skill_failed");
         assert!(
-            body["content_preview"]
+            body["detail"]
                 .as_str()
-                .unwrap()
-                .contains("# OAuth")
+                .expect("detail is a string")
+                .contains("sandbox_unreachable"),
+            "detail must name the unreachable sandbox: {body}"
+        );
+        assert!(
+            body.get("content_preview").is_none(),
+            "no host-mirror preview may be served: {body}"
         );
     }
 
+    /// Regression for the startup-snapshot bug: the supervisor publishes a new
+    /// `SandboxHandle` after every recovery, so dashboard state must not
+    /// capture one when it is built. Construction reads nothing; each request
+    /// that touches the guest resolves the currently published handle.
     #[tokio::test]
-    async fn skill_detail_uses_neutral_lifecycle_when_table_missing() {
+    async fn dashboard_state_resolves_the_sandbox_per_request_not_at_construction() {
         let temp = tempfile::tempdir().expect("tempdir");
-        write_skill(temp.path(), "rightx-oauth-debugging");
-        let _conn = right_db::open_connection(temp.path(), false)
-            .await
-            .expect("open unmigrated db");
+        let state = test_state(temp.path().to_path_buf());
+        assert_eq!(
+            state.sandbox_runtime.sandbox_reads(),
+            0,
+            "building dashboard state must not snapshot the sandbox"
+        );
 
-        let (status, body) = get_json(
-            "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging",
-            Some(signed_init_data(42)),
-            temp.path().to_path_buf(),
-        )
-        .await;
+        assert!(state.sandbox().is_none());
+        assert!(super::skills::skills_response(&state).await.is_err());
+        assert!(
+            super::identity::identity_response(&state).await.is_ok(),
+            "identity answers with a labelled host mirror rather than an error"
+        );
 
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["skill"]["name"], "rightx-oauth-debugging");
-        assert_eq!(body["skill"]["state"], serde_json::Value::Null);
-        assert_eq!(body["skill"]["pinned"], false);
-        assert_eq!(body["skill"]["created_by"], serde_json::Value::Null);
-        assert_eq!(body["skill"]["use_count"], 0);
-        assert_eq!(body["skill"]["patch_count"], 0);
+        assert_eq!(
+            state.sandbox_runtime.sandbox_reads(),
+            3,
+            "every guest-touching path resolves the live handle when it runs"
+        );
     }
 
     #[tokio::test]
@@ -2832,8 +2816,12 @@ mod tests {
         assert_eq!(body["error"], "unauthorized");
     }
 
+    /// A pin is a state mutation, and the only evidence that the skill package
+    /// still exists lives in the guest. With the sandbox unreachable the route
+    /// refuses (500) and the lifecycle row keeps its previous pinned state —
+    /// never a pin on the strength of a host read.
     #[tokio::test]
-    async fn dashboard_skill_pin_sets_db_pinned_state() {
+    async fn dashboard_skill_pin_refuses_without_sandbox_and_leaves_db_unchanged() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_skill(temp.path(), "rightx-oauth-debugging");
         let conn = right_db::open_connection(temp.path(), true)
@@ -2849,61 +2837,20 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["skill_name"], "rightx-oauth-debugging");
-        assert_eq!(body["pinned"], true);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "skill_pin_failed");
+        assert!(
+            body["detail"]
+                .as_str()
+                .expect("detail is a string")
+                .contains("sandbox_unreachable"),
+            "detail must name the unreachable sandbox: {body}"
+        );
         let row = right_lifecycle::get(&conn, "rightx-oauth-debugging")
             .await
             .unwrap()
             .unwrap();
-        assert!(row.pinned);
-    }
-
-    #[tokio::test]
-    async fn dashboard_skill_pin_clears_db_pinned_state() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        write_skill(temp.path(), "rightx-oauth-debugging");
-        let conn = right_db::open_connection(temp.path(), true)
-            .await
-            .expect("open migrated db");
-        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "probe_writer", true).await;
-
-        let (status, body) = patch_json(
-            "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging/pin",
-            Some(signed_init_data(42)),
-            temp.path().to_path_buf(),
-            json!({ "pinned": false }),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["skill_name"], "rightx-oauth-debugging");
-        assert_eq!(body["pinned"], false);
-        let row = right_lifecycle::get(&conn, "rightx-oauth-debugging")
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!row.pinned);
-    }
-
-    #[tokio::test]
-    async fn dashboard_skill_pin_returns_404_for_unknown_skill_package() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(temp.path(), true)
-            .await
-            .expect("open migrated db");
-        insert_lifecycle_row(&conn, "rightx-missing", "curator", false).await;
-
-        let (status, body) = patch_json(
-            "/dashboard/alpha/api/v1/knowledge/skills/rightx-missing/pin",
-            Some(signed_init_data(42)),
-            temp.path().to_path_buf(),
-            json!({ "pinned": true }),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(body["error"], "not_found");
+        assert!(!row.pinned, "pin must not be written without a sandbox");
     }
 
     #[tokio::test]

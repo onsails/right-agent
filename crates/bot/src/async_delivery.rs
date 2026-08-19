@@ -701,7 +701,7 @@ pub(crate) async fn run_delivery_loop(
     bot: crate::telegram::BotType,
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
     idle_ts: Arc<IdleTimestamp>,
-    sandbox: Option<crate::sandbox::Sandbox>,
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: std::sync::Arc<right_mcp::internal_client::InternalClient>,
     shutdown: tokio_util::sync::CancellationToken,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
@@ -728,6 +728,10 @@ pub(crate) async fn run_delivery_loop(
                 return;
             }
         }
+
+        // Resolved per poll: the loop outlives any one sandbox handle, and a
+        // recovery between polls retires the previous one.
+        let sandbox = sandbox_runtime.current_sandbox();
 
         run_delivery_once(
             &mut conn,
@@ -860,7 +864,7 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
     bot: crate::telegram::BotType,
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
     idle_ts: Arc<IdleTimestamp>,
-    sandbox: Option<crate::sandbox::Sandbox>,
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: Arc<right_mcp::internal_client::InternalClient>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     session_locks: crate::telegram::SessionLocks,
@@ -880,6 +884,7 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
             tracing::warn!("async delivery shutdown flush timed out");
             return;
         }
+        let sandbox = sandbox_runtime.current_sandbox();
         let delivered = run_delivery_once(
             &mut conn,
             &mut state,

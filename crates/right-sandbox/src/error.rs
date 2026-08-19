@@ -406,7 +406,9 @@ mod tests {
         let err = SandboxError::Operation {
             name: "right-a".to_owned(),
             operation: "exec",
-            source: Box::new(SdkError(MicrosandboxError::SandboxNotRunning("right-a".to_owned()))),
+            source: Box::new(SdkError(MicrosandboxError::SandboxNotRunning(
+                "right-a".to_owned(),
+            ))),
         };
         assert_eq!(
             err.cause(),
