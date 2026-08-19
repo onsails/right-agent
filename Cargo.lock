@@ -6246,6 +6246,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "right-providers"
+version = "0.4.2"
+dependencies = [
+ "anyhow",
+ "right-db",
+ "right-sandbox",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "right-runtime-state"
 version = "0.4.2"
 dependencies = [

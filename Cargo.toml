@@ -21,6 +21,7 @@ members = [
     "crates/right-openshell",
     "crates/right-sandbox",
     "crates/right-platform-store",
+    "crates/right-providers",
 ]
 resolver = "3"
 
