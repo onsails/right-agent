@@ -15,7 +15,7 @@ document is wrong and is corrected here: ADR-0003's interception-scoping model.
 | # | Assumption | Verdict |
 | --- | --- | --- |
 | 1 | Turn runs under streaming exec with piped stdin, surviving idle timeout | **Verified** |
-| 2 | A bound destination accepts a substituted credential | **Verified** |
+| 2 | A bound destination accepts a substituted credential | **Verified** against a controlled HTTPS fixture; real-provider acceptance and the HTTP/2 path are unexercised (see below) |
 | 3 | Claude traffic works with interception scoped away and no certificate configuration | **Verified**, with a corrected scoping model |
 | 4 | A source-reference secret rotates live | **Verified** |
 | 5 | Guest reaches a loopback-bound host service through the host alias | **Verified** |
@@ -41,6 +41,16 @@ nowhere in a full environment dump. The bound destination received the real
 value in an `Authorization` header. Toward an unbound destination the request
 was blocked, the destination received neither the value nor the placeholder,
 and the sandbox stayed running.
+
+Scope of this verdict: the bound destination was a controlled HTTPS fixture,
+not a real Provider API, and the probe did not record the negotiated HTTP
+version. The substitution mechanism — placeholder in the guest, real value at
+the bound destination, block-toward-unbound — is proven. Two parts of the
+original assumption remain unexercised: a real Provider accepting the
+credential, and the HTTP/2 fallback path (the interceptor configures no ALPN,
+so an h2-capable guest is expected to fall back to HTTP/1.1 — verified from
+source, not end-to-end). A real-provider substitution check is staged for
+stage 2/3.
 
 ### 3 — Claude traffic and interception scope
 

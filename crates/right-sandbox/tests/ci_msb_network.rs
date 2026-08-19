@@ -472,7 +472,7 @@ async fn ci_msb_host_group_denied_by_default() -> Result<()> {
     guard.destroy().await
 }
 
-/// Assumption 3, MCP-aggregator path: with `[Public, Host]` the guest reaches
+/// Assumption 5, MCP-aggregator path: with `[Public, Host]` the guest reaches
 /// a host service bound to loopback through the host alias.
 #[tokio::test]
 #[ignore = "ci-msb: boots a live microVM"]
@@ -752,12 +752,14 @@ async fn ci_msb_secret_blocked_toward_unbound_destination() -> Result<()> {
     );
 
     let hits = secret_log_hits(&sandbox, guard.name()).await?;
+    // Assert canary-free BEFORE printing: if the runtime ever logged a real
+    // credential, we must fail before echoing it into the test log.
     for hit in &hits {
-        println!("[secret-log] {} :: {}", hit.origin, hit.line);
         assert!(
             !hit.line.contains(CANARY_SECRET),
             "log lines must not carry the credential: {hit:?}"
         );
+        println!("[secret-log] {} :: {}", hit.origin, hit.line);
     }
     assert!(
         !hits.is_empty(),
@@ -827,7 +829,9 @@ async fn ci_msb_source_ref_secret_rotates_live() -> Result<()> {
     // The SDK resolves `SecretSource::Env` in this process, at create and at
     // apply, so rotating the credential means rewriting this variable. Test
     // binaries are single sandbox processes under nextest, so nothing else
-    // reads it concurrently.
+    // reads it concurrently. This is the only mechanism upstream exposes for
+    // source-ref rotation, so the no-set_var-in-tests rule is bent here;
+    // cleanup removes the variable before the probe returns.
     unsafe { std::env::set_var(ROTATION_HOST_VAR, &first) };
 
     let mut fixture = HostServer::start_tls().await?;
@@ -922,6 +926,10 @@ async fn ci_msb_source_ref_secret_rotates_live() -> Result<()> {
         );
     }
 
+    // Leave no residue for a later test process that reuses this binary under
+    // plain `cargo test`.
+    unsafe { std::env::remove_var(ROTATION_HOST_VAR) };
+
     guard.destroy().await
 }
 
@@ -932,7 +940,7 @@ async fn ci_msb_source_ref_secret_rotates_live() -> Result<()> {
 /// Anthropic API host Claude Code talks to.
 const ANTHROPIC_HOST: &str = "api.anthropic.com";
 
-/// Assumption 4: with interception on, bypassed hosts keep the real upstream
+/// Assumption 3: with interception on, bypassed hosts keep the real upstream
 /// certificate, and every host that is *not* bypassed is intercepted.
 ///
 /// The second half is the load-bearing one: `TlsConfig.bypass` is a deny-list,

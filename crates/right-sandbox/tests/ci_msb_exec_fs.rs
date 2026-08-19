@@ -51,7 +51,10 @@ fn describe_dir(dir: &PathBuf) -> Result<Vec<String>> {
 #[tokio::test]
 #[ignore = "ci-msb: downloads and verifies the pinned msb runtime"]
 async fn ci_msb_runtime_install_is_idempotent() -> Result<()> {
-    let _lock = common::acquire_file_lock("rt-msb-runtime-install-probe");
+    // Must share the key with common::ensure_runtime_installed so a concurrent
+    // probe process cannot install between the two calls and flake the mtime
+    // no-op assertions below.
+    let _lock = common::acquire_file_lock("rt-msb-runtime-install");
 
     let installed_before = setup::is_installed();
 

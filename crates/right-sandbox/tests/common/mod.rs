@@ -118,12 +118,19 @@ pub const DEFAULT_MAX_CONCURRENT_VMS: u8 = 2;
 const VM_SLOT_LIMIT_ENV: &str = "RT_MSB_MAX_CONCURRENT_VMS";
 
 /// Host-global cap on concurrently booted probe microVMs.
+///
+/// Defaults to [`DEFAULT_MAX_CONCURRENT_VMS`] only when the override is unset.
+/// A set-but-malformed or zero value is a configuration error and panics —
+/// silently ignoring it could over-subscribe host memory.
 pub fn max_concurrent_vms() -> u8 {
-    std::env::var(VM_SLOT_LIMIT_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u8>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_MAX_CONCURRENT_VMS)
+    match std::env::var(VM_SLOT_LIMIT_ENV) {
+        Err(std::env::VarError::NotPresent) => DEFAULT_MAX_CONCURRENT_VMS,
+        Err(e) => panic!("{VM_SLOT_LIMIT_ENV}: {e}"),
+        Ok(raw) => match raw.parse::<u8>() {
+            Ok(n) if n > 0 => n,
+            _ => panic!("{VM_SLOT_LIMIT_ENV}={raw:?} is not a positive u8"),
+        },
+    }
 }
 
 /// Hold one of [`max_concurrent_vms`] host-global microVM slots.
