@@ -65,11 +65,6 @@ pub fn init_agent(
         miette::miette!("Failed to create directory {}: {}", agents_dir.display(), e)
     })?;
 
-    // Create staging directory for OpenShell upload workflow
-    let staging_dir = agents_dir.join("staging");
-    std::fs::create_dir_all(&staging_dir)
-        .map_err(|e| miette::miette!("Failed to create staging dir: {e}"))?;
-
     let files: &[(&str, &str)] = &[
         ("BOOTSTRAP.md", DEFAULT_BOOTSTRAP),
         ("TOOLS.md", DEFAULT_TOOLS),
@@ -118,8 +113,8 @@ pub fn init_agent(
         yaml.push_str(&format!("\nnetwork_policy: {policy_str}\n"));
 
         // Sandbox config. The name goes through the shared helper so it always
-        // fits the upstream 19-char routable-name cap (OpenShell v0.0.105).
-        let sb_name = right_openshell::openshell::sandbox_name(name);
+        // validates under the microsandbox SDK's sandbox-name rules.
+        let sb_name = right_sandbox::sandbox_name(name);
         yaml.push_str(&format!("\nsandbox:\n  name: {sb_name}\n"));
 
         // Telegram token + chat IDs.
@@ -620,8 +615,8 @@ mod tests {
             "USER.md must not be created by init"
         );
         assert!(
-            agents_dir.join("staging").is_dir(),
-            "staging/ dir should be created"
+            !agents_dir.join("staging").exists(),
+            "staging/ was the OpenShell upload scratch dir and must not be recreated"
         );
         assert!(
             agents_dir.join("TOOLS.md").exists(),
@@ -842,7 +837,7 @@ mod tests {
 
         assert!(
             json.get("sandbox").is_none(),
-            "settings.json should not contain sandbox section — OpenShell is the security layer"
+            "settings.json should not contain sandbox section — the microVM is the security layer"
         );
         assert_eq!(json["skipDangerousModePermissionPrompt"], true);
         assert_eq!(json["autoMemoryEnabled"], true);
@@ -1277,14 +1272,15 @@ mod tests {
     }
 
     #[test]
-    fn init_agent_fits_long_sandbox_name_within_upstream_cap() {
+    fn init_agent_writes_a_sandbox_name_the_sdk_accepts() {
         let dir = tempdir().unwrap();
-        // right-{agent} would be 20 chars — over the upstream 19-char cap.
-        let agent_dir = init_agent(dir.path(), "fourteenchars1", None).unwrap();
+        // Underscores and case are outside the SDK's first-byte/charset rules,
+        // so this name must come back fitted rather than verbatim.
+        let agent_dir = init_agent(dir.path(), "_Fourteen Chars", None).unwrap();
 
         let yaml = std::fs::read_to_string(agent_dir.join("agent.yaml")).unwrap();
-        let expected = right_openshell::openshell::sandbox_name("fourteenchars1");
-        assert!(expected.len() <= right_openshell::openshell::MAX_SANDBOX_NAME_LEN);
+        let expected = right_sandbox::sandbox_name("_Fourteen Chars");
+        assert!(expected.len() <= right_sandbox::MAX_SANDBOX_NAME_BYTES);
         assert!(
             yaml.contains(&format!("name: {expected}")),
             "agent.yaml must contain fitted sandbox.name '{expected}'; got:\n{yaml}"

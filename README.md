@@ -53,6 +53,6 @@ Contributor docs stay in the repo: [ARCHITECTURE.md](ARCHITECTURE.md),
 ## credits
 
 built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
-[NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell), and
+[microsandbox](https://github.com/microsandbox/microsandbox), and
 [process-compose](https://github.com/F1bonacc1/process-compose). licensed under
 Apache-2.0.

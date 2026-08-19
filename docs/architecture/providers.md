@@ -1,16 +1,14 @@
 # Providers
 
-> **Stage 3 rewrite in flight (microsandbox migration).** The internal
-> provider API and dashboard handlers now run on
-> `right_providers::ProviderStore` (`~/.right/providers.db`, SQLite 0600);
-> the OpenShell gateway CRUD, profile-composition confirmation, and
-> `wait_for_provider_composed*` flows described below are deleted from those
-> handlers (supervisor/invocation wiring follows in stage 4). What changed:
+> **Authority note (microsandbox migration).** The internal provider API and
+> dashboard handlers run on `right_providers::ProviderStore`
+> (`~/.right/providers.db`, SQLite 0600). The OpenShell gateway, its CRUD,
+> profile-composition confirmation, and `wait_for_provider_composed*` flows
+> are deleted. What that means:
 >
 > - **Authority.** Records and credentials live in `providers.db`; ownership
 >   is the `owner_agent` column plus `provider_borrows` rows, never
->   `agent.yaml`'s `shared_from` (legacy migration input only; the internal
->   API writers no longer emit it, stage 4 removes the field).
+>   `agent.yaml`'s `shared_from` (legacy migration input only).
 > - **Wire shapes.** `ProviderView.status` is the tri-state
 >   `{kind: ready|needs_value|error}` (error carries `message`); the
 >   `composed: bool|null` field and the `healthy|missing|gateway_error|
@@ -34,254 +32,126 @@
 
 ## Overview
 
-Providers are typed credential bundles stored on the NVIDIA OpenShell
-gateway and attached to sandboxed agents. Each provider has a
-gateway-unique name, a gateway type, a credentials map, and an optional
-non-secret config map. Non-generic providers use explicit profile slugs,
-including upstream slugs such as `anthropic`, `openai`, or `gitlab` and
-Right-managed slugs such as `right-github`; generic providers are
-displayed as `generic` in Right's dashboard and `agent.yaml`, but the
-gateway provider `type` is the Right-authored profile ID
-(`right-provider-*`). Right Agent
-exposes provider management exclusively through the Telegram Mini App
-dashboard route `/providers`; credentials never enter `agent.yaml`,
-backups, or logs on the host.
+Providers are typed credential bundles stored in `~/.right/providers.db` and
+bound into an agent's sandbox as source-reference secrets. Each provider has
+an agent-unique name, a type (a built-in catalog slug such as `anthropic`,
+`openai`, `gitlab`, or the Right-managed `right-github`; or `generic`), a
+credential, and — for generic providers — a declared env var and upstream
+host list. Right Agent exposes provider management exclusively through the
+Telegram Mini App dashboard route `/providers`; credentials never enter
+`agent.yaml`, backups, or logs on the host.
 
-The feature is sandbox-only. `sandbox.mode = none` agents cannot
-receive provider env vars; the bot rejects `/providers` for them.
-
-Generic providers additionally require `network_policy: permissive`.
-Right authors OpenShell provider profiles for generic upstream hosts
-(one L7 endpoint per host) and relies on those profile endpoints being
-composed into the sandbox's outbound policy for placeholder substitution.
-Restrictive mode has not been validated for generic provider-profile
-composition and is rejected up-front.
-`handle_provider_create` and `handle_provider_config_update` reject
-generic operations with `network_policy_forbids_generic` when the agent
-is in restrictive mode. Built-in providers are unaffected — they do not
-mutate `policy.yaml`.
+A provider with no allowed hosts is rejected: its credential could never be
+substituted, so accepting it would promise an injection that cannot happen.
 
 ## Placeholder substitution
 
-At sandbox boot, the OpenShell supervisor calls
-`GetSandboxProviderEnvironment` and injects the result as environment
-variables on the sandbox supervisor process. The values are opaque
-placeholders shaped like `openshell:resolve:env:v<fingerprint>_<NAME>`,
-where `<fingerprint>` is derived from the provider credential inputs.
-Every process spawned inside the sandbox — including `claude -p` over
-gRPC exec and SSH — inherits these env vars at the kernel level. The
-sandbox only ever sees the placeholder, never the raw credential;
-`GetSandboxProviderEnvironment` returns the resolved value but is for the
-trusted host/supervisor, not the sandbox.
+A provider reaches the guest as a `right_sandbox::SecretBinding`, built by
+`ProviderStore::source_ref_binding`. The binding carries *references only*:
 
-Attaching or detaching a provider, and rotating a credential, all
-propagate to a **running** sandbox without a restart: the placeholder set
-(and, on rotation, the `<fingerprint>`) updates for newly-spawned
-processes. Propagation is eventually-consistent, not instantaneous —
-empirically sub-second for an attach and several seconds for a rotation —
-so code/tests that read the env immediately after the gateway call must
-poll, not read once (see `ci_openshell_provider.rs::poll_sandbox_env`).
+- `env_var` — the guest-visible environment variable.
+- `placeholder` — what the guest actually sees in that variable
+  (`$MSB_<ENV_VAR>` by default). Stable across rotation.
+- `source_env_var` — the host environment variable the real value is read
+  from at spawn and at rotation. The store publishes the credential there
+  (`RIGHT_PROVIDER_<NAME>`) and never returns it to the caller.
+- `allowed_hosts` — exact hosts (`api.example.com`) or suffix wildcards
+  (`*.example.com`) permitted to receive the substituted value.
+- `inject_query` — opt-in query-parameter substitution. Headers and
+  basic-auth are on by default; body injection is never enabled.
 
-When the agent makes an HTTPS request through the gateway proxy
-(`HTTPS_PROXY=10.200.0.1:3128`, injected at sandbox boot), the proxy
-substitutes the placeholder with the real credential before forwarding
-upstream. Substitution happens **after TLS termination**, so the request
-must hit a TLS-terminated L7 endpoint (`protocol: rest`, auto-detected —
-do not write the deprecated `tls: terminate`). If the request is instead
-handled by a raw-tunnel endpoint (`tls: skip`), the proxy never
-terminates TLS and never inspects the request, so it forwards the bytes
-**verbatim**: the opaque placeholder string reaches the upstream and the
-API rejects it (typically `401`). The real credential is never exposed —
-only the meaningless `openshell:resolve:env:...` token leaks. (Empirically
-confirmed on a throwaway sandbox: the upstream cert was the real CA, not
-the per-sandbox OpenShell CA, and the placeholder was echoed back
-unchanged.)
+The SDK persists the placeholder and the source reference, so no secret
+material is at rest in the sandbox's durable config and the guest never holds
+a credential. Substitution happens on the intercepted connection: the agent
+writes the auth header exactly as the API documents, using the placeholder
+(for example `Authorization: Key $MSB_FAL_KEY`), and only the placeholder
+token is replaced.
 
-Static-key providers do not carry an auth style or header name in Right's
-generic config. Placeholder substitution is verbatim: the agent writes
-the auth header exactly as the API documents, using the injected env var
-placeholder (for example `Authorization: Key $FAL_KEY`), and OpenShell
-replaces only the placeholder token with the stored secret.
+**TLS interception is a bypass deny-list (ADR-0003).** Declaring any secret
+enables interception for every destination on the intercepted ports *except*
+`right_sandbox::TLS_BYPASS_HOSTS`, which always carries the Anthropic hosts —
+so Claude's own traffic is never intercepted and the guest needs no CA
+configuration. A request to a bypassed host is forwarded verbatim, which
+means the opaque placeholder reaches the upstream and the API rejects it
+(typically `401`). The real credential is never exposed.
 
-**Substitution is keyed by env-var name, not by host.** The proxy
-resolves a placeholder on any TLS-terminated endpoint using the combined
-set of the sandbox's attached-provider credentials — it does **not** check
-that the destination host belongs to the provider that owns the
-credential. So a placeholder for provider A is substituted even if it
-appears in a request to provider B's terminated host (verified live with
-two throwaway providers + fake creds). Raw-tunnel (`tls: skip`) hosts
-never substitute (above), so credentials cannot reach the open internet,
-but cross-provider delivery among an agent's own terminated hosts is
-possible. Do not rely on provider-profile endpoints to confine a
-credential. This is a documented OpenShell limitation (see the
-[providers-v2 docs](https://docs.nvidia.com/openshell/sandboxes/providers-v2)
-— endpoint-scoped credential injection is roadmap, not implemented);
-tracked in onsails/right-agent#92.
+**Substitution is keyed by env-var name, not by the owning provider.** A
+placeholder is resolved on any intercepted destination in the binding's
+allowed-host set; nothing checks that the destination belongs to the provider
+that owns the credential. Do not rely on a provider's declared hosts to
+confine a credential across an agent's own providers. Tracked in
+onsails/right-agent#92.
 
-**Endpoint ordering is load-bearing.** OpenShell evaluates the effective
-`network_policies.outbound.endpoints` in order. In permissive mode the
-hostless `tls: skip` catch-all (ports 443/80, broad `allowed_ips`) would,
-if it appeared before provider-profile L7 endpoints, IP-match and
-raw-tunnel every provider host — stranding the placeholder exactly as
-above. Right's generated `policy.yaml` is intentionally provider-free:
-there is no `# right-providers: insert-above` anchor and no folded
-provider stanza. Ordering now comes from OpenShell's provider-profile
-composition, and Right forces that composition to reload after profile or
-attachment changes by reapplying the base policy with `openshell policy
-set --wait`. That command is only a reload trigger: OpenShell can no-op
-when the policy hash is unchanged, so its return is not the composition
-success signal.
-
-That composition is itself gated by the gateway-global runtime setting
-`providers_v2_enabled`, which fresh OpenShell gateways default to `false`.
-While off, the gateway silently skips merging provider-profile endpoints —
-the placeholder env var is still injected, but the proxy denies CONNECT to
-the upstream because the terminated endpoint never appears in the effective
-policy. Right guarantees the flag through two funnels:
-`right_openshell::providers::reconcile_for_sandbox` for supervisor bring-up
-and hot-reconcile, and the dashboard create/config-update handlers for
-explicit user mutations. Both call
-`right_openshell::providers::ensure_v2_enabled` (a global `UpdateConfig`
-upsert) before attaching or recomposing a provider. The flag persists in
-the gateway's settings store, so a long-lived dev gateway that was enabled
-once keeps working — which is why missed enablement tends to surface only
-on fresh gateways.
-
-`openshell::wait_for_provider_composed` is the success signal after the
-reload. It polls the sandbox's **effective** policy (`get_effective_policy`,
-backed by `GetSandboxConfig` — the policy the in-sandbox supervisor pulls)
-and requires the composed `_provider_<name>` rule to appear. This is
-deliberately *not* the stored policy revision (`get_active_policy` /
-`GetSandboxPolicyStatus`): authored generic provider rules are merged only
-into the effective policy and never appear in the stored revision, so reading
-the stored revision would time out for every generic provider even though
-substitution works. If a future attach path misses the v2 enable step, this
-wait times out and fails loudly instead of silently letting users discover
-upstream 401/CONNECT failures later.
-Generic provider create/config-update and supervisor reconciles use the
-stricter endpoint-aware variant, requiring the composed rule to contain the
-expected upstream host/path so a stale pre-update rule cannot pass.
-For multi-host generic providers, confirmation must cover every declared
-host/path pair before the config is considered active.
+**Secret structure is create-time.** Which bindings exist, and their allowed
+hosts, are fixed when the sandbox is created. Only the *value* rotates on a
+live sandbox, through `SandboxHandle::rotate_secret` (driven by
+`sandbox_supervisor::hot_reconcile_providers`). A provider that is declared
+in `agent.yaml` but has no binding on the live sandbox is reported as needing
+a recreate — never silently skipped, which would leave the agent
+unauthenticated with no signal.
 
 ## State of truth split
 
-Two stores, both authoritative for different things:
+`providers.db` is the single authority. `agent.yaml` carries definitions
+only:
 
-| What                              | Where                                      |
-| --------------------------------- | ------------------------------------------ |
-| Per-agent list of attached names  | `agent.yaml::sandbox::providers: [...]`    |
-| Credential bytes                  | OpenShell gateway (write-once via Right)   |
-| Non-secret provider config        | OpenShell gateway                          |
-| Managed/generic provider profiles | OpenShell gateway                          |
-| Sandbox attachment state          | OpenShell gateway (`Sandbox.providers`)    |
+| What                             | Where                                         |
+| -------------------------------- | --------------------------------------------- |
+| Per-agent list of declared names | `agent.yaml::sandbox::providers: [...]`       |
+| Credential bytes                 | `providers.db` (`providers.credential`, 0600) |
+| Non-secret provider config       | `providers.db`                                |
+| Ownership / borrowing            | `providers.owner_agent` + `provider_borrows`  |
+| Live guest bindings              | the sandbox's create-time secret set          |
 
-`agent.yaml` wins on drift: the reconciler attaches anything in the
-file that isn't currently attached, and detaches any extra
-`<agent>-*` providers attached to the sandbox but missing from the
-file.
+`agent.yaml` wins on drift for *which* providers an agent declares; the store
+wins on everything about a provider. `shared_from` in `agent.yaml` is legacy
+migration input only — the internal API writers never emit it.
 
 ## Reconciler walkthrough
 
-Runs at `right up`, after the sandbox is READY and before the bot
-starts serving messages.
+Runs at bot bring-up, after the sandbox is ready and before the bot starts
+serving messages, and again on a `sandbox.providers`-only edit.
 
-For each entry in `agent.yaml::sandbox::providers`:
+For each entry in `agent.yaml::sandbox::providers`,
+`ProviderStore::source_ref_binding` resolves the record (following a borrow
+row to its true owner), publishes the credential into the spawning process's
+environment under `RIGHT_PROVIDER_<NAME>`, and returns a `SecretBinding`.
 
-1. `GetProvider` against the gateway.
-   - **Ok** → continue.
-   - **NotFound** → mark the entry as `Status::Missing` (a "ghost"
-     provider). Do not auto-heal: Right does not have the credential
-     bytes. The dashboard surfaces these with a *Resolve* action.
-2. If the provider exists with the legacy generic gateway type
-   `type = "generic"`, recreate it with the same gateway name and
-   `type = right_openshell::managed_profiles::generic_provider_profile_id(name)`.
-   OpenShell rejects provider type changes through `UpdateProvider`, so the
-   reconciler uses `GetProvider` → optional detach → `DeleteProvider` →
-   `CreateProvider`, preserving the gateway-held credentials/config returned
-   by `GetProvider` and stripping gateway-owned metadata before create.
-3. After recreating a legacy generic provider, call `Sandbox.provider.attach`
-   so the gateway composes the sandbox under the new provider profile. If the
-   provider was already attached, it is detached before delete and reattached
-   after create.
+- At **create**, the resolved bindings go into `agent_sandbox_spec`, so the
+  sandbox is created with exactly that secret structure.
+- On a **live** sandbox, `hot_reconcile_providers` rotates each binding's
+  value with `SandboxHandle::rotate_secret`. A binding the live sandbox does
+  not have (`RotationTargetMissing`) is collected and reported as needing a
+  recreate — the secret *structure* is create-time and cannot be added to a
+  running microVM.
 
-Then for each provider currently attached to the sandbox whose name
-starts with `<agent>-` but is absent from `agent.yaml`: call
-`Sandbox.provider.detach`.
+A record whose built-in slug no longer resolves fails fast
+(`unknown_builtin_slug`, HTTP 500) on rotation and config-update; the list
+view marks such a row `error` rather than aborting the whole listing.
 
-The reconciler returns a `ReconcileReport { attached, detached, repaired,
-missing, errors }` per agent which is surfaced in logs and to callers.
+## Network-policy interaction
 
-## Policy interaction
+There is no generated policy file and no provider stanzas. An agent's
+network stance is the `network_policy` field in `agent.yaml`, translated to a
+`right_sandbox::Egress` value at sandbox create:
 
-Right no longer folds provider endpoints into `policy.yaml`. Every
-generation callsite renders the provider-free base policy with
-`right_codegen::policy::generate_policy(...)`; the policy tests assert
-that permissive policy output contains no `right-providers` anchor or
-managed provider stanza.
+- `permissive` — open egress.
+- `restrictive` — the domain-suffix allow list in
+  `right_sandbox::agent::RESTRICTIVE_EGRESS_ALLOW`, plus the always-open host
+  destination group.
 
-Built-in providers use OpenShell's existing profiles. Generic providers
-use Right-authored OpenShell profiles whose IDs are derived from the
-gateway provider name (`right-provider-...`). The gateway provider's
-`type` is the profile ID, while the dashboard and `agent.yaml` continue
-to expose the provider as `generic`.
+Egress is create-time only, so a `network_policy` change needs a sandbox
+recreate. Secret substitution is independent of egress: it happens on the
+intercepted connection and is governed by the binding's `allowed_hosts` and
+the TLS bypass list, not by the egress allow list.
 
-**Profile create vs update.** OpenShell `import` is not an upsert — the
-gateway rejects re-importing an existing profile id, and it refuses to
-delete a profile while a sandbox references it (`... is in use by
-sandboxes: ...`). So `managed_profiles::ensure_profiles` is **create-or-skip
-only**: it imports an absent profile, leaves an identical one `Unchanged`,
-and reports `EnsureOutcome::DriftedSkipped(id)` for an existing-but-changed
-profile — it never attempts the doomed re-import. Updating a referenced
-profile goes through `providers::update_referenced_profile(client,
-attachments, desired)`, which detaches every referencing attachment →
-deletes → re-imports the same id → re-attaches. Detach/attach never carry
-the credential, so the provider's gateway-only secret survives an update;
-on import failure the prior profile is restored and attachments
-re-attached (FAIL FAST). The behaviorally-inert credential fields
-(`auth_style`/`header_name`/`query_param`) are excluded from the drift
-fingerprint, so an inert authored-placement change is not flagged as drift.
-
-**Self-heal.** Drift is converged automatically wherever sandbox context
-exists: `right up` (bulk reconcile, `heal_drifted_managed_profiles` — built-in
-+ generic), the supervisor (`heal_drifted_generic_profiles` in startup
-reconcile + `hot_reconcile_providers`), and the dashboard config-update
-handler all route `DriftedSkipped` through `update_referenced_profile`.
-
-On create or upstream-host/config change, Right authors/imports the
-generic provider profile (create) or swaps it via the detach-dance
-(update), and calls `ensure_provider_policy_loaded(sandbox,
-policy_path)`. That helper reapplies the current base `policy.yaml` with
-`openshell policy set --wait`; it does not write provider stanzas. The
-reload is required because OpenShell provider-profile composition is not
-fully loaded by attach/import alone on the observed v0.0.56 behavior, but
-composition is confirmed only by effective-policy polling (`GetSandboxConfig`)
-for the composed provider rule. This scope covers built-in and generic
-providers; both rely on OpenShell profile composition.
-Built-in creates skip profile authoring but still attach, reload
-composition, and wait for their composed provider rule before `agent.yaml`
-is updated.
-
-On remove, Right detaches and deletes the gateway provider, removes the
-`agent.yaml` row, and reloads provider-profile composition with
-`ensure_provider_policy_loaded`. Generic providers additionally run the
-legacy folded-policy strip path; new composition-based policies have no
-tagged stanza, so this is normally a no-op. It exists to clean up
-already-deployed policies that still contain
-`# managed-by: right-providers:<provider-name>` stanzas.
-Folding stays removed; the legacy strip path is cleanup-only.
-
-A `sandbox.providers`-only edit to `agent.yaml` no longer forces a
-restart: `config_watcher` classifies it `ProvidersReload` and signals
-`sandbox_supervisor::hot_reconcile_providers`, which ensures generic
-profiles exist, reconciles gateway attach/detach, and reloads
-provider-profile composition with `openshell policy set --wait`, then
-relies on active-policy composition checks where a provider attach must be
-confirmed. The lib.rs consumer retries the hot path with bounded backoff.
-There is no periodic provider reconcile, so persistent failure can leave
-the live sandbox's attachment/composition state stale until the next bot
-restart or sandbox bring-up — re-edit `sandbox.providers` or restart to
-retry.
+A `sandbox.providers`-only edit to `agent.yaml` does not force a restart:
+`config_watcher` classifies it `ProvidersReload` and signals
+`sandbox_supervisor::hot_reconcile_providers`. The lib.rs consumer retries
+the hot path with bounded backoff. There is no periodic provider reconcile,
+so a persistent failure can leave a credential stale on the live sandbox
+until the next bot restart or sandbox bring-up — re-edit `sandbox.providers`
+or restart to retry.
 
 ## Lifecycle
 
@@ -319,144 +189,87 @@ the reconciler marks the row `Status::Missing`. The dashboard's
 *Resolve* action either re-creates the provider with a fresh
 credential or strips the entry from `agent.yaml`.
 
-**Cascade on `right agent destroy`.** Before tearing down the sandbox,
-Right iterates `agent.yaml::sandbox::providers` and calls
-`DeleteProvider` on each. Failures are logged and skipped so destroy
-proceeds; orphans clean up on the next `right up`.
+**Cascade on `right agent destroy`.** Before tearing down the sandbox, Right
+cascades the agent's provider rows in the store: owned records are removed
+(re-homing to a surviving borrower if one exists), borrowed records are
+unshared. Nothing is left orphaned in `providers.db`.
 
-## Managed profiles (RightClaw-owned)
+## Built-in catalog (RightClaw-owned)
 
-`right_openshell::managed_profiles` owns a small set of gateway provider
-profiles whose names carry the `right-*` ownership prefix and are
-maintained entirely by the platform — never created, edited, or deleted by
-the user.
+`right_providers::catalog` is the compile-time built-in catalog: for each
+slug, the env var the credential binds to, the display name, the category
+rendered by `/provider-types`, the `allowed_hosts` the credential may be
+substituted into, and whether query-parameter injection is enabled.
 
-**`right-github`** is the first managed profile and the single GitHub
-provider users add. It is derived from the `github` built-in profile by
-copying its endpoints and credential set, then setting every endpoint's
-`access` preset to **`full`** (rename id/display to `right-github` /
-"GitHub"). Deriving — rather than authoring — keeps it drift-proof: the
-managed profile is always re-derived from whatever the live `github`
-profile contains at the time `ensure_profiles` runs, so it tracks any
-upstream change to the base endpoints.
+A superseded slug stays in the catalog with `hidden: true` so existing
+records still resolve their env var, but `offered_catalog()` filters it out
+of the dashboard's add-list. Today only `github` is hidden.
 
-**Why `access: full`.** Once credential injection forces TLS termination
-on the GitHub endpoints, `access` and `rules` are method-level and
-mutually exclusive. The `github` built-in ships `access: read-only`, which
-blocks every non-GET/HEAD method — including git push (a POST to
-`git-receive-pack`), rejected with a gateway 403. The `full` preset
-permits all methods, unblocking fetch _and_ push, without hand-authoring
-allow-all `rules` (the two are exclusive — `derive` clears `rules` and
-sets the preset).
+**`right-github`** is the single GitHub provider users add. The retired
+gateway derived it from the `github` profile to open every HTTP method
+(`access: full`), because the read-only base blocked git push — a POST to
+`git-receive-pack`. Substitution has no method dimension now, so the two
+entries differ only in visibility: `right-github` is offered, `github` is
+kept for already-provisioned records.
 
 **One provider, not a toggle.** Providers are a credential-injection
-mechanism, not a read/write boundary — and on the recommended `permissive`
-network policy a read-only distinction is not a real security boundary
-anyway (the catch-all raw tunnel already carries non-provider traffic).
-So there is no read/write toggle: `right-github` is full-access, and the
-read-only built-in `github` is kept in the catalog (so already-provisioned
-`github` providers still resolve their `GITHUB_TOKEN` env var) but hidden
-from the dashboard add-list via `HIDDEN_FROM_DASHBOARD` in
-`internal_api_providers.rs`. Credential confinement (a provider token must
-only reach that provider's hosts) is **not** host-scoped at runtime — an
-accepted OpenShell limitation tracked in `onsails/right-agent#92`; this
-profile does not change that posture.
+mechanism, not a read/write boundary, so there is no read/write toggle.
+Credential confinement (a token reaching only its own provider's hosts) is
+**not** enforced at runtime — substitution is keyed by env-var name, an
+accepted limitation tracked in `onsails/right-agent#92`.
 
-**`ensure_profiles` reconcile.** Called once per gateway at `right up`,
-before the reconciler attaches providers to agent sandboxes.
+**`right-fal`** covers fal.ai's authenticated API hosts only (`fal.run`,
+`queue.fal.run`, `rest.fal.ai`). Output-media CDN and upload targets are
+intentionally outside the binding until their credential and network
+behavior are verified.
 
-- If the base `github` profile does not exist on this gateway,
-  `ensure_profiles` logs a warning and returns `EnsureOutcome::Skipped` for
-  `right-github` — a non-fatal per-profile skip, never an abort of
-  `right up`. Real gRPC errors still propagate (FAIL FAST).
-- The fingerprint used for idempotency includes both `access` and `rules`;
-  a profile still on the old `read-only` preset is detected as drift and
-  re-imported, while an already-correct profile is left untouched.
-- No auto-GC in v1: if `right-github` is present on the gateway but no
-  agent is using it, it stays. Cleanup is a manual operator action.
+**`generic`** is the escape hatch: its env var and hosts come from the
+record's `GenericSpec`, never from the catalog. `claude` is a reserved slug
+(the in-sandbox Claude Code login flow owns it) and is always rejected.
 
-**`right-provider-*`** profiles are per-generic-provider authored
-profiles. The stable profile ID is derived from the gateway provider name
-with a sanitized slug plus hash suffix so two provider names that
-normalize to the same slug still get distinct profile IDs. Each profile
-contains one L7 endpoint per generic upstream host (`host`, port 443,
-`protocol: rest`, optional shared path prefix), credential env-var shape,
-and a `binaries` entry with `path: "**"`. Without the binary wildcard,
-OpenShell does not match sandbox commands to the provider profile and
-CONNECT can be blocked before placeholder substitution. Right imports
-these profiles before create/update and at `right up` for already-configured
-agents.
-
-**`right-fal`** is a built-in managed static-key profile for fal.ai. It uses
-`FAL_KEY` and covers fal's authenticated API hosts only:
-`fal.run`, `queue.fal.run`, and `rest.fal.ai`. Output-media CDN and upload
-targets are intentionally outside the profile until their credential and
-network behavior are verified.
-
-**Provider-profile purity.** Like all built-in providers, `right-github`
-relies on the gateway to contribute its endpoints to the effective sandbox
-policy automatically on attach. `policy.yaml` for each agent is never
-touched. Git LFS is a separate sandbox-tooling concern and is out of scope
-for this subsystem.
-
-## Managed-profile update invariants
-
-`ensure_profiles` is create-or-skip and MUST NOT re-import an existing
-profile id: OpenShell rejects a duplicate import, and a referenced profile
-cannot be deleted. Updating a referenced managed profile therefore goes
-through `providers::update_referenced_profile`
-(detach → delete → import → re-attach, secret-preserving). The inert
-credential fields `auth_style` / `header_name` / `query_param` are excluded
-from the drift fingerprint (they never affect composed policy).
-
-Composition is observable only in the **effective** policy
-(`get_effective_policy` = `GetSandboxConfig`); the stored revision
-(`get_active_policy` = `GetSandboxPolicyStatus`) never carries authored
-generic provider rules. Never infer composition success from
-`policy set --wait`.
+The catalog's slugs, env vars, display names, categories, and order are a
+dashboard contract; `catalog_tests.rs` pins them.
 
 ## Cross-agent provider sharing (multi-attach)
 
 A trusted operator can SHARE one provider account across several host-local
-agents: the *same* gateway record is attached to each agent's sandbox. The
-secret stays in the gateway and is never read back.
+agents: the *same* `providers.db` record is bound into each agent's sandbox.
+The secret stays in the store and is never read back into a second record.
 
 **Why not copy.** The previous design copied the credential by reading it
-back from the gateway (`get_provider_credentials`) and writing it into a new
-record on the destination. OpenShell's `GetProvider` **redacts** stored
-secrets — it returns the literal string `"REDACTED"` — so the copy wrote
-`"REDACTED"` as the destination credential and the proxy substituted it
-verbatim on egress, yielding an upstream `401`. There is no host-side gRPC
-path to read a real credential back, so copy-by-readback was unfixable and is
-retired. Live canary: `crates/right-openshell/tests/ci_openshell_get_provider_redacts.rs`.
-Multi-attach is the supported replacement and is verified end-to-end by
-`ci_openshell_provider_multi_attach.rs` (one record resolves on two
-sandboxes) and `ci_openshell_provider_borrowed_reconcile.rs`.
+back from the gateway, which **redacted** stored secrets — it returned the
+literal string `"REDACTED"` — so the copy wrote `"REDACTED"` as the
+destination credential and the proxy substituted it verbatim on egress,
+yielding an upstream `401`. Copy-by-readback was unfixable and is retired.
+Borrowing is the supported replacement: `provider_borrows` rows point at the
+true owner, and `source_ref_binding` follows the borrow to read the owner's
+credential at bind time.
 
 **Naming & ownership.** A record's NAME no longer encodes its owner. New
 records use an agent-agnostic `{type-slug}-{short-uuid}` id (e.g. `fal-a1b2c3`,
-from `new_record_name`); existing `{agent}-{slug}` records keep their names
-(unrenamable — recreate would need the unreadable credential). `validate_name`
-accepts both forms. Ownership moved into `agent.yaml` as explicit data:
+from `new_record_name`); existing `{agent}-{slug}` records keep their names.
+`validate_name` accepts both forms. Ownership is store data — the
+`owner_agent` column plus a `provider_borrows` row per borrower. Both agents'
+`agent.yaml` simply declare the same record id:
 
 ```yaml
 # owner (agent-a)               # borrower (right) — SAME record id
 sandbox:                        sandbox:
   providers:                      providers:
     - name: fal-a1b2c3              - name: fal-a1b2c3
-                                      shared_from: agent-a   # ⇒ borrowed
 ```
 
-`ProviderEntry::is_owned()` (`shared_from` absent) / `is_borrowed()` drive
-rotation rights, dashboard read-only state, reconcile, and the destroy
-cascade. The borrower's entry copies the owner's non-secret `type`/`label`/
-`generic` so composition still confirms its upstream hosts; only the
-credential stays gateway-side. `serialize_provider_entry` emits `shared_from`;
-serde parses it back.
+`ProviderEntry::is_owned()` / `is_borrowed()` drive dashboard read-only
+state, rotation rights, reconcile, and the destroy cascade. Ownership is
+authoritative in the store (`owner_agent` + `provider_borrows`);
+`agent.yaml`'s `shared_from` is legacy migration input that the internal API
+writers never emit. The borrower's entry carries the non-secret
+`type`/`label`/`generic` so its binding names the right env var and hosts;
+only the credential stays store-side.
 
 **Discovery.** `provider_peers(actor_user_id, for_agent)` enumerates
-host-local `openshell` agents (excluding `for_agent`) where the actor is
-trusted, returning each peer's providers (name, type, env_var, label, generic)
+host-local agents (excluding `for_agent`) where the actor is trusted,
+returning each peer's providers (name, type, env_var, label, generic)
 — never credentials. `build_peers` skips an unreadable peer `agent.yaml` with
 a warning.
 
@@ -493,24 +306,19 @@ removes the borrowed `agent.yaml` entry, then reloads policy. It NEVER
 read-only in the dashboard (no rotate/remove/edit/config; a single "Unshare"
 action + a "Shared from {owner}" label).
 
-**Reconcile.** The supervisor passes ALL declared names (owned + borrowed) to
-`reconcile_for_sandbox`, which detaches anything attached-but-not-declared
-(declared list is the source of truth, not the name prefix). Generic profile
-import/repair (`generic_provider_profiles_for_config`,
-`heal_drifted_generic_profiles`) skips borrowed entries — the owner owns and
-imported that managed profile; the borrower only attaches it.
+**Reconcile.** The supervisor resolves ALL declared names (owned + borrowed)
+into secret bindings; the declared list is the source of truth, not the name
+prefix. A borrowed entry resolves through its borrow row to the owner's
+credential, so the borrower never holds a second copy.
 
-**Lifecycle (refcount).** On `agent destroy`, `plan_destroy_provider_cascade`
-(pure) decides per record: always detach from the deleting agent's sandbox;
-`delete_provider` only when NO other agent's `agent.yaml` references the
-record (refcount 0). If the deleted agent OWNED a record that borrowers still
-reference, ownership is **re-homed** to a surviving borrower
-(`set_provider_shared_from` clears the new owner's `shared_from` and repoints
-the others). The cascade is best-effort; a re-home failure is non-fatal since
-the delete-guard already kept the record alive.
+**Lifecycle (refcount).** On `agent destroy`, the store cascades per record:
+an owned record whose borrowers still reference it is **re-homed** to a
+surviving borrower rather than deleted; an owned record with no borrowers is
+removed; a borrowed record is unshared. The cascade runs inside the store, so
+`providers.db` is never left with an orphaned row.
 
-**Connected rotation.** Rotating the owner's record updates every borrower's
-sandbox on the next gateway resolver refresh (~10s) — no restart.
+**Connected rotation.** Rotating the owner's record rotates the secret on
+every borrower's live sandbox through `hot_reconcile_providers` — no restart.
 
 **Redaction guard (retained).** Even with copy retired,
 `check_source_credential_readable` + the `SourceCredentialUnreadable` (422)
@@ -519,6 +327,6 @@ read-back caller must reject a redacted/empty value before writing it.
 
 Backend: `internal_api_providers::{handle_provider_share, handle_provider_unshare,
 plan_share, plan_unshare, handle_provider_peers, build_peers, require_trusted}`;
-`right_openshell::providers::reconcile_for_sandbox`;
-`right_agent::agent::destroy::plan_destroy_provider_cascade`. Dashboard routes:
+`right_providers::ProviderStore` (borrow rows, destroy cascade,
+`source_ref_binding`). Dashboard routes:
 `/dashboard/{agent}/api/v1/providers/{peers,share,unshare}`.

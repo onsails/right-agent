@@ -40,12 +40,13 @@
 
 - `lib.rs` - host-side shell `PATH` integration for the `right` CLI: idempotent, atomic managed-block edits to the user's shell rc file(s) (zsh/bash/fish). Pure logic (home/shell/exe passed as params); used only by the `right` binary, not re-exported.
 
-### right-openshell
+### right-sandbox
 
-- `openshell.rs` and `openshell_proto` - OpenShell gRPC mTLS client, generated proto types, sandbox lifecycle wrappers, SSH helpers, and policy helpers.
-- `sandbox_exec.rs` - clonable gRPC sandbox execution handle with a shared
-  lazy OpenShell client per handle family.
-- `test_cleanup.rs` and `test_support.rs` - live-sandbox test cleanup and `TestSandbox`.
+- `handle.rs` - the unified `SandboxHandle`: create/attach, readiness, exec, filesystem, secrets, health, lifecycle. The only crate depending on the microsandbox SDK.
+- `agent.rs` - Right's create-time conventions (`agent_sandbox_spec`, guest image/user/home, restrictive-egress allow list).
+- `egress.rs`, `secrets.rs`, `resources.rs`, `spec.rs` - the typed create-time spec: network stance, source-ref provider bindings + TLS bypass list, VM resources.
+- `names.rs` - `sandbox_name`/`fit_sandbox_name`/`resolve_sandbox_name`, total mapping into the SDK's name space.
+- `runtime.rs` - `ensure_runtime_installed` + `diagnose_host` (hypervisor preflight).
 
 ### right-platform-store
 

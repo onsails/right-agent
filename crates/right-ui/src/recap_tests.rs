@@ -14,7 +14,7 @@ fn recap_minimal_mono() {
 #[test]
 fn recap_aligns_multiple_lines() {
     let s = Recap::new("ready")
-        .ok("agent", "right (openshell, restrictive)")
+        .ok("agent", "right (microsandbox, restrictive)")
         .ok("tunnel", "right.example.com")
         .ok("memory", "hindsight")
         .next("right up")

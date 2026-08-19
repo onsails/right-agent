@@ -7,11 +7,14 @@
 //! sandbox and the on-disk `agent.yaml` exactly as they were, so re-running the
 //! command after a partial failure starts from the same clean state.
 //!
-//! Credentials are the one thing that cannot come along: OpenShell's
-//! `GetProvider` returns `"REDACTED"`, so a provider's value is unreadable by
-//! design. The command reports the providers the old sandbox had attached and
-//! points the operator at the dashboard's `/providers` flow — the same path
-//! that adds a provider to any other agent.
+//! Credentials are the one thing that cannot come along: OpenShell redacts a
+//! provider's value on every read path, so it is unreadable by design. The
+//! command reports the providers the old sandbox had attached and points the
+//! operator at the dashboard's `/providers` flow — the same path that adds a
+//! provider to any other agent.
+//!
+//! Everything that touches OpenShell lives in [`legacy_openshell`], a frozen
+//! CLI-only read path that goes away with this command.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +23,8 @@ use serde::Deserialize;
 use right_agent::sandbox_migrate::{
     MIGRATION_EXCLUDES, carried_entries, hand_home_to_guest_user, restore_archive, verify_restore,
 };
+
+mod legacy_openshell;
 
 /// Guest home in *both* runtimes: OpenShell's sandbox root and
 /// [`right_sandbox::GUEST_HOME`] are both `/sandbox`, which is why the archive
@@ -41,15 +46,8 @@ const OPENSHELL_DELETE_TIMEOUT_SECS: u64 = 180;
 /// Poll interval for the OpenShell readiness/deletion waits.
 const OPENSHELL_POLL_INTERVAL_SECS: u64 = 2;
 
-/// Server-side timeout for the `ls` probe that captures the source listing.
-const SOURCE_LISTING_TIMEOUT_SECS: u32 = 30;
-
-/// The OpenShell gRPC client this command drives. The old sandbox is the only
-/// reason `right` still talks to OpenShell at all.
-type OpenShellGrpc =
-    right_openshell::openshell_proto::openshell::v1::open_shell_client::OpenShellClient<
-        tonic::transport::Channel,
-    >;
+/// How long the `ls` probe that captures the source listing may take.
+const SOURCE_LISTING_TIMEOUT_SECS: u64 = 30;
 
 /// Where `agent.yaml` says this agent currently lives.
 #[derive(Debug, PartialEq, Eq)]
@@ -176,8 +174,7 @@ fn plan_migration(agent_name: &str, yaml: &str) -> miette::Result<Option<SourceP
         MigrationSource::AlreadyMigrated => return Ok(None),
         MigrationSource::OpenShell { explicit_name } => explicit_name,
     };
-    let old_name =
-        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_name.as_deref());
+    let old_name = legacy_openshell::resolve_sandbox_name(agent_name, explicit_name.as_deref());
     let new_name = right_sandbox::sandbox_name(agent_name);
     let migrated_yaml = rewrite_agent_yaml_for_migration(yaml, &new_name);
     let migrated_config: right_agent::agent::types::AgentConfig =
@@ -192,54 +189,37 @@ fn plan_migration(agent_name: &str, yaml: &str) -> miette::Result<Option<SourceP
     }))
 }
 
-/// Connect to the OpenShell gateway, or explain what is missing.
-async fn connect_openshell() -> miette::Result<OpenShellGrpc> {
-    use right_openshell::openshell::{OpenShellStatus, connect_grpc, preflight_check};
-
-    let mtls_dir = match preflight_check() {
-        OpenShellStatus::Ready(dir) => dir,
-        OpenShellStatus::NotInstalled => {
-            return Err(miette::miette!(
-                help = "Install OpenShell and start its gateway, then re-run the migration.",
-                "the `openshell` CLI is not installed, so this agent's old sandbox cannot be read"
-            ));
-        }
-        OpenShellStatus::NoGateway(dir) | OpenShellStatus::BrokenGateway(dir) => {
-            return Err(miette::miette!(
-                help = "Start the OpenShell gateway, then re-run the migration.",
-                "no usable OpenShell gateway at {} — this agent's old sandbox cannot be read",
-                dir.display()
-            ));
-        }
-    };
-    connect_grpc(&mtls_dir).await
-}
-
 /// Download the agent's OpenShell home and capture what the source held.
 ///
 /// The archive is written into `~/.right/backups/<agent>/<stamp>/` and kept:
 /// it is the operator's independent copy of the pre-migration home, and it
 /// costs nothing to leave behind.
+///
+/// The listing runs over the same SSH config as the archive stream rather
+/// than through a second transport, so a sandbox that can be listed is one
+/// that can be read.
 async fn archive_openshell_home(
-    client: &mut OpenShellGrpc,
     old_name: &str,
     migration_dir: &Path,
 ) -> miette::Result<(PathBuf, Vec<String>)> {
-    use right_openshell::openshell;
+    // The SSH config is transport scratch, not backup content: keep it in a
+    // temp dir so the migration directory the operator is told to treat as a
+    // backup holds only the archive.
+    let ssh_dir =
+        tempfile::tempdir().map_err(|e| miette::miette!("create ssh working directory: {e:#}"))?;
+    let ssh_config = legacy_openshell::generate_ssh_config(old_name, ssh_dir.path()).await?;
+    let ssh_host = legacy_openshell::ssh_host_for_sandbox(old_name);
 
-    let sandbox_id = openshell::resolve_sandbox_id(client, old_name).await?;
-    let (listing, code) = openshell::exec_in_sandbox(
-        client,
-        &sandbox_id,
+    let listing = legacy_openshell::ssh_exec(
+        &ssh_config,
+        &ssh_host,
         &["ls", "-A", OPENSHELL_GUEST_HOME],
         SOURCE_LISTING_TIMEOUT_SECS,
     )
-    .await?;
-    if code != 0 {
-        return Err(miette::miette!(
-            "listing '{OPENSHELL_GUEST_HOME}' in sandbox '{old_name}' exited with {code}"
-        ));
-    }
+    .await
+    .map_err(|error| {
+        miette::miette!("list '{OPENSHELL_GUEST_HOME}' in sandbox '{old_name}': {error:#}")
+    })?;
     let carried = carried_entries(&listing, MIGRATION_EXCLUDES);
     if carried.is_empty() {
         return Err(miette::miette!(
@@ -247,15 +227,8 @@ async fn archive_openshell_home(
         ));
     }
 
-    // The SSH config and control-master socket are transport scratch, not
-    // backup content: keep them in a temp dir so the migration directory the
-    // operator is told to treat as a backup holds only the archive.
-    let ssh_dir =
-        tempfile::tempdir().map_err(|e| miette::miette!("create ssh working directory: {e:#}"))?;
-    let ssh_config = openshell::generate_ssh_config(old_name, ssh_dir.path()).await?;
-    let ssh_host = openshell::ssh_host_for_sandbox(old_name);
     let archive = migration_dir.join("sandbox.tar.gz");
-    let download = openshell::ssh_tar_download(
+    legacy_openshell::ssh_tar_download(
         &ssh_config,
         &ssh_host,
         OPENSHELL_GUEST_HOME,
@@ -263,14 +236,7 @@ async fn archive_openshell_home(
         MIGRATION_EXCLUDES,
         ARCHIVE_TIMEOUT_SECS,
     )
-    .await;
-    openshell::tear_down_control_master(
-        &ssh_config,
-        &ssh_host,
-        &openshell::control_master_socket_path(ssh_dir.path(), old_name),
-    )
-    .await;
-    download?;
+    .await?;
 
     Ok((archive, carried))
 }
@@ -322,8 +288,8 @@ pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> 
     );
 
     // Preflight: both runtimes must be usable before anything is copied.
-    let mut client = connect_openshell().await?;
-    if !right_openshell::openshell::sandbox_exists(&mut client, &plan.old_name).await? {
+    legacy_openshell::preflight().await?;
+    if !legacy_openshell::sandbox_exists(&plan.old_name).await? {
         return Err(miette::miette!(
             help = "Restore the agent from a backup instead: right agent restore",
             "OpenShell sandbox '{}' does not exist, so agent '{agent_name}' has no home to migrate",
@@ -335,8 +301,7 @@ pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> 
         .map_err(|error| miette::miette!("install the sandbox runtime: {error:#}"))?;
     right_sandbox::diagnose_host()
         .map_err(|error| miette::miette!("this host cannot run microVMs: {error:#}"))?;
-    right_openshell::openshell::wait_for_ready(
-        &mut client,
+    legacy_openshell::wait_for_ready(
         &plan.old_name,
         OPENSHELL_READY_TIMEOUT_SECS,
         OPENSHELL_POLL_INTERVAL_SECS,
@@ -345,7 +310,7 @@ pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> 
 
     // Providers are read before the source is deleted: their values are
     // unreadable by design, so their names are all the operator gets back.
-    let attached_providers = right_openshell::providers::list_attached(&mut client, &plan.old_name)
+    let attached_providers = legacy_openshell::list_attached_providers(&plan.old_name)
         .await
         .map_err(|error| {
             miette::miette!("list providers attached to '{}': {error:#}", plan.old_name)
@@ -365,8 +330,7 @@ pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> 
             .detail(&plan.old_name)
             .render(theme)
     );
-    let (archive, carried) =
-        archive_openshell_home(&mut client, &plan.old_name, &migration_dir).await?;
+    let (archive, carried) = archive_openshell_home(&plan.old_name, &migration_dir).await?;
     println!(
         "{}",
         right_ui::status(right_ui::Glyph::Ok)
@@ -440,25 +404,34 @@ pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> 
         .map_err(|e| miette::miette!("write {}: {e:#}", yaml_path.display()))?;
     right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
 
-    right_openshell::openshell::delete_sandbox_confirmed(
-        &mut client,
+    // The migration itself is done and durable: the agent now runs from the
+    // new sandbox whatever happens next. A delete failure is therefore
+    // reported as leftover work with the exact command to finish it, not as a
+    // failed migration the operator would re-run for nothing.
+    let deleted = legacy_openshell::delete_sandbox_confirmed(
         &plan.old_name,
         OPENSHELL_DELETE_TIMEOUT_SECS,
         OPENSHELL_POLL_INTERVAL_SECS,
     )
-    .await
-    .map_err(|error| {
-        miette::miette!(
-            help = "Delete it with: openshell sandbox delete <name>",
-            "agent '{agent_name}' is migrated and now runs in sandbox '{}', but deleting the old OpenShell sandbox '{}' failed: {error:#}",
-            plan.new_name,
-            plan.old_name
-        )
-    })?;
+    .await;
+    if let Err(error) = &deleted {
+        tracing::warn!(
+            sandbox = %plan.old_name,
+            error = %format!("{error:#}"),
+            "migrated agent, but the old OpenShell sandbox could not be deleted"
+        );
+    }
 
     println!(
         "{}",
-        migration_recap(&plan, &archive, handed_to_guest, &attached_providers).render(theme)
+        migration_recap(
+            &plan,
+            &archive,
+            handed_to_guest,
+            &attached_providers,
+            deleted.err(),
+        )
+        .render(theme)
     );
     Ok(())
 }
@@ -470,11 +443,23 @@ fn migration_recap(
     archive: &Path,
     handed_to_guest: bool,
     attached_providers: &[String],
+    delete_failure: Option<miette::Report>,
 ) -> right_ui::Recap {
     let mut recap = right_ui::Recap::new("migrated")
         .ok("sandbox", &plan.new_name)
-        .ok("archive", &archive.display().to_string())
-        .ok("openshell sandbox", &format!("{} deleted", plan.old_name));
+        .ok("archive", &archive.display().to_string());
+    recap = match delete_failure {
+        None => recap.ok("openshell sandbox", &format!("{} deleted", plan.old_name)),
+        Some(error) => recap
+            .warn(
+                "openshell sandbox",
+                &format!("'{}' could not be deleted: {error:#}", plan.old_name),
+            )
+            .next(&format!(
+                "delete it by hand: openshell sandbox delete {}",
+                plan.old_name
+            )),
+    };
     if !handed_to_guest {
         recap = recap.warn(
             "ownership",

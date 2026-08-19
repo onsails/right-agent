@@ -431,8 +431,8 @@
   <h2><b>00</b> Essence <span class="sub">what we are</span></h2>
 
   <p class="lead">
-    <b style="color:var(--heading);">Right Agent</b> — a sandboxed multi-agent runtime for Claude Code, built on NVIDIA OpenShell.
-    Each agent runs as its own Claude Code session inside its own OpenShell sandbox with a declarative YAML policy.
+    <b style="color:var(--heading);">Right Agent</b> — a sandboxed multi-agent runtime for Claude Code, built on microsandbox.
+    Each agent runs as its own Claude Code session inside its own hardware-isolated microVM with a network egress policy.
     A Rust CLI orchestrates lifecycles via process-compose.
   </p>
 
@@ -1260,7 +1260,7 @@
         <span class="ui-mono" style="background: var(--bg-2); border: 1px solid var(--line); padding: 2px 8px; border-radius: 3px; font-size: 10px; color: var(--muted);">license MIT</span>
       </div>
       <p style="color: var(--text); font-size: 14px; line-height: 1.6;">
-        Run multiple Claude Code agents safely — each sandboxed by <a style="color: var(--teal); text-decoration: none;">OpenShell</a> policies, orchestrated by one CLI.
+        Run multiple Claude Code agents safely — each sealed in its own <a style="color: var(--teal); text-decoration: none;">microVM</a>, orchestrated by one CLI.
       </p>
     </div>
   </div>
@@ -1325,7 +1325,7 @@
             run agents.<br><span class="sig-accent">safely.</span>
           </div>
           <div style="font-size: 17px; color: var(--muted); line-height: 1.6; margin-bottom: 32px; max-width: 440px;">
-            multi-agent runtime for claude code. each agent in its own openshell sandbox. declarative policies. one cli.
+            multi-agent runtime for claude code. each agent in its own microvm. egress policies. one cli.
           </div>
           <div style="display: flex; gap: 12px; align-items: center;">
             <span class="chip">get started &#8594;</span>
@@ -1401,7 +1401,7 @@
 <span class="teal">▐</span>  <span class="muted">sandboxed multi-agent runtime</span>
 <span class="teal">▐</span>
 <span class="teal">▐</span>  <span class="ok">✓</span> process-compose  <span class="dim">ready</span>
-<span class="teal">▐</span>  <span class="ok">✓</span> openshell        <span class="dim">ready</span>
+<span class="teal">▐</span>  <span class="ok">✓</span> sandbox          <span class="dim">ready</span>
 <span class="teal">▐</span>  <span class="ok">✓</span> 3 agents         <span class="dim">spawned</span></div>
     </div>
   </div>

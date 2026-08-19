@@ -2,7 +2,7 @@
 
 You are editing `CHANGELOG.md` in the **Right Agent** repo. Right Agent
 is an opinionated, closed-box AI agent platform — operators run `right`
-to spin up Telegram-driven Claude Code agents in OpenShell sandboxes.
+to spin up Telegram-driven Claude Code agents in microVM sandboxes.
 The audience for this changelog is **those operators**, not contributors
 browsing git history. They want to know what they will notice in this
 release.

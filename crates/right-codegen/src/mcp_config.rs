@@ -305,7 +305,7 @@ mod tests {
         );
     }
 
-    // --- HTTP right MCP server tests (OpenShell sandbox mode) ---
+    // --- HTTP right MCP server tests (sandboxed aggregator mode) ---
 
     #[test]
     fn generates_http_right_entry() {

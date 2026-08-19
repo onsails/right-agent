@@ -14,18 +14,13 @@ happens during a typical upgrade.
 2. User runs `right restart <agent>` (or the bot restarts naturally via
    process-compose `on_failure`).
 3. `run_single_agent_codegen` rewrites every `Regenerated` file.
-4. Hot-reload machinery applies per category:
-   - `BotRestart`: nothing extra — CC picks up the new file on next
-     invocation.
-   - `SandboxPolicyApply`: `write_and_apply_sandbox_policy` hot-reloads via
-     `openshell policy set --wait`.
-   - `SandboxRecreate`: bot startup compares active vs on-disk policy via
-     `filesystem_policy_changed`. On drift, logs a WARN telling the operator
-     to run `right agent config <agent>`, which invokes
-     `maybe_migrate_sandbox`. No automatic migration — it's disruptive and
-     requires operator consent.
-5. For `BotRestart` / `SandboxPolicyApply`: zero manual steps.
-6. For `SandboxRecreate`: one follow-up command from the operator.
+4. Hot-reload machinery applies per category. Only one path remains —
+   `BotRestart`: nothing extra, CC picks up the new file on next
+   invocation. Egress is a typed value applied at sandbox create and the
+   filesystem boundary is the microVM itself, so neither has a generated
+   file to hot-apply or to drift-check.
+5. Zero manual steps: every regenerated output reaches the agent on its
+   next turn.
 
 ## Identity mirror
 
@@ -35,18 +30,18 @@ and `USER.md` are an explicit mirror, not the prompt source. Code that
 needs a complete host mirror must call the identity mirror reconciliation
 helper instead of assuming a prior user message ran reverse sync.
 
-## Policy split
+## No policy split
 
-`policy.yaml` mixes a hot-reloadable network section and a recreate-only
-filesystem section. It's registered as the stricter
-`Regenerated(SandboxRecreate)`; runtime discriminates via
-`openshell::filesystem_policy_changed`.
+`policy.yaml` is retired. Network stance lives in `agent.yaml`
+(`network_policy`) and becomes a `right_sandbox::Egress` value at create;
+changing it needs a sandbox recreate, which is an explicit operator
+action, not a codegen category.
 
 ## Non-goals
 
 - Agent-owned content (`AgentOwned` files) — agent property; codegen never
   mutates them.
-- OpenShell server upgrades — covered by `OpenShell Integration
-  Conventions`.
+- Sandbox-backend upgrades — the microsandbox SDK pins its own runtime;
+  see `Agent Sandbox Conventions` in `ARCHITECTURE.md`.
 - SQLite-compatible schema — handled by `right-db` migrations (see `Local
   Database Rules` in `ARCHITECTURE.md`).

@@ -29,11 +29,8 @@ identity files — this breaks CC's prompt caching and adds latency.
 
 A single function `build_prompt_assembly_script()` in
 `crates/bot/src/cc/prompt.rs` generates a parameterized shell script that
-assembles the composite prompt. The script is identical for both modes — only
-the `root_path` parameter differs:
-
-- **Sandbox mode (OpenShell):** `root_path=/sandbox`, executed via SSH
-- **No-sandbox mode:** `root_path=agent_dir`, executed via `bash -c`
+assembles the composite prompt. The script runs in the guest with
+`root_path=/sandbox`, executed through the sandbox SDK's exec stream.
 
 The script `cat`s compiled-in content and agent-owned files at `root_path`,
 producing the composite prompt in microseconds. Files are always fresh (no sync delay).
@@ -253,7 +250,7 @@ creation. The model must create `IDENTITY.md`, `SOUL.md`, and
 `USER.md`, then return non-empty content with `bootstrap_stage: "final"` and
 `bootstrap_complete: true`. The worker validates that typed result before
 verifying either the five scoped answers or the three identity files,
-reconciling sandbox copies into the host mirror for OpenShell agents. Only
+reconciling sandbox copies into the host mirror. Only
 verified completion writes and syncs a finalization intent, deactivates the
 matching session, removes and directory-syncs `BOOTSTRAP.md`, then clears the
 intent last. Invalid, incomplete, or unverifiable final output remains pending.
@@ -354,9 +351,10 @@ etc.) lives only in OPERATING_INSTRUCTIONS. No rule appears in both sections.
 Tie-breaker when allocating a new rule: *does Bootstrap mode need it?* Yes → base
 prompt. No → OPERATING_INSTRUCTIONS.
 
-### User-Installed CLI Tools Block (Openshell Sandbox Only)
+### User-Installed CLI Tools Block
 
-When an agent runs with `sandbox: mode: openshell`, the base prompt includes this user-local tool installation contract:
+The base prompt always includes this user-local tool installation contract
+(`right_codegen::agent_def::generate_system_prompt`):
 
 ```markdown
 ## User-Installed CLI Tools
@@ -369,33 +367,9 @@ When an agent runs with `sandbox: mode: openshell`, the base prompt includes thi
 - npm cache is configured with `NPM_CONFIG_CACHE=/sandbox/.npm`.
 ```
 
-Agents with `sandbox: mode: none` (no sandbox, direct host access) do NOT include this block.
-
-### SSH Awareness Block (Openshell Sandbox Only)
-
-When an agent runs with `sandbox: mode: openshell`, the base prompt includes a "## User SSH Access" section:
-
-```
-## User SSH Access
-
-If an operation requires an interactive terminal (TUI, interactive prompts,
-password input) that you cannot perform from within your sandbox — tell the
-user to run:
-
-  right agent ssh <name>
-  right agent ssh <name> -- <command>
-
-Examples:
-- `gh auth login`
-- `gcloud auth login`
-- `npm login`
-- Any command with interactive prompts or TUI
-
-Always provide the exact command with the `--` separator when passing a specific command.
-```
-
-This block instructs the agent to suggest SSH access for operations requiring interactive shells.
-Agents with `sandbox: mode: none` (no sandbox, direct host access) do NOT include this block.
+There is no SSH-awareness block. `right agent ssh` was removed with the SSH
+transport; interactive work happens through the sandbox SDK's exec stream,
+not a shell the operator opens.
 
 ## File Locations
 
@@ -809,7 +783,7 @@ ARCHITECTURE.md § "Reflection Primitive" for lifecycle details.
 3. Claude creates `IDENTITY.md`, `SOUL.md`, and `USER.md` and returns
    `bootstrap_complete: true` only after the files exist.
 4. The worker rechecks the scoped answers, then reconciles sandbox identity
-   files into the host mirror (or checks `agent_dir/` in no-sandbox mode).
+   files into the host mirror.
 5. If both gates pass, it atomically writes and syncs the runtime finalization
    intent containing `chat_id`, `thread_id`, and `root_session_id`.
 6. It deactivates that exact active session, removes `BOOTSTRAP.md`, then clears

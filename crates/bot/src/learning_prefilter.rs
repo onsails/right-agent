@@ -679,14 +679,15 @@ mod tests {
 
     #[test]
     fn dump_to_skill_index_timeout_exit_is_error() {
-        // OpenShell server-side timeout returns exit 124 with empty/partial
-        // stdout — must be an error so the prefilter returns Skip.
+        // A guest command killed by its timeout reports a non-zero exit (124
+        // from `timeout`) with empty/partial stdout — must be an error so the
+        // prefilter returns Skip.
         assert!(dump_to_skill_index("", 124).is_err());
     }
 
     #[test]
     fn dump_to_skill_index_no_exit_event_is_error() {
-        // gRPC stream closed with no Exit event yields exit -1 — also an error.
+        // A negative code (signal death, or no exit reported) is also an error.
         assert!(dump_to_skill_index("", -1).is_err());
     }
 

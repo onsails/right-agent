@@ -40,13 +40,13 @@ If you don't have a Cloudflare account yet, sign up at https://dash.cloudflare.c
 
 ## Quick Install
 
-One command installs `right`, `process-compose`, and NVIDIA OpenShell:
+One command installs `right` and `process-compose`:
 
 ```sh
 curl -LsSf https://raw.githubusercontent.com/onsails/right-agent/master/install.sh | sh
 ```
 
-The installer then runs the interactive `right init` wizard (asks for the Telegram bot token, sandbox mode, network policy) and `right doctor` to verify the setup.
+The installer then runs the interactive `right init` wizard (asks for the Telegram bot token and network policy) and `right doctor` to verify the setup. The microVM runtime installs itself the first time an agent starts — there is no separate step for it.
 
 Supported platforms: linux x86_64, linux aarch64, darwin aarch64 (Apple Silicon).
 

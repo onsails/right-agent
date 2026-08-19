@@ -3,10 +3,10 @@
 //! Agent Sandbox, and the verification that gates the destructive step really
 //! does fail when it should.
 //!
-//! The archive here is built exactly the way
-//! `right_openshell::openshell::ssh_tar_download` builds it — members rooted at
-//! `sandbox/`, foreign numeric uids — so the extraction flags are under test,
-//! not a hand-tailored fixture.
+//! The archive here is built exactly the way the CLI's frozen legacy reader
+//! (`right`'s `migrate_sandbox::legacy_openshell::ssh_tar_download`) builds
+//! it — members rooted at `sandbox/`, foreign numeric uids — so the
+//! extraction flags are under test, not a hand-tailored fixture.
 
 use anyhow::{Context, Result};
 use right_agent::sandbox_migrate::{

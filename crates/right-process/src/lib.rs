@@ -3,22 +3,16 @@
 //! Drop via `killpg(SIGKILL)`.
 //!
 //! Rationale: tokio's `kill_on_drop(true)` only SIGKILLs the direct child.
-//! When the child is `ssh` (which spawns `ProxyCommand`) or `openshell
-//! sandbox upload` (which spawns `ssh` which spawns `ssh-proxy`), those
-//! grandchildren are reparented to launchd/init and survive indefinitely.
-//! Putting the child into its own process group lets us atomically reap
-//! the whole tree with one `killpg` syscall.
+//! When the child spawns its own helpers (a shell that forks, a CLI that
+//! spawns a transport process), those grandchildren are reparented to
+//! launchd/init and survive indefinitely. Putting the child into its own
+//! process group lets us atomically reap the whole tree with one `killpg`
+//! syscall.
 //!
 //! All methods take `&mut self`, so Drop remains armed at every `.await`
 //! suspension point. This makes `ProcessGroupChild` cancel-safe under
 //! `tokio::time::timeout` and `tokio::select!` — when the awaiting task
 //! is dropped, Drop fires and the whole process group is SIGKILLed.
-//!
-//! **Do not use for the first ssh call against a `ControlMaster auto`
-//! config.** The master and its ProxyCommand share the spawning ssh's
-//! process group; `killpg(SIGKILL)` would kill the ProxyCommand and
-//! defeat multiplexing. See `ssh_exec` in `openshell.rs` for the pattern
-//! that establishes the master safely.
 
 #![warn(unreachable_pub)]
 

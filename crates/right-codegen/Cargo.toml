@@ -10,7 +10,6 @@ include_dir = { workspace = true }
 miette = { workspace = true }
 minijinja = { workspace = true }
 right-config = { path = "../right-config", version = "*" }
-right-openshell = { path = "../right-openshell", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-db = { path = "../right-db", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }

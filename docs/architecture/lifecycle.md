@@ -27,15 +27,13 @@ right init  /  right agent init <name>
   ├─ Top-level `right init` completes tunnel setup and writes global config
   │   before creating `agents/right`, so a tunnel setup failure leaves no
   │   default-agent state.
-  ├─ `agent init` runs an interactive wizard (sandbox mode, network policy,
-  │   telegram, chat IDs, stt, memory) and writes sandbox config + policy.yaml
-  │   to the agent dir. `init` skips the wizard and also writes
-  │   ~/.right/config.yaml + detects Telegram token / cloudflared tunnel.
-  │   Permissive network policy is generated as hostless public `allowed_ips`;
-  │   restrictive policy uses scoped DNS wildcard endpoints.
-  │   Right MCP host access starts as a bootstrap unresolved endpoint; after
-  │   sandbox READY, Right resolves host.openshell.internal inside the sandbox
-  │   and hot-applies exact IPv4 /32 and IPv6 /128 allowed_ips.
+  ├─ `agent init` runs an interactive wizard (network policy, telegram, chat
+  │   IDs, stt, memory) and writes the sandbox config to the agent dir.
+  │   `init` skips the wizard and also writes ~/.right/config.yaml + detects
+  │   Telegram token / cloudflared tunnel. The declared `network_policy`
+  │   becomes a `right_sandbox::Egress` value at sandbox create; there is no
+  │   generated policy file and no post-create policy apply. The guest reaches
+  │   the host aggregator through the always-open host destination group.
   │   `right-config` owns global config loading, saving, and path helpers.
   ├─ Create ~/.right/agents/<name>/ with template files
   ├─ Write BOOTSTRAP.md, TOOLS.md, agent.yaml
@@ -103,10 +101,10 @@ right bot --agent <name>  (spawned by process-compose)
   │   ├─ TOOLS.md, skills install, policy.yaml
   │   └─ data.db init, git init, secret generation
   ├─ Clear Telegram webhook, verify bot identity
-  ├─ Sandbox lifecycle (`right-openshell`):
-  │   ├─ Check if sandbox exists via gRPC → reuse with exact multi-IP policy hot-reload
-  │   ├─ Or create new: prepare staging dir, spawn sandbox, wait for READY
-  │   └─ Generate SSH config for sandbox exec
+  ├─ Sandbox lifecycle (`right-sandbox`):
+  │   ├─ ensure_runtime_installed + diagnose_host (hypervisor preflight)
+  │   ├─ SandboxHandle::create_or_attach — attach wins over create
+  │   └─ wait_ready (attach-race only; create already blocks until serving)
   ├─ Initial sync (blocking): `right-platform-store` deploys platform files to /sandbox/.platform/ (content-addressed + symlinks)
   ├─ Identity mirror sync: pull IDENTITY.md / SOUL.md / USER.md from /sandbox
   │   into host agent_dir/ when present. During bootstrap, the Telegram worker
@@ -193,31 +191,21 @@ Per message:
 
 Config change (right agent config):
   ├─ Writes agent.yaml
-  ├─ Detects filesystem policy change via `right-openshell` gRPC GetSandboxPolicyStatus
-  │   ├─ Network-only change: config_watcher → bot restart → hot-reload
-  │   └─ Filesystem change: sandbox migration (below)
   ├─ config_watcher detects change (2s debounce)
   ├─ Bot exits with code 2
   ├─ process-compose restarts bot (on_failure policy)
-  └─ Bot re-runs per-agent codegen with new config → resolves host alias in sandbox and applies fresh policy
+  └─ Bot re-runs per-agent codegen with new config
 
-Sandbox migration (filesystem policy change):
-  ├─ Backup sandbox-only (SSH tar czpf)
-  ├─ Create new sandbox right-<agent>-<YYYYMMDD-HHMM> with bootstrap policy
-  ├─ Wait for READY + SSH ready
-  ├─ Resolve host.openshell.internal inside the new sandbox
-  ├─ Hot-apply exact Right MCP allowed_ips via openshell policy set --wait
-  ├─ Restore files via SSH tar xzpf
-  ├─ Write sandbox.name to agent.yaml
-  ├─ Delete old sandbox (best-effort)
-  └─ config_watcher restarts bot → picks up new sandbox
+Create-time-only fields (`network_policy`, the set of declared providers,
+resources) cannot be applied to a live microVM. A change to one is reported
+and takes effect on the next sandbox recreate; only provider credential
+*values* hot-apply, via `hot_reconcile_providers`.
 
 right agent backup <name> [--sandbox-only] [--include-rebuildable]
-  ├─ Sandbox mode: SSH tar /sandbox/ → sandbox.tar.gz
+  ├─ Sandbox mode: tar /sandbox/ through the guest → sandbox.tar.gz
   │   └─ Default excludes: sandbox/.cache, sandbox/.venv, sandbox/.npm, sandbox/.uv
   ├─ --include-rebuildable: include those rebuildable dirs for forensic backup
-  ├─ No-sandbox mode: tar agent dir → sandbox.tar.gz, excluding data.db and data.db-* sidecars
-  ├─ Full mode: + agent.yaml, allowlist.yaml, policy.yaml, VACUUM INTO data.db
+  ├─ Full mode: + agent.yaml, allowlist.yaml, VACUUM INTO data.db
   └─ Stored at ~/.right/backups/<agent>/<YYYYMMDD-HHMM>/; destroy --backup uses the same DB exclude contract
 
 right agent rebootstrap <name> [-y]
@@ -226,7 +214,7 @@ right agent rebootstrap <name> [-y]
   │   running process cannot be stopped safely
   ├─ Backup IDENTITY.md / SOUL.md / USER.md (host + sandbox copies)
   │   to ~/.right/backups/<agent>/rebootstrap-<YYYYMMDD-HHMM>/
-  ├─ For configured sandbox mode, require OpenShell readiness, the named
+  ├─ Require the sandbox runtime to be ready, the named
   │   sandbox, and successful `/sandbox` identity deletion; any failure returns
   │   an error without deleting host identity or resetting sessions/answers
   ├─ Remove host copies, write fresh BOOTSTRAP.md from BOOTSTRAP_INSTRUCTIONS

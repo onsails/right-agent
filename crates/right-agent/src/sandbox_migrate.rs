@@ -17,11 +17,10 @@ use right_sandbox::{ExecRequest, GUEST_HOME, GUEST_USER, SandboxHandle};
 
 /// Guest-home-relative paths left out of the migration archive.
 ///
-/// The rebuildable caches are the same set `right agent backup` skips
-/// (`right_openshell::openshell::DEFAULT_REBUILDABLE_BACKUP_EXCLUDES`); `.ssh`
-/// holds the OpenShell SSH transport's keys and `known_hosts`, which mean
-/// nothing to a microVM that has no SSH at all. Everything else is agent data
-/// and is carried verbatim.
+/// The rebuildable caches are the same set `right agent backup` skips; `.ssh`
+/// held the retired OpenShell SSH transport's keys and `known_hosts`, which
+/// mean nothing to a microVM that has no SSH at all. Everything else is agent
+/// data and is carried verbatim.
 pub const MIGRATION_EXCLUDES: &[&str] = &[".cache", ".venv", ".npm", ".uv", ".ssh"];
 
 /// The one carried entry that stays root-owned after the restore.

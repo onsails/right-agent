@@ -152,7 +152,6 @@ async fn rebootstrap_unavailable_sandbox_preserves_host_sessions_and_answers() {
     Command::cargo_bin("right")
         .unwrap()
         .env("PATH", "")
-        .env("OPENSHELL_MTLS_DIR", home.path().join("missing-mtls"))
         .args([
             "--home",
             home.path().to_str().unwrap(),

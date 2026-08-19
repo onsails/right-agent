@@ -238,9 +238,9 @@ pub const OPENSHELL_UNMIGRATED: &str = "`sandbox.mode: openshell` means this age
 Run `right agent migrate-sandbox <agent>` to move them into a microsandbox VM — it rewrites this agent.yaml for you. \
 Until then the agent cannot start: attaching it to a fresh sandbox would hand it an empty home.";
 
-/// Provider type slug. Built-in slugs are validated against the OpenShell
-/// profile catalog at API boundaries; `claude` is rejected by Right (see
-/// `crates/right/src/internal_api.rs`).
+/// Provider type slug. Built-in slugs are validated against
+/// `right_providers::catalog` at API boundaries; `claude` is reserved for the
+/// in-sandbox Claude Code login flow and is rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 pub enum ProviderType {
@@ -269,8 +269,8 @@ impl serde::Serialize for ProviderType {
     }
 }
 
-/// Generic-only fields. Multi-host; the agent writes the auth header itself,
-/// so no header/scheme field exists (inert for OpenShell static-cred injection).
+/// Generic-only fields. Multi-host; the agent writes the auth header itself
+/// around the injected placeholder, so no header/scheme field exists.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "GenericProviderRaw")]
 pub struct GenericProvider {
@@ -787,8 +787,8 @@ impl Default for AgentConfig {
 
 impl AgentConfig {
     /// Declared `sandbox.providers`, or an empty slice when the `sandbox`
-    /// section is absent. This is the agent-local source for gateway provider
-    /// attach reconciliation; provider endpoints are composed by OpenShell.
+    /// section is absent. This is the agent-local list of provider names the
+    /// store resolves into the sandbox's secret bindings.
     pub fn providers(&self) -> &[ProviderEntry] {
         self.sandbox
             .as_ref()

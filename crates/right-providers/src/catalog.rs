@@ -1,10 +1,9 @@
 //! The built-in provider catalog, as compile-time constants.
 //!
-//! This is the port of `right_openshell::providers::profile_catalog()` plus
-//! the hidden-set derivation that used to live in
-//! `right_openshell::managed_profiles::ManagedProfile::base_id()`. Both are
-//! gone in the microsandbox world; the catalog is now data, not a gateway
-//! round-trip.
+//! This is the port of the retired OpenShell gateway's `profile_catalog()`
+//! plus the hidden-set derivation that used to live in its managed-profile
+//! `base_id()`. Both are gone in the microsandbox world; the catalog is now
+//! data, not a gateway round-trip.
 //!
 //! Byte-compat: the `category` string surfaced by `/provider-types` is
 //! `ProviderCategory::as_str`, which reproduces the old
@@ -13,8 +12,8 @@
 /// Built-in provider category. Surfaced lowercase in the `/provider-types`
 /// response.
 ///
-/// The variant set mirrors the retired `right_openshell::providers::
-/// ProviderCategory` because the rendered strings are a dashboard contract.
+/// The variant set mirrors the retired gateway's provider categories because
+/// the rendered strings are a dashboard contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderCategory {
     Inference,

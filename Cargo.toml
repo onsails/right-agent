@@ -18,7 +18,6 @@ members = [
     "crates/right-ui",
     "crates/right-hostpath",
     "crates/right-process",
-    "crates/right-openshell",
     "crates/right-sandbox",
     "crates/right-platform-store",
     "crates/right-providers",

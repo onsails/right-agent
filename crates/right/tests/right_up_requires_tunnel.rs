@@ -8,9 +8,36 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use right_openshell::openshell::acquire_test_name_lock;
-use std::ffi::OsString;
 use tempfile::TempDir;
+
+/// An advisory cross-process lock held for as long as the value lives.
+struct FileLock {
+    _file: std::fs::File,
+}
+
+/// Take an exclusive advisory lock on `$TMPDIR/<key>.lock`, blocking until
+/// free. The kernel releases it if the holder dies, so a crashed test run
+/// cannot wedge the next one.
+fn acquire_test_name_lock(key: &str) -> FileLock {
+    let path = std::env::temp_dir().join(format!("{key}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("open lock file {}: {e:#}", path.display()));
+    loop {
+        match file.try_lock() {
+            Ok(()) => return FileLock { _file: file },
+            Err(std::fs::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                panic!("lock {}: {e:#}", path.display())
+            }
+        }
+    }
+}
 
 fn write_minimal_agent(home: &std::path::Path) {
     let agent_dir = home.join("agents").join("test");
@@ -22,14 +49,6 @@ fn write_minimal_agent(home: &std::path::Path) {
     .unwrap();
 }
 
-fn path_without_openshell() -> OsString {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let paths = std::env::split_paths(&path)
-        .filter(|dir| !dir.join("openshell").is_file())
-        .collect::<Vec<_>>();
-    std::env::join_paths(paths).unwrap()
-}
-
 #[test]
 fn right_up_errors_when_global_config_missing() {
     let _lock = acquire_test_name_lock("right-up-fixed-port");
@@ -38,8 +57,6 @@ fn right_up_errors_when_global_config_missing() {
 
     Command::cargo_bin("right")
         .unwrap()
-        .env("PATH", path_without_openshell())
-        .env("OPENSHELL_MTLS_DIR", home.path().join("missing-mtls"))
         .args([
             "--home",
             home.path().to_str().unwrap(),
@@ -64,8 +81,6 @@ fn right_up_errors_when_tunnel_block_missing_from_config() {
 
     Command::cargo_bin("right")
         .unwrap()
-        .env("PATH", path_without_openshell())
-        .env("OPENSHELL_MTLS_DIR", home.path().join("missing-mtls"))
         .args([
             "--home",
             home.path().to_str().unwrap(),
