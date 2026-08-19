@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use right_agent::agent::types::AgentConfig;
-use right_providers::ProviderStore;
+use right_providers::{ProviderStatus, ProviderStore};
 use right_sandbox::{
     DEFAULT_READY_TIMEOUT, SandboxCause, SandboxDiagnosis, SandboxError, SandboxHandle,
     SandboxPhase, SandboxSpec, agent_sandbox_spec,
@@ -69,9 +69,24 @@ fn diagnose(error: &SandboxError) -> SandboxDiagnosis {
 ///
 /// Reading a binding publishes the credential into this process's environment
 /// under the binding's source variable; the value itself never enters the
-/// binding, the sandbox config, or a log line. A provider the store cannot
-/// resolve is a hard error: booting without it would leave the agent making
-/// unauthenticated calls it believes are authenticated.
+/// binding, the sandbox config, or a log line.
+///
+/// The two ways a declared provider can fail to bind are deliberately *not*
+/// the same thing:
+///
+/// - [`ProviderStatus::NeedsValue`] — the record exists and carries no
+///   credential yet, which is exactly the state
+///   `right agent migrate-sandbox` leaves a migrated provider in (OpenShell
+///   redacts credentials, so they are re-entered once from the dashboard).
+///   The binding is skipped and the operator is warned by name. Nothing
+///   pretends the provider is authenticated: with no binding there is no
+///   placeholder to substitute, so the agent's calls fail as the
+///   unauthenticated calls they are, and `/providers` shows the record
+///   awaiting its value.
+/// - the record is absent entirely — `agent.yaml` and `providers.db`
+///   disagree about what this agent holds. That is a config/store
+///   inconsistency no operator action is pending on, so it stays a hard
+///   error.
 async fn secret_bindings(
     agent: &str,
     config: &AgentConfig,
@@ -79,6 +94,25 @@ async fn secret_bindings(
 ) -> miette::Result<Vec<right_sandbox::SecretBinding>> {
     let mut bindings = Vec::new();
     for entry in config.providers() {
+        // Read the record first: only its status distinguishes "awaiting a
+        // credential" from "not there at all", and `source_ref_binding`
+        // rejects both.
+        let record = providers.get(agent, &entry.name).await.map_err(|e| {
+            miette::miette!(
+                "provider '{}' declared by agent {agent} cannot be bound: {e:#}",
+                entry.name
+            )
+        })?;
+        if record.status == ProviderStatus::NeedsValue {
+            tracing::warn!(
+                agent = %agent,
+                provider = %entry.name,
+                env_var = %record.env_var,
+                "provider holds no credential yet, so the sandbox starts without it; \
+                 add its credential from the dashboard: /providers"
+            );
+            continue;
+        }
         let binding = providers
             .source_ref_binding(agent, &entry.name)
             .await
@@ -97,11 +131,11 @@ async fn secret_bindings(
 ///
 /// Resolving the agent's declared providers is the only part that needs the
 /// bot's store; every other field comes from the shared
-/// [`right_sandbox::agent_sandbox_spec`]. The bot's bring-up and the CLI's
-/// `agent restore` are the only two sandbox creators and both go through
-/// here, so a restored sandbox is identical to a bot-created one — egress and
-/// secret structure are create-time only, so drift there is unrecoverable
-/// without a recreate.
+/// [`right_sandbox::agent_sandbox_spec`]. The bot's bring-up, the CLI's
+/// `agent restore`, and `right agent migrate-sandbox` are the only sandbox
+/// creators and all three go through here, so a restored or migrated sandbox
+/// is identical to a bot-created one — egress and secret structure are
+/// create-time only, so drift there is unrecoverable without a recreate.
 pub async fn agent_sandbox_spec_for(
     agent: &str,
     sandbox_name: &str,

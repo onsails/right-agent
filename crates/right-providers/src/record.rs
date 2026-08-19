@@ -165,6 +165,18 @@ impl Credential {
         Self(value)
     }
 
+    /// The absence of a credential.
+    ///
+    /// A record created with this resolves as [`ProviderStatus::NeedsValue`]
+    /// until a real value is rotated in, and
+    /// [`crate::ProviderStore::source_ref_binding`] refuses to bind it. It
+    /// exists for `right agent migrate-sandbox`, which can recover a
+    /// provider's *definition* out of an OpenShell sandbox but never its
+    /// value: OpenShell redacts credentials on every read path.
+    pub fn absent() -> Self {
+        Self(SecretString::from(String::new()))
+    }
+
     /// The value, for the single call site that writes it into the database.
     pub(crate) fn expose(&self) -> &str {
         use secrecy::ExposeSecret as _;

@@ -8,10 +8,16 @@
 //! command after a partial failure starts from the same clean state.
 //!
 //! Credentials are the one thing that cannot come along: OpenShell redacts a
-//! provider's value on every read path, so it is unreadable by design. The
-//! command reports the providers the old sandbox had attached and points the
-//! operator at the dashboard's `/providers` flow — the same path that adds a
-//! provider to any other agent.
+//! provider's value on every read path, so it is unreadable by design.
+//! Everything *else* about a provider does come along — the migration writes
+//! each one the migrated `agent.yaml` declares into `providers.db` carrying
+//! its definition and no value, so the record exists in the awaiting-value
+//! state ([`ProviderStatus::NeedsValue`]) instead of not existing at all.
+//! That distinction is what lets the migrated agent start: the bot skips a
+//! provider awaiting its credential and hard-fails on one it has no record
+//! of. The recap names every provider the operator must fill in through the
+//! dashboard's `/providers` flow — the same path that adds a provider to any
+//! other agent.
 //!
 //! Everything that touches OpenShell lives in [`legacy_openshell`], a frozen
 //! CLI-only read path that goes away with this command.
@@ -22,6 +28,9 @@ use serde::Deserialize;
 
 use right_agent::sandbox_migrate::{
     MIGRATION_EXCLUDES, carried_entries, hand_home_to_guest_user, restore_archive, verify_restore,
+};
+use right_providers::{
+    Credential, GenericSpec, NewProvider, ProviderKind, ProviderStatus, ProviderStore, StoreError,
 };
 
 mod legacy_openshell;
@@ -241,18 +250,138 @@ async fn archive_openshell_home(
     Ok((archive, carried))
 }
 
+/// What seeding `providers.db` from the migrated `agent.yaml` produced.
+///
+/// The migration recovers a provider's *definition* — name, type or generic
+/// endpoints, label, environment variable — and nothing else. The value is
+/// unrecoverable by construction (OpenShell redacts it on every read path),
+/// so a seeded record lands as [`ProviderStatus::NeedsValue`]: it exists, the
+/// dashboard lists it, and the bot's bring-up skips it until a credential is
+/// entered.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct SeededProviders {
+    /// Declared providers whose record holds no credential — every name the
+    /// operator has to re-enter from `/providers`.
+    pub needs_credential: Vec<String>,
+    /// Declared providers that already carry a credential in `providers.db`
+    /// (a re-run after the operator filled one in, or a record shared by an
+    /// agent that migrated earlier). Nothing to do for these.
+    pub ready: Vec<String>,
+    /// Attached to the OpenShell sandbox but absent from `agent.yaml`. There
+    /// is no definition to seed from, so they are reported and no more.
+    pub undeclared: Vec<String>,
+}
+
+/// The store record a declared `agent.yaml` provider entry describes.
+///
+/// Fails on a `type: generic` entry with no `generic:` block: that yaml
+/// declares an environment variable and upstream hosts it never gives, and
+/// guessing them would bind a credential to the wrong endpoint.
+fn declared_kind(entry: &right_agent_config::ProviderEntry) -> miette::Result<ProviderKind> {
+    match &entry.type_ {
+        right_agent_config::ProviderType::BuiltIn(slug) => Ok(ProviderKind::Builtin(slug.clone())),
+        right_agent_config::ProviderType::Generic => {
+            let generic = entry.generic.as_ref().ok_or_else(|| {
+                miette::miette!(
+                    "provider '{}' is declared as generic but carries no `generic:` block",
+                    entry.name
+                )
+            })?;
+            Ok(ProviderKind::Generic(GenericSpec {
+                env_var: generic.env_var.clone(),
+                upstream_hosts: generic.upstream_hosts.clone(),
+                upstream_path_prefix: generic.upstream_path_prefix.clone(),
+            }))
+        }
+    }
+}
+
+/// Write a `providers.db` record for every provider `agent.yaml` declares,
+/// carrying the definition and no credential.
+///
+/// Runs before anything is created or copied, so a definition the store
+/// rejects aborts the migration while the agent is still exactly as it was.
+/// Aborting is the right answer rather than skipping: a declared provider
+/// with no record is what stops the bot from starting at all, so a migration
+/// that could not seed one has not finished its job.
+///
+/// Idempotent — an existing record is left alone, whatever it holds, so a
+/// re-run after a rolled-back migration neither duplicates nor clobbers.
+/// `attached` is the OpenShell sandbox's own view, used only to report
+/// providers the yaml does not declare.
+pub(crate) async fn seed_provider_records(
+    providers: &ProviderStore,
+    agent: &str,
+    declared: &[right_agent_config::ProviderEntry],
+    attached: &[String],
+) -> miette::Result<SeededProviders> {
+    let mut seeded = SeededProviders::default();
+    for entry in declared {
+        let status = match providers.get(agent, &entry.name).await {
+            Ok(record) => record.status,
+            Err(StoreError::NotFound { .. }) => {
+                providers
+                    .create(
+                        NewProvider {
+                            owner_agent: agent.to_owned(),
+                            name: entry.name.clone(),
+                            kind: declared_kind(entry)?,
+                            label: entry.label.clone().unwrap_or_default(),
+                        },
+                        // The one thing the migration cannot carry.
+                        Credential::absent(),
+                    )
+                    .await
+                    .map_err(|e| {
+                        miette::miette!(
+                            "record provider '{}' for agent {agent} in providers.db: {e:#}",
+                            entry.name
+                        )
+                    })?
+                    .status
+            }
+            Err(e) => {
+                return Err(miette::miette!(
+                    "read provider '{}' for agent {agent} from providers.db: {e:#}",
+                    entry.name
+                ));
+            }
+        };
+        match status {
+            ProviderStatus::Ready => seeded.ready.push(entry.name.clone()),
+            ProviderStatus::NeedsValue => seeded.needs_credential.push(entry.name.clone()),
+            // The record exists but its definition no longer resolves, so the
+            // bot could not bind it after the migration either.
+            ProviderStatus::Error => {
+                return Err(miette::miette!(
+                    help = "Remove the record from the dashboard (/providers) and re-add it, then re-run the migration.",
+                    "provider '{}' is recorded with a type that no longer resolves",
+                    entry.name
+                ));
+            }
+        }
+    }
+    seeded.undeclared = attached
+        .iter()
+        .filter(|name| !declared.iter().any(|entry| &entry.name == *name))
+        .cloned()
+        .collect();
+    Ok(seeded)
+}
+
 /// `right agent migrate-sandbox <agent>`.
 ///
 /// Steps, in the only order that is safe:
 /// 1. read `agent.yaml`; an already-migrated agent is a no-op success,
-/// 2. archive the OpenShell home (kept as a backup) and record its listing,
-/// 3. create the microsandbox VM from the same spec builder the bot uses,
-/// 4. restore the archive and hand the home to the guest user,
-/// 5. verify the restore — nothing destructive has happened yet,
-/// 6. write the rewritten `agent.yaml`,
-/// 7. delete the OpenShell sandbox.
+/// 2. record every declared provider in `providers.db` without a credential,
+/// 3. archive the OpenShell home (kept as a backup) and record its listing,
+/// 4. create the microsandbox VM from the same spec builder the bot uses,
+/// 5. restore the archive and hand the home to the guest user,
+/// 6. verify the restore — nothing destructive has happened yet,
+/// 7. write the rewritten `agent.yaml`,
+/// 8. delete the OpenShell sandbox.
 ///
-/// A failure anywhere in 1–5 deletes the new sandbox and leaves the OpenShell
+/// A failure anywhere in 1–6 deletes the new sandbox and leaves the OpenShell
 /// one and the original `agent.yaml` untouched, so the agent stays exactly as
 /// runnable as it was and the command can simply be run again.
 pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<()> {
@@ -316,6 +445,31 @@ pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> 
             miette::miette!("list providers attached to '{}': {error:#}", plan.old_name)
         })?;
 
+    // Seeding runs before anything is copied or created, for two reasons: the
+    // spec builder below resolves every declared provider through this store
+    // and hard-fails on one it has no record of, and a definition the store
+    // rejects must abort while the agent is still untouched.
+    let providers = ProviderStore::open(home)
+        .await
+        .map_err(|error| miette::miette!("open provider store: {error:#}"))?;
+    let seeded = seed_provider_records(
+        &providers,
+        agent_name,
+        plan.migrated_config.providers(),
+        &attached_providers,
+    )
+    .await?;
+    if !seeded.needs_credential.is_empty() {
+        println!(
+            "{}",
+            right_ui::status(right_ui::Glyph::Info)
+                .noun("providers")
+                .verb("recorded without credentials")
+                .detail(seeded.needs_credential.join(", "))
+                .render(theme)
+        );
+    }
+
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let migration_dir =
         right_config::backups_dir(home, agent_name).join(format!("migrate-{stamp}"));
@@ -340,9 +494,6 @@ pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> 
             .render(theme)
     );
 
-    let providers = right_providers::ProviderStore::open(home)
-        .await
-        .map_err(|error| miette::miette!("open provider store: {error:#}"))?;
     let spec = right_bot::agent_sandbox_spec_for(
         agent_name,
         &plan.new_name,
@@ -424,14 +575,7 @@ pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> 
 
     println!(
         "{}",
-        migration_recap(
-            &plan,
-            &archive,
-            handed_to_guest,
-            &attached_providers,
-            deleted.err(),
-        )
-        .render(theme)
+        migration_recap(&plan, &archive, handed_to_guest, &seeded, deleted.err(),).render(theme)
     );
     Ok(())
 }
@@ -442,7 +586,7 @@ fn migration_recap(
     plan: &SourcePlan,
     archive: &Path,
     handed_to_guest: bool,
-    attached_providers: &[String],
+    providers: &SeededProviders,
     delete_failure: Option<miette::Report>,
 ) -> right_ui::Recap {
     let mut recap = right_ui::Recap::new("migrated")
@@ -469,16 +613,33 @@ fn migration_recap(
             ),
         );
     }
-    if !attached_providers.is_empty() {
+    if !providers.ready.is_empty() {
+        recap = recap.ok(
+            "providers",
+            &format!("already hold credentials: {}", providers.ready.join(", ")),
+        );
+    }
+    if !providers.needs_credential.is_empty() {
         recap = recap
             .warn(
                 "providers",
                 &format!(
-                    "credentials could not be carried (OpenShell redacts them): {}",
-                    attached_providers.join(", ")
+                    "recorded without credentials (OpenShell redacts them): {}",
+                    providers.needs_credential.join(", ")
                 ),
             )
-            .next("re-add each provider from the dashboard: /providers");
+            .next("add each provider's credential from the dashboard: /providers");
+    }
+    if !providers.undeclared.is_empty() {
+        recap = recap
+            .warn(
+                "providers",
+                &format!(
+                    "attached to the old sandbox but absent from agent.yaml, so nothing could be recorded: {}",
+                    providers.undeclared.join(", ")
+                ),
+            )
+            .next("add them from the dashboard if the agent still needs them: /providers");
     }
     recap
 }

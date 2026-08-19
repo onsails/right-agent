@@ -6,8 +6,9 @@ use std::collections::HashSet;
 use right_agent::sandbox_migrate::{entry_name, missing_entries};
 
 use super::{
-    MIGRATION_EXCLUDES, MigrationSource, SourcePlan, carried_entries, migration_recap,
-    migration_source, plan_migration, rewrite_agent_yaml_for_migration,
+    MIGRATION_EXCLUDES, MigrationSource, SeededProviders, SourcePlan, carried_entries,
+    migration_recap, migration_source, plan_migration, rewrite_agent_yaml_for_migration,
+    seed_provider_records,
 };
 
 const OPENSHELL_YAML: &str = "\
@@ -183,7 +184,7 @@ fn recap_claims_the_old_sandbox_is_deleted_only_when_it_was() {
         &plan,
         std::path::Path::new("/tmp/sandbox.tar.gz"),
         true,
-        &[],
+        &SeededProviders::default(),
         None,
     )
     .render(right_ui::Theme::Mono);
@@ -200,7 +201,7 @@ fn recap_never_claims_a_deletion_that_failed() {
         &plan,
         std::path::Path::new("/tmp/sandbox.tar.gz"),
         true,
-        &[],
+        &SeededProviders::default(),
         Some(miette::miette!("gateway said no")),
     )
     .render(right_ui::Theme::Mono);
@@ -218,8 +219,9 @@ fn recap_never_claims_a_deletion_that_failed() {
     );
 }
 
-/// Providers are the only credential signal the migration can hand back, so a
-/// non-empty list must always reach the recap with the dashboard next step.
+/// Providers are the only credential signal the migration can hand back, so
+/// every one awaiting a value must reach the recap with the dashboard next
+/// step.
 #[test]
 fn recap_names_providers_that_need_their_credentials_re_entered() {
     let plan = recap_plan();
@@ -227,16 +229,173 @@ fn recap_names_providers_that_need_their_credentials_re_entered() {
         &plan,
         std::path::Path::new("/tmp/sandbox.tar.gz"),
         true,
-        &["agent-a-provider".to_owned()],
+        &SeededProviders {
+            needs_credential: vec!["agent-a-provider".to_owned(), "agent-a-openai".to_owned()],
+            ready: vec!["agent-a-shared".to_owned()],
+            undeclared: vec!["agent-a-ghost".to_owned()],
+        },
         None,
     )
     .render(right_ui::Theme::Mono);
+    for name in ["agent-a-provider", "agent-a-openai"] {
+        assert!(
+            rendered.contains(name),
+            "every provider awaiting a credential must be named: {rendered}"
+        );
+    }
     assert!(
-        rendered.contains("agent-a-provider"),
-        "the provider must be named: {rendered}"
+        rendered.contains("agent-a-ghost"),
+        "a provider the yaml never declared cannot be recorded, so it must be reported: {rendered}"
     );
     assert!(
         rendered.contains("/providers"),
         "the operator needs the dashboard step: {rendered}"
+    );
+    assert!(
+        rendered.contains("agent-a-shared"),
+        "a provider that already holds a credential must not be listed as needing one: {rendered}"
+    );
+}
+
+/// A fresh store on a temp home, plus the directory that must outlive it.
+async fn store() -> (tempfile::TempDir, right_providers::ProviderStore) {
+    let home = tempfile::TempDir::new().expect("temp home");
+    let store = right_providers::ProviderStore::open(home.path())
+        .await
+        .expect("open providers.db");
+    (home, store)
+}
+
+const PROVIDER_YAML: &str = "\
+sandbox:
+  name: test-sandbox-a
+  providers:
+    - name: agent-a-provider
+      type: right-fal
+      label: prod
+    - name: agent-a-acme
+      type: generic
+      generic:
+        env_var: ACME_KEY
+        upstream_hosts:
+          - api.acme.com
+        upstream_path_prefix: /v1
+";
+
+fn provider_config() -> right_agent::agent::types::AgentConfig {
+    serde_saphyr::from_str(PROVIDER_YAML).expect("fixture parses")
+}
+
+/// The whole point of seeding: a migrated provider exists in `providers.db`
+/// with its definition and no value, which is what the bot's bring-up skips
+/// and the dashboard renders as awaiting a credential.
+#[tokio::test]
+async fn seeding_lands_every_declared_provider_as_needs_value() {
+    let (_home, store) = store().await;
+    let config = provider_config();
+
+    let seeded = seed_provider_records(&store, "agent-a", config.providers(), &[])
+        .await
+        .expect("seeding a fresh store");
+
+    assert_eq!(
+        seeded.needs_credential,
+        vec!["agent-a-provider".to_owned(), "agent-a-acme".to_owned()]
+    );
+    assert!(seeded.ready.is_empty());
+
+    let builtin = store
+        .get("agent-a", "agent-a-provider")
+        .await
+        .expect("built-in record was written");
+    assert_eq!(builtin.status, right_providers::ProviderStatus::NeedsValue);
+    assert_eq!(builtin.env_var, "FAL_KEY");
+    assert_eq!(builtin.label, "prod");
+
+    let generic = store
+        .get("agent-a", "agent-a-acme")
+        .await
+        .expect("generic record was written");
+    assert_eq!(generic.status, right_providers::ProviderStatus::NeedsValue);
+    assert_eq!(generic.env_var, "ACME_KEY");
+    assert_eq!(
+        generic.kind,
+        right_providers::ProviderKind::Generic(right_providers::GenericSpec {
+            env_var: "ACME_KEY".to_owned(),
+            upstream_hosts: vec!["api.acme.com".to_owned()],
+            upstream_path_prefix: Some("/v1".to_owned()),
+        }),
+        "the generic endpoints must survive the migration: they are unrecoverable otherwise"
+    );
+}
+
+/// A rolled-back migration is re-run from the same state, so seeding must not
+/// duplicate, clobber, or downgrade a record the operator has since filled in.
+#[tokio::test]
+async fn seeding_leaves_an_existing_record_alone() {
+    let (_home, store) = store().await;
+    let config = provider_config();
+    seed_provider_records(&store, "agent-a", config.providers(), &[])
+        .await
+        .expect("first run");
+    store
+        .rotate(
+            "agent-a",
+            "agent-a-provider",
+            right_providers::Credential::from("re-entered".to_owned()),
+        )
+        .await
+        .expect("operator adds the credential from the dashboard");
+
+    let seeded = seed_provider_records(&store, "agent-a", config.providers(), &[])
+        .await
+        .expect("re-run");
+
+    assert_eq!(seeded.ready, vec!["agent-a-provider".to_owned()]);
+    assert_eq!(seeded.needs_credential, vec!["agent-a-acme".to_owned()]);
+    assert_eq!(
+        store.list("agent-a").await.expect("list").len(),
+        2,
+        "a re-run must not duplicate records"
+    );
+}
+
+/// The OpenShell sandbox's own view is the cross-check: a provider it had
+/// attached that `agent.yaml` never declared has no definition to seed from,
+/// so it must be reported rather than silently dropped.
+#[tokio::test]
+async fn attached_providers_the_yaml_never_declared_are_reported() {
+    let (_home, store) = store().await;
+    let config = provider_config();
+    let attached = vec!["agent-a-provider".to_owned(), "agent-a-ghost".to_owned()];
+
+    let seeded = seed_provider_records(&store, "agent-a", config.providers(), &attached)
+        .await
+        .expect("seeding");
+
+    assert_eq!(seeded.undeclared, vec!["agent-a-ghost".to_owned()]);
+}
+
+/// A definition the store cannot accept would leave the agent unstartable
+/// after the migration, so it aborts while everything is still untouched.
+#[tokio::test]
+async fn a_provider_definition_the_store_rejects_aborts_the_migration() {
+    let (_home, store) = store().await;
+    let config: right_agent::agent::types::AgentConfig = serde_saphyr::from_str(
+        "sandbox:\n  name: test-sandbox-a\n  providers:\n    - name: agent-a-gone\n      type: no-such-provider\n",
+    )
+    .expect("fixture parses");
+
+    let error = seed_provider_records(&store, "agent-a", config.providers(), &[])
+        .await
+        .expect_err("an unknown provider type cannot be recorded");
+
+    assert!(
+        format!("{error:#}").contains("agent-a-gone"),
+        "the failure must name the provider: {error:#}"
+    );
+    assert!(
+        store.list("agent-a").await.expect("list").is_empty(),
+        "a rejected definition must leave the store as it was"
     );
 }
