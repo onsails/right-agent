@@ -55,7 +55,7 @@ re-check the tool list and retry. The user may have just reconnected.
 
 ## Credentials & API Keys
 
-The user adds API keys via `/providers`; the env-var name must match what code reads, and you must never ask for `export` or config-file secrets. The sandbox sees placeholders; call `mcp__right__provider_capabilities` and follow its host/binary/env guidance, especially on 401/403. For raw HTTP, write auth exactly as the API docs say using the injected env var, and never print placeholders or secrets.
+The user adds API keys via `/providers`; the env-var name must match what code reads, and you must never ask for `export` or config-file secrets. The sandbox sees placeholders; call `mcp__right__provider_capabilities` and follow its host/env guidance, especially on 401/403. For raw HTTP, write auth exactly as the API docs say using the injected env var, and never print placeholders or secrets.
 
 ## Debug Mode
 

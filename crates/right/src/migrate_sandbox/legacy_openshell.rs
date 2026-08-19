@@ -167,8 +167,31 @@ async fn list_sandbox_names() -> miette::Result<Vec<String>> {
 }
 
 /// Whether a sandbox exists, in any phase.
+///
+/// Asks about the one name rather than scanning `sandbox list`, which
+/// paginates at 100 by default: on a busy gateway a listed check would report
+/// a sandbox outside the first page as absent, aborting a migration that
+/// should run — and, in the delete-confirmation loop, claiming a deletion
+/// that never happened.
 pub(super) async fn sandbox_exists(name: &str) -> miette::Result<bool> {
-    Ok(list_sandbox_names().await?.iter().any(|n| n == name))
+    let probe = tokio::time::timeout(
+        CLI_TIMEOUT,
+        openshell_cli(&["sandbox", "get", name, "-o", "json"]),
+    )
+    .await
+    .map_err(|_| miette::miette!("`openshell sandbox get {name}` timed out"))?;
+    match probe {
+        // The CLI reports a missing sandbox on stderr with a zero exit, so the
+        // absence has to be read out of the payload rather than the status.
+        Ok(json) => Ok(sandbox_phase(&json).is_ok()),
+        Err(error) if is_sandbox_not_found(&format!("{error:#}")) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether a CLI failure means "no such sandbox" rather than a real fault.
+fn is_sandbox_not_found(message: &str) -> bool {
+    message.contains("sandbox not found") || message.contains("entity was not found")
 }
 
 /// Prove the CLI and gateway are usable before the migration copies anything.
@@ -234,18 +257,46 @@ pub(super) async fn wait_for_ready(
     }
 }
 
+/// Strip SGR escape sequences (`ESC [ … m`) from a line.
+///
+/// The CLI renders its table header bold even when stdout is a pipe and
+/// `NO_COLOR` is set, so the header arrives as `ESC[1mNAME ESC[0m`. Matching
+/// the raw bytes silently found no header and reported every sandbox as
+/// having no attached providers.
+fn strip_sgr(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // ESC [ … m — consume through the terminating byte.
+        if chars.next() != Some('[') {
+            continue;
+        }
+        for tail in chars.by_ref() {
+            if tail.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Provider names out of `openshell sandbox provider list`'s table.
 ///
 /// The CLI has no JSON mode for this subcommand, so the table is the wire
 /// format. It is either a `NAME …` header followed by one row per provider,
-/// or a single "No providers attached…" sentence.
+/// or a single "No providers attached…" sentence. Both the header and the
+/// rows are stripped of SGR escapes before matching.
 fn parse_attached_provider_names(table: &str) -> Vec<String> {
     table
         .lines()
+        .map(strip_sgr)
         .skip_while(|line| !line.trim_start().starts_with("NAME"))
         .skip(1)
-        .filter_map(|line| line.split_whitespace().next())
-        .map(str::to_owned)
+        .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
         .collect()
 }
 

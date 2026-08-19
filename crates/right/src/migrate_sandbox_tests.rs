@@ -6,8 +6,8 @@ use std::collections::HashSet;
 use right_agent::sandbox_migrate::{entry_name, missing_entries};
 
 use super::{
-    MIGRATION_EXCLUDES, MigrationSource, carried_entries, migration_source, plan_migration,
-    rewrite_agent_yaml_for_migration,
+    MIGRATION_EXCLUDES, MigrationSource, SourcePlan, carried_entries, migration_recap,
+    migration_source, plan_migration, rewrite_agent_yaml_for_migration,
 };
 
 const OPENSHELL_YAML: &str = "\
@@ -161,4 +161,82 @@ fn verification_reports_every_entry_that_did_not_arrive() {
     );
     let all: HashSet<&str> = [".claude", "CLAUDE.md", "projects"].into_iter().collect();
     assert!(missing_entries(&expected, &all).is_empty());
+}
+
+/// Build a plan good enough to render a recap; only the names are read.
+fn recap_plan() -> SourcePlan {
+    let yaml = "sandbox:\n  name: test-sandbox\n";
+    SourcePlan {
+        old_name: "test-sandbox-20260516-1649".to_owned(),
+        new_name: "test-sandbox".to_owned(),
+        migrated_yaml: yaml.to_owned(),
+        migrated_config: serde_saphyr::from_str(yaml).expect("fixture parses"),
+    }
+}
+
+/// The whole reason a failed delete may exit 0 is that the recap tells the
+/// truth about it. A confirmed delete is the only path that may say "deleted".
+#[test]
+fn recap_claims_the_old_sandbox_is_deleted_only_when_it_was() {
+    let plan = recap_plan();
+    let rendered = migration_recap(
+        &plan,
+        std::path::Path::new("/tmp/sandbox.tar.gz"),
+        true,
+        &[],
+        None,
+    )
+    .render(right_ui::Theme::Mono);
+    assert!(
+        rendered.contains("deleted"),
+        "a confirmed delete must be reported: {rendered}"
+    );
+}
+
+#[test]
+fn recap_never_claims_a_deletion_that_failed() {
+    let plan = recap_plan();
+    let rendered = migration_recap(
+        &plan,
+        std::path::Path::new("/tmp/sandbox.tar.gz"),
+        true,
+        &[],
+        Some(miette::miette!("gateway said no")),
+    )
+    .render(right_ui::Theme::Mono);
+    assert!(
+        !rendered.contains(&format!("{} deleted", plan.old_name)),
+        "a failed delete must never be reported as done: {rendered}"
+    );
+    assert!(
+        rendered.contains("could not be deleted"),
+        "the failure must be surfaced: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("openshell sandbox delete {}", plan.old_name)),
+        "the operator needs the exact manual command: {rendered}"
+    );
+}
+
+/// Providers are the only credential signal the migration can hand back, so a
+/// non-empty list must always reach the recap with the dashboard next step.
+#[test]
+fn recap_names_providers_that_need_their_credentials_re_entered() {
+    let plan = recap_plan();
+    let rendered = migration_recap(
+        &plan,
+        std::path::Path::new("/tmp/sandbox.tar.gz"),
+        true,
+        &["agent-a-provider".to_owned()],
+        None,
+    )
+    .render(right_ui::Theme::Mono);
+    assert!(
+        rendered.contains("agent-a-provider"),
+        "the provider must be named: {rendered}"
+    );
+    assert!(
+        rendered.contains("/providers"),
+        "the operator needs the dashboard step: {rendered}"
+    );
 }

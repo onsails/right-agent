@@ -346,13 +346,13 @@ column-level definitions.
 ### Providers
 
 Provider credential management is owned by `right_providers::ProviderStore`
-(`~/.right/providers.db`, SQLite mode 0600 — microsandbox migration stage 3).
-No credential value ever crosses a store read API: `ProviderRecord` carries
-no credential field and `source_ref_binding` is the only reader. Per-agent
-provider definitions live in `agent.yaml::sandbox::providers: [...]`;
-ownership is a `providers.db` column (`owner_agent` + `provider_borrows`),
-never the `agent.yaml` `shared_from` field (legacy migration input only —
-stage 4 deletes it; the internal API writers never emit it).
+(`~/.right/providers.db`, SQLite mode 0600). No credential value ever
+crosses a store read API: `ProviderRecord` carries no credential field and
+`source_ref_binding` is the only reader. Per-agent provider definitions live
+in `agent.yaml::sandbox::providers: [...]`; ownership is a `providers.db`
+column (`owner_agent` + `provider_borrows`), never the `agent.yaml`
+`shared_from` field (legacy migration input only; the internal API writers
+never emit it).
 
 Provider health is the tri-state `ready` / `needs-value` / `error`. The
 OpenShell-era composition machinery (`ensure_v2_enabled`,

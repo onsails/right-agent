@@ -292,12 +292,26 @@ fn sandbox_phase_fails_rather_than_guessing() {
 
 #[test]
 fn attached_provider_names_come_from_the_first_table_column() {
-    let table = "NAME        TYPE                 CREDENTIAL_KEYS  CONFIG_KEYS\n\
+    // The real bytes: the CLI renders the header bold even into a pipe with
+    // NO_COLOR set, so it arrives wrapped in SGR escapes. A fixture that lost
+    // them to copy-paste is why this parser shipped returning an empty list
+    // for every sandbox — the test passed while production found no header.
+    let table = "\u{1b}[1mNAME\u{1b}[0m        \u{1b}[1mTYPE\u{1b}[0m                 \u{1b}[1mCREDENTIAL_KEYS\u{1b}[0m  \u{1b}[1mCONFIG_KEYS\u{1b}[0m\n\
                  agent-a-provider   right-fal                          1                0\n\
                  agent-a-twitterapi  right-provider-agent-a-service   1                0\n";
     assert_eq!(
         parse_attached_provider_names(table),
         vec!["agent-a-provider", "agent-a-twitterapi"]
+    );
+}
+
+#[test]
+fn attached_provider_names_parse_without_escapes_too() {
+    let table = "NAME        TYPE\n\
+                 agent-a-provider   right-fal\n";
+    assert_eq!(
+        parse_attached_provider_names(table),
+        vec!["agent-a-provider"]
     );
 }
 
