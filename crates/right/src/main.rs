@@ -3024,6 +3024,11 @@ fn cmd_list(home: &Path) -> miette::Result<()> {
 struct UpAgentDiscovery {
     agents: Vec<right_agent::agent::AgentDef>,
     issues: Vec<String>,
+    /// Agents whose config is well-formed but still points at an OpenShell
+    /// sandbox. Kept apart from `issues` because this is a transitional state
+    /// with a known fix, not a broken config: it must not stop the agents that
+    /// *can* run from starting.
+    unmigrated: Vec<String>,
 }
 
 fn discover_up_agents(
@@ -3062,6 +3067,7 @@ fn discover_up_agents(
 
     let mut agents = Vec::new();
     let mut issues = Vec::new();
+    let mut unmigrated = Vec::new();
     for path in paths {
         let name = path
             .file_name()
@@ -3069,10 +3075,36 @@ fn discover_up_agents(
             .unwrap_or("<invalid>");
         match right_agent::agent::discover_single_agent(&path) {
             Ok(agent) => agents.push(agent),
-            Err(error) => issues.push(format!("{name}: configuration failed: {error:#}")),
+            Err(error) => {
+                // The strict parser rejects `sandbox.mode: openshell`, which is
+                // exactly how an unmigrated agent is kept from starting. Read
+                // the raw yaml to tell that expected state apart from a config
+                // that is actually malformed.
+                if is_unmigrated_agent(&path) {
+                    unmigrated.push(name.to_owned());
+                } else {
+                    issues.push(format!("{name}: configuration failed: {error:#}"));
+                }
+            }
         }
     }
-    Ok(UpAgentDiscovery { agents, issues })
+    Ok(UpAgentDiscovery {
+        agents,
+        issues,
+        unmigrated,
+    })
+}
+
+/// Whether `agent.yaml` is a well-formed config that simply has not been
+/// migrated yet.
+fn is_unmigrated_agent(agent_dir: &Path) -> bool {
+    let Ok(yaml) = std::fs::read_to_string(agent_dir.join("agent.yaml")) else {
+        return false;
+    };
+    matches!(
+        crate::migrate_sandbox::migration_source(&yaml),
+        Ok(crate::migrate_sandbox::MigrationSource::OpenShell { .. })
+    )
 }
 
 fn readiness_error(issues: &[String]) -> miette::Report {
@@ -3270,10 +3302,29 @@ async fn cmd_up(
     // checks of other selected agents.
     let agents_dir = right_config::agents_dir(home);
     let discovery = discover_up_agents(&agents_dir, agents_filter.as_deref())?;
-    if discovery.agents.is_empty() && discovery.issues.is_empty() {
+    if discovery.agents.is_empty()
+        && discovery.issues.is_empty()
+        && discovery.unmigrated.is_empty()
+    {
         return Err(miette::miette!(
             "no agents found. Run `right agent init <name>` to create one."
         ));
+    }
+    // An unmigrated agent cannot start, but it must not hold back the ones
+    // that can: say plainly which are sitting out and how to bring them over.
+    if !discovery.unmigrated.is_empty() {
+        for name in &discovery.unmigrated {
+            eprintln!(
+                "Agent `{name}` still lives in an OpenShell sandbox and is not being started. \
+                 Move it over with: right agent migrate-sandbox {name}"
+            );
+        }
+        if discovery.agents.is_empty() {
+            return Err(miette::miette!(
+                help = "Run `right agent migrate-sandbox <name>` for each, then rerun `right up`",
+                "every selected agent still lives in an OpenShell sandbox"
+            ));
+        }
     }
     let mut agents = discovery.agents;
 
@@ -5159,6 +5210,48 @@ mod tests {
         assert_eq!(backend.telegram_checks, ["valid"]);
         assert!(backend.repairs.is_empty());
         assert_eq!(downstream_calls.get(), 0);
+    }
+
+    /// An agent still on OpenShell cannot start, but it is a transitional
+    /// state with a known fix — not a broken config. It must be reported
+    /// separately so it never blocks the agents that are already migrated,
+    /// which is what made `right up` refuse the whole host after one agent
+    /// was migrated.
+    #[test]
+    fn an_unmigrated_agent_does_not_block_the_migrated_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(agents_dir.join("migrated")).unwrap();
+        std::fs::create_dir_all(agents_dir.join("stillopenshell")).unwrap();
+        std::fs::create_dir_all(agents_dir.join("broken")).unwrap();
+        std::fs::write(
+            agents_dir.join("migrated/agent.yaml"),
+            "telegram_token: \"123:test\"\nsandbox:\n  name: migrated\n",
+        )
+        .unwrap();
+        std::fs::write(
+            agents_dir.join("stillopenshell/agent.yaml"),
+            "telegram_token: \"123:test\"\nsandbox:\n  mode: openshell\n  name: right-old\n",
+        )
+        .unwrap();
+        std::fs::write(agents_dir.join("broken/agent.yaml"), "sandbox: [").unwrap();
+
+        let discovery = discover_up_agents(&agents_dir, None).unwrap();
+
+        let started: Vec<&str> = discovery.agents.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            started,
+            ["migrated"],
+            "a migrated agent must still start when a sibling is unmigrated"
+        );
+        assert_eq!(discovery.unmigrated, ["stillopenshell"]);
+        assert_eq!(
+            discovery.issues.len(),
+            1,
+            "only the genuinely malformed config is an issue: {:?}",
+            discovery.issues
+        );
+        assert!(discovery.issues[0].starts_with("broken:"));
     }
 
     #[tokio::test]
