@@ -275,19 +275,6 @@ impl SandboxHandle {
             .await
             .map_err(|source| operation_error(&self.name, "plan secret rotation", source))?;
 
-        if !plan.conflicts.is_empty() {
-            return Err(SandboxError::RotationConflict {
-                name: self.name.clone(),
-                env_var: binding.env_var.clone(),
-                details: plan
-                    .conflicts
-                    .iter()
-                    .map(|conflict| format!("{}: {}", conflict.field, conflict.message))
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            });
-        }
-
         let mut disposition = RotationDisposition::Live;
         for change in &plan.changes {
             let PlannedChange::Secret(secret) = change else {
@@ -295,9 +282,11 @@ impl SandboxHandle {
             };
             // A rotation re-asserts only env+source, so a sandbox that has the
             // binding classifies the change as Rotated. Anything else (notably
-            // Added) means the sandbox has no such secret — surface that
-            // directly instead of the SDK's downstream "needs at least one
-            // allowed host" conflict.
+            // Added) means the sandbox has no such secret. This must be checked
+            // BEFORE the conflicts gate: the SDK also emits a "needs at least
+            // one allowed host" conflict for an Added secret, and Right's
+            // rotation patch never sets hosts, so the conflict would otherwise
+            // mask the real "no such binding" error.
             if secret.change != microsandbox::SecretChangeKind::Rotated {
                 return Err(SandboxError::RotationTargetMissing {
                     name: self.name.clone(),
@@ -321,6 +310,19 @@ impl SandboxHandle {
                     });
                 }
             }
+        }
+
+        if !plan.conflicts.is_empty() {
+            return Err(SandboxError::RotationConflict {
+                name: self.name.clone(),
+                env_var: binding.env_var.clone(),
+                details: plan
+                    .conflicts
+                    .iter()
+                    .map(|conflict| format!("{}: {}", conflict.field, conflict.message))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            });
         }
 
         let applied = self

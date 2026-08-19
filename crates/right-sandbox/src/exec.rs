@@ -317,8 +317,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chunk_size_stays_below_the_frame_cap() {
-        assert!(STDIN_CHUNK_BYTES < PROTOCOL_FRAME_MAX_BYTES);
+    fn chunk_size_matches_the_proven_probe_value() {
+        // The const-assert above already guarantees chunk < frame cap; this
+        // pins the specific 64 KiB value stage-1 proved out.
         assert_eq!(STDIN_CHUNK_BYTES, 64 * 1024);
     }
 
