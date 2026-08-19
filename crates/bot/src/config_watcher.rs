@@ -467,8 +467,8 @@ learning:
 
     #[tokio::test]
     async fn diff_providers_only_is_providers_reload() {
-        let old = "restart: never\nmax_restarts: 5\nsandbox:\n  mode: openshell\n";
-        let new = "restart: never\nmax_restarts: 5\nsandbox:\n  mode: openshell\n  providers:\n    - name: right-typefully\n      type: generic\n      generic:\n        env_var: TYPEFULLY_API_KEY\n        upstream_host: api.typefully.com\n";
+        let old = "restart: never\nmax_restarts: 5\nsandbox:\n  name: right-alpha\n";
+        let new = "restart: never\nmax_restarts: 5\nsandbox:\n  name: right-alpha\n  providers:\n    - name: right-typefully\n      type: generic\n      generic:\n        env_var: TYPEFULLY_API_KEY\n        upstream_host: api.typefully.com\n";
         match classify(old, new) {
             ChangeKind::ProvidersReload { new_config, .. } => {
                 let provs = new_config
@@ -486,8 +486,8 @@ learning:
 
     #[tokio::test]
     async fn diff_providers_plus_other_field_is_restart_required() {
-        let old = "restart: never\nmax_restarts: 5\nsandbox:\n  mode: openshell\n";
-        let new = "restart: always\nmax_restarts: 5\nsandbox:\n  mode: openshell\n  providers:\n    - name: right-typefully\n      type: generic\n      generic:\n        env_var: TYPEFULLY_API_KEY\n        upstream_host: api.typefully.com\n";
+        let old = "restart: never\nmax_restarts: 5\nsandbox:\n  name: right-alpha\n";
+        let new = "restart: always\nmax_restarts: 5\nsandbox:\n  name: right-alpha\n  providers:\n    - name: right-typefully\n      type: generic\n      generic:\n        env_var: TYPEFULLY_API_KEY\n        upstream_host: api.typefully.com\n";
         assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
     }
 

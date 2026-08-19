@@ -8,6 +8,7 @@ pub(crate) mod internal_api;
 pub(crate) mod internal_api_providers;
 pub(crate) mod learning;
 mod memory_server;
+pub(crate) mod migrate_sandbox;
 pub(crate) mod progress;
 mod restore;
 pub(crate) mod right_backend;
@@ -43,8 +44,6 @@ pub(crate) const MAIN_PROMPT_LABELS: &[&str] = &[
     "permanently destroy agent '",
     // cmd_agent_rebootstrap: dynamic confirm — agent_name varies, prefix is the static portion
     "rebootstrap agent '",
-    // cmd_agent_config: sandbox migration confirm
-    "migrate sandbox now? (backup old, create new, restore data)",
 ];
 
 #[cfg(test)]
@@ -117,6 +116,24 @@ mod cli_parse_tests {
             };
 
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    /// The config parser refuses to start an unmigrated agent and names this
+    /// command verbatim, so the command must exist under exactly that name.
+    #[test]
+    fn migrate_sandbox_is_spelled_the_way_the_config_error_promises() {
+        let cli = Cli::try_parse_from(["right", "agent", "migrate-sandbox", "finance"])
+            .expect("`right agent migrate-sandbox <agent>` must parse");
+        match cli.command {
+            Commands::Agent {
+                command: AgentCommands::MigrateSandbox { name },
+            } => assert_eq!(name, "finance"),
+            _ => panic!("migrate-sandbox did not parse into its own subcommand"),
+        }
+        assert!(
+            right_agent_config::OPENSHELL_UNMIGRATED.contains("right agent migrate-sandbox"),
+            "the rejection message must point at the command that fixes it"
+        );
     }
 
     #[test]
@@ -575,6 +592,15 @@ pub enum AgentCommands {
     Providers {
         #[command(subcommand)]
         command: AgentProvidersCommands,
+    },
+    /// Move an agent out of its OpenShell sandbox into a microsandbox VM.
+    /// The old sandbox is deleted only after the restore is verified; any
+    /// earlier failure leaves the agent exactly as it was, so a failed
+    /// migration can simply be re-run.
+    #[command(name = "migrate-sandbox")]
+    MigrateSandbox {
+        /// Agent name
+        name: String,
     },
 }
 
@@ -1381,6 +1407,9 @@ async fn main() -> miette::Result<()> {
             }
             AgentCommands::Skill { command } => cmd_agent_skill(&home, command).await,
             AgentCommands::Providers { command } => cmd_agent_providers(&home, command).await,
+            AgentCommands::MigrateSandbox { name } => {
+                migrate_sandbox::cmd_agent_migrate_sandbox(&home, &name).await
+            }
         },
         Commands::Memory { command } => match command {
             MemoryCommands::List {

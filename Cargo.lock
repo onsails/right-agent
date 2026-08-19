@@ -5920,6 +5920,7 @@ dependencies = [
 name = "right-agent"
 version = "0.4.2"
 dependencies = [
+ "anyhow",
  "chrono",
  "const_format",
  "cron",

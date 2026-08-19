@@ -1181,19 +1181,24 @@ pub async fn tear_down_control_master(config_path: &Path, host: &str, socket_pat
 /// Runs tar from inside the sandbox root and rewrites archive entries under
 /// `sandbox_path`, piping stdout directly to `dest_path` without buffering in
 /// memory.
+///
+/// `excludes` are guest-home-relative paths (`".cache"`,
+/// `".claude/settings.json"`) left out of the archive together with their
+/// children. Plain backups pass [`DEFAULT_REBUILDABLE_BACKUP_EXCLUDES`]; the
+/// sandbox migration passes its own, wider set.
 pub async fn ssh_tar_download(
     config_path: &Path,
     ssh_host: &str,
     sandbox_path: &str,
     dest_path: &Path,
-    include_rebuildable: bool,
+    excludes: &[&str],
     timeout_secs: u64,
 ) -> miette::Result<()> {
     let mut command = Command::new("ssh");
     command.arg("-F").arg(config_path);
     command.arg(ssh_host);
     command.arg("--");
-    let tar_args = sandbox_tar_download_args(sandbox_path, include_rebuildable)?;
+    let tar_args = sandbox_tar_download_args(sandbox_path, excludes)?;
     command.arg(quote_ssh_remote_args(tar_args.iter().map(String::as_str))?);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -1275,10 +1280,7 @@ pub fn quote_ssh_remote_args<'a>(
         .map_err(|e| miette::miette!("failed to quote SSH remote command args: {e}"))
 }
 
-fn sandbox_tar_download_args(
-    sandbox_path: &str,
-    include_rebuildable: bool,
-) -> miette::Result<Vec<String>> {
+fn sandbox_tar_download_args(sandbox_path: &str, excludes: &[&str]) -> miette::Result<Vec<String>> {
     let archive_root = sandbox_path.trim_matches('/');
     if archive_root.is_empty() {
         miette::bail!("sandbox path must not be empty");
@@ -1296,13 +1298,11 @@ fn sandbox_tar_download_args(
         format!("--transform=flags=rh;s,^\\./,{archive_root}/,"),
     ];
 
-    if !include_rebuildable {
-        for path in DEFAULT_REBUILDABLE_BACKUP_EXCLUDES {
-            // GNU tar evaluates excludes before transforms, so match names as
-            // seen under `-C /sandbox .`, not final `sandbox/...` archive names.
-            args.push(format!("--exclude=./{path}"));
-            args.push(format!("--exclude=./{path}/*"));
-        }
+    for path in excludes {
+        // GNU tar evaluates excludes before transforms, so match names as
+        // seen under `-C /sandbox .`, not final `sandbox/...` archive names.
+        args.push(format!("--exclude=./{path}"));
+        args.push(format!("--exclude=./{path}/*"));
     }
 
     args.push(".".to_string());

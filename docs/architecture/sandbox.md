@@ -4,6 +4,30 @@
 > subsystem (see `AGENTS.md` → "Architecture docs split"). Code is
 > authoritative; this file may have drifted.
 
+## Migrating out of OpenShell
+
+`right agent migrate-sandbox <agent>` moves an agent whose `agent.yaml` still
+carries `sandbox.mode: openshell` into a microsandbox VM. The order is the
+safety property, so it is worth stating: archive the OpenShell home (kept under
+`~/.right/backups/<agent>/migrate-<stamp>/`), create the new sandbox from the
+same spec builder the bot uses, extract with `--no-same-owner`, hand every
+top-level entry except `.platform` to the guest user, **verify**, only then
+rewrite `agent.yaml`, and only then delete the OpenShell sandbox. Any failure
+before the verification deletes the new sandbox and leaves both the OpenShell
+sandbox and the original `agent.yaml` untouched, so the command can just be run
+again.
+
+Provider credentials do not come along: OpenShell's `GetProvider` returns
+`"REDACTED"`, so the migration reports the provider names the old sandbox had
+attached and the operator re-adds them from the dashboard's `/providers` flow.
+Writing credential-less provider records instead would be worse than useless —
+the bot hard-fails startup on a provider it cannot bind, which would take the
+dashboard down with it.
+
+Code: `crates/right/src/migrate_sandbox.rs` (OpenShell side, `agent.yaml`
+rewrite) and `right_agent::sandbox_migrate` (guest side: extract, ownership,
+verification).
+
 ## OpenShell Sandbox Architecture
 
 Sandboxes are **persistent** — never deleted automatically. They live as long as the agent lives and survive bot restarts.

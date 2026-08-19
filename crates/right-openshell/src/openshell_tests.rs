@@ -156,7 +156,7 @@ fn ssh_host_for_sandbox_formats_correctly() {
 #[test]
 fn sandbox_tar_download_args_reads_sandbox_dir_and_preserves_archive_root() {
     assert_eq!(
-        sandbox_tar_download_args("sandbox", true).unwrap(),
+        sandbox_tar_download_args("sandbox", &[]).unwrap(),
         vec![
             "tar",
             "czpf",
@@ -366,8 +366,8 @@ fn sandbox_response_decodes_metadata_and_status_phase_layout() {
 }
 
 #[test]
-fn sandbox_tar_download_args_excludes_rebuildable_dirs_by_default() {
-    let args = sandbox_tar_download_args("sandbox", false).unwrap();
+fn sandbox_tar_download_args_emits_directory_and_child_excludes() {
+    let args = sandbox_tar_download_args("sandbox", DEFAULT_REBUILDABLE_BACKUP_EXCLUDES).unwrap();
 
     assert_eq!(&args[0..5], ["tar", "czpf", "-", "-C", "/sandbox"]);
     assert!(args.contains(&"--transform=flags=rh;s,^\\.$,sandbox,".to_string()));
@@ -387,8 +387,8 @@ fn sandbox_tar_download_args_excludes_rebuildable_dirs_by_default() {
 }
 
 #[test]
-fn sandbox_tar_download_args_include_rebuildable_has_no_rebuildable_excludes() {
-    let args = sandbox_tar_download_args("sandbox", true).unwrap();
+fn sandbox_tar_download_args_without_excludes_emits_no_exclude_flags() {
+    let args = sandbox_tar_download_args("sandbox", &[]).unwrap();
 
     assert_eq!(&args[0..5], ["tar", "czpf", "-", "-C", "/sandbox"]);
     assert!(args.contains(&"--transform=flags=rh;s,^\\.$,sandbox,".to_string()));
@@ -411,7 +411,7 @@ fn sandbox_tar_download_args_include_rebuildable_has_no_rebuildable_excludes() {
 fn sandbox_tar_download_remote_command_quotes_transform_semicolons_for_shell() {
     use std::process::Command;
 
-    let args = sandbox_tar_download_args("sandbox", false).unwrap();
+    let args = sandbox_tar_download_args("sandbox", DEFAULT_REBUILDABLE_BACKUP_EXCLUDES).unwrap();
     let remote_command = quote_ssh_remote_args(args.iter().map(String::as_str)).unwrap();
     let probe = format!(
         "tar() {{ for arg in \"$@\"; do printf '<%s>\\n' \"$arg\"; done; }}; {remote_command}"
@@ -676,7 +676,7 @@ fn sandbox_tar_download_args_preserves_relative_symlink_targets() {
     symlink("./target", src.join("link")).unwrap();
     std::fs::hard_link(src.join("target"), src.join("hard")).unwrap();
 
-    let mut args = sandbox_tar_download_args("sandbox", true).unwrap();
+    let mut args = sandbox_tar_download_args("sandbox", &[]).unwrap();
     assert_eq!(args.remove(0), "tar");
     let archive_arg = args.iter().position(|arg| arg == "-").unwrap();
     args[archive_arg] = archive.to_string_lossy().into_owned();
