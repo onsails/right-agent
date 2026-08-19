@@ -1,11 +1,15 @@
 # microsandbox migration — design
 
-Status: approved, not started. Supersedes the OpenShell policy/providers work
-described in the 2026-08-19 handoff.
+Status: approved. Stage 1 (assumption gate) is complete — see
+`docs/superpowers/plans/2026-08-19-microsandbox-assumption-verdicts.md` for the
+verdicts and the corrections they force. Delivery is staged per
+`docs/superpowers/plans/2026-08-19-microsandbox-stacked-delivery.md`.
+Supersedes the OpenShell policy/providers work described in the 2026-08-19
+handoff.
 
 Related: `docs/adr/0001-microsandbox-replaces-openshell.md`,
 `docs/adr/0002-right-owned-provider-credential-store.md`,
-`docs/adr/0003-tls-interception-scoped-to-provider-hosts.md`, `CONTEXT.md`.
+`docs/adr/0003-tls-interception-bypass-deny-list.md`, `CONTEXT.md`.
 
 ## Why
 
@@ -47,10 +51,13 @@ conflict that blocks OpenShell.
 | Testing | No fake backend. Sandbox-touching tests become real-VM `ci_msb_*` tests that do not run on GitHub-hosted runners. |
 | Migration | Explicit `right agent migrate-sandbox`; the bot refuses to start against an unmigrated Agent with an actionable message. |
 
-## Proof-of-concept gate
+## Proof-of-concept gate — PASSED
 
-No refactoring starts until all seven hold on an Apple Silicon workstation. Each is
-currently unverified; failure of 1, 2, or 5 changes the design.
+All seven assumptions verified on an Apple Silicon host against microsandbox
+`=0.6.10`. Verdicts and the design corrections they forced are in
+`docs/superpowers/plans/2026-08-19-microsandbox-assumption-verdicts.md`. The
+probes remain as the `ci_msb_*` contract suite under
+`crates/right-sandbox/tests/`. The original gate text is kept below.
 
 1. `claude -p` runs under `sandbox.exec_stream()` with piped stdin and `stream-json`
    stdout, including a long turn that outlives any idle timeout.

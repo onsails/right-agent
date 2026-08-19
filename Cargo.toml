@@ -19,6 +19,7 @@ members = [
     "crates/right-hostpath",
     "crates/right-process",
     "crates/right-openshell",
+    "crates/right-sandbox",
     "crates/right-platform-store",
 ]
 resolver = "3"
@@ -44,6 +45,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "form"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rcgen = "0.14"
 tokio = { version = "1.52", features = ["full"] }
 which = "8.0"
 turso = { version = "0.7", features = ["sync"] }
