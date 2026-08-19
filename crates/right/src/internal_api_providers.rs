@@ -397,7 +397,7 @@ pub(crate) async fn handle_provider_create(
     };
     let name = right_providers::new_record_name(&req.type_);
     validate_name(&req.agent, &name)?;
-    let _guard = provider_lock(&state, &req.agent).await;
+    let _guard = state.providers.agent_lock(&req.agent).await;
 
     let cfg = load_agent_config(&state.agents_dir, &req.agent)
         .map_err(ProviderApiError::AgentYamlWrite)?;
@@ -466,7 +466,7 @@ pub(crate) async fn handle_provider_rotate(
     axum::Json(req): axum::Json<ProviderRotateReq>,
 ) -> Result<axum::Json<ProviderView>, ProviderApiError> {
     validate_name(&req.agent, &req.name)?;
-    let _guard = provider_lock(&state, &req.agent).await;
+    let _guard = state.providers.agent_lock(&req.agent).await;
 
     let cfg = load_agent_config(&state.agents_dir, &req.agent)
         .map_err(ProviderApiError::AgentYamlWrite)?;
@@ -512,7 +512,7 @@ pub(crate) async fn handle_provider_config_update(
     axum::Json(req): axum::Json<ProviderConfigUpdateReq>,
 ) -> Result<axum::Json<ProviderView>, ProviderApiError> {
     validate_name(&req.agent, &req.name)?;
-    let _guard = provider_lock(&state, &req.agent).await;
+    let _guard = state.providers.agent_lock(&req.agent).await;
 
     let cfg = load_agent_config(&state.agents_dir, &req.agent)
         .map_err(ProviderApiError::AgentYamlWrite)?;
@@ -652,7 +652,7 @@ pub(crate) async fn handle_provider_share(
     validate_name(&req.dest_agent, &req.provider)?;
     // Share locks the DEST agent only: the dest agent.yaml RMW is the only
     // mutation on that side (byte-compat contract).
-    let _guard = provider_lock(&state, &req.dest_agent).await;
+    let _guard = state.providers.agent_lock(&req.dest_agent).await;
 
     // The store resolves the true owner for a re-share and enforces the
     // share plan (no share into self, no name collision at the destination)
@@ -692,7 +692,7 @@ pub(crate) async fn handle_provider_unshare(
 ) -> Result<axum::Json<ProviderRemoveResp>, ProviderApiError> {
     require_trusted(&state.agents_dir, &req.borrower_agent, req.actor_user_id)?;
     validate_name(&req.borrower_agent, &req.provider)?;
-    let _guard = provider_lock(&state, &req.borrower_agent).await;
+    let _guard = state.providers.agent_lock(&req.borrower_agent).await;
 
     let cfg = load_agent_config(&state.agents_dir, &req.borrower_agent)
         .map_err(ProviderApiError::AgentYamlWrite)?;
@@ -744,7 +744,7 @@ pub(crate) async fn handle_provider_remove(
     axum::Json(req): axum::Json<ProviderRemoveReq>,
 ) -> Result<axum::Json<ProviderRemoveResp>, ProviderApiError> {
     validate_name(&req.agent, &req.name)?;
-    let _guard = provider_lock(&state, &req.agent).await;
+    let _guard = state.providers.agent_lock(&req.agent).await;
 
     let cfg = load_agent_config(&state.agents_dir, &req.agent)
         .map_err(ProviderApiError::AgentYamlWrite)?;
@@ -964,31 +964,6 @@ pub(crate) async fn handle_provider_peers(
 
 // ── agent.yaml writers (write_merged_rmw) ────────────────────────────────────
 
-/// Acquire the per-agent provider mutation lock.
-///
-/// All provider mutations on a given agent eventually RMW the same
-/// `agents/<agent>/agent.yaml`. Keying the lock on `agent` alone (not on
-/// `(agent, name)`) serializes those RMWs and prevents a last-write-wins
-/// race that would otherwise drop one of two concurrently-created
-/// providers from agent.yaml while leaving store state already mutated
-/// for it (an orphan).
-///
-/// Callers MUST invoke `validate_name(agent, name)` (where applicable)
-/// before this so the lock map's key space stays bounded to validated
-/// agent names — user-supplied agents that fail validation never reach
-/// the lock map.
-pub(crate) async fn provider_lock(
-    state: &crate::internal_api::InternalState,
-    agent: &str,
-) -> tokio::sync::OwnedMutexGuard<()> {
-    let lock = {
-        let mut map = state.provider_locks.lock().await;
-        map.entry(agent.to_string())
-            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    };
-    lock.lock_owned().await
-}
 
 /// Render a free-form string as a single-quoted YAML scalar. Single quotes
 /// inside the value are escaped per the YAML 1.1/1.2 spec by doubling them
@@ -2011,8 +1986,8 @@ mod handler_tests {
     }
 
     /// Build a minimal `InternalState` rooted at `tmp/agents` with a store in
-    /// `tmp`, so unit tests can exercise `provider_lock` and the agent.yaml
-    /// RMW writer directly without going through the axum router.
+    /// `tmp`, so unit tests can exercise the store's per-agent `agent_lock` and
+    /// the agent.yaml RMW writer directly without going through the axum router.
     async fn make_provider_test_state(tmp: &std::path::Path) -> crate::internal_api::InternalState {
         use crate::aggregator::{AgentInfo, BackendRegistry};
         use crate::right_backend::RightBackend;
@@ -2337,14 +2312,14 @@ mod handler_tests {
     }
 
     /// Many concurrent provider mutations for DISTINCT providers on the SAME
-    /// agent must all end up in agent.yaml. Keying `provider_lock` on
+    /// agent must all end up in agent.yaml. Keying the store's `agent_lock` on
     /// `(agent, name)` would let different names take different locks, and
     /// last-write-wins RMW would silently drop entries (store already
     /// mutated, agent.yaml an orphan). The per-agent lock serializes the
     /// whole read+write window.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn concurrent_provider_create_serializes_on_same_agent() {
-        use super::{load_agent_config, provider_lock, serialize_provider_entry};
+        use super::{load_agent_config, serialize_provider_entry};
 
         let tmp = tempfile::tempdir().unwrap();
         let state = make_provider_test_state(tmp.path()).await;
@@ -2379,11 +2354,11 @@ mod handler_tests {
             let state = state.clone();
             let agent_yaml = agent_yaml.clone();
             tasks.push(tokio::spawn(async move {
-                let _guard = provider_lock(&state, "hostagent").await;
+                let _guard = state.providers.agent_lock("hostagent").await;
                 let existing = tokio::fs::read_to_string(&agent_yaml).await.unwrap();
                 // Hold open the RMW window: under a per-name lock every task
                 // reaches this sleep concurrently; under the per-agent lock
-                // the next task is still blocked on `provider_lock`.
+                // the next task is still blocked on `agent_lock`.
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let updated =
                     super::insert_provider_entry(&existing, &serialize_provider_entry(&entry))

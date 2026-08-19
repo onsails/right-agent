@@ -157,18 +157,9 @@ pub(crate) struct InternalState {
     /// gateway in these handlers). Never exposes a credential value on a read
     /// path.
     pub(crate) providers: std::sync::Arc<right_providers::ProviderStore>,
-    /// Per-agent serialization for provider mutations. Keyed on agent name
-    /// alone — every provider operation eventually does an RMW on the same
-    /// `agents/<agent>/agent.yaml`, so a finer (agent, name) key would let
-    /// two concurrent creates for distinct providers on the same agent race
-    /// the file and silently drop one entry (gateway/policy mutated, but
-    /// agent.yaml only retains the last writer's content). Different agents
-    /// remain independent.
-    pub(crate) provider_locks: std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
-        >,
-    >,
+    // Per-agent provider-mutation serialization lives in the store
+    // (`ProviderStore::agent_lock`), which is the single lock owner — there is
+    // no second per-agent lock domain here to fall out of sync with it.
 }
 
 #[cfg(test)]
@@ -194,7 +185,6 @@ impl InternalState {
             token_map_path,
             agents_dir,
             providers: std::sync::Arc::new(providers),
-            provider_locks: Default::default(),
         }
     }
 }
@@ -227,7 +217,6 @@ pub(crate) fn internal_router(
         token_map_path,
         agents_dir,
         providers: std::sync::Arc::new(providers),
-        provider_locks: Default::default(),
     };
     Router::new()
         .route("/mcp-add", post(handle_mcp_add))

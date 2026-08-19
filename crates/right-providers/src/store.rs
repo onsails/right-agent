@@ -52,10 +52,18 @@ const KIND_GENERIC: &str = "generic";
 /// Prefix of the host environment variable a source-ref secret resolves from.
 const SOURCE_ENV_PREFIX: &str = "RIGHT_PROVIDER_";
 
-/// Columns of an owning row, in the order [`owned_row`] decodes them.
-const OWNED_COLUMNS: &str = "owner_agent, name, kind, builtin_slug, env_var, label, \
-     upstream_hosts, upstream_path_prefix, updated_at, \
-     (credential IS NOT NULL AND credential <> '' AND credential <> 'REDACTED')";
+/// Columns of an owning row, in the order [`owned_row`] decodes them. The
+/// has_credential expression embeds the single REDACTION_SENTINEL constant —
+/// never a second literal — so a sentinel change cannot split the store's own
+/// definition of "credential present".
+static OWNED_COLUMNS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "owner_agent, name, kind, builtin_slug, env_var, label, \
+         upstream_hosts, upstream_path_prefix, updated_at, \
+         (credential IS NOT NULL AND credential <> '' AND credential <> '{}')",
+        crate::record::REDACTION_SENTINEL
+    )
+});
 
 /// The host environment variable a record's credential is resolved from at
 /// sandbox spawn.
@@ -183,10 +191,8 @@ impl std::fmt::Debug for ProviderStore {
             .finish_non_exhaustive()
     }
 }
-
-/// Serializes the per-agent critical sections callers wrap around a
-/// multi-step provider flow.
-pub struct AgentGuard(#[allow(dead_code)] tokio::sync::OwnedMutexGuard<()>);
+/// A held per-agent lock. Dropping it releases the critical section.
+pub struct AgentGuard(tokio::sync::OwnedMutexGuard<()>);
 
 impl std::fmt::Debug for AgentGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -195,18 +201,20 @@ impl std::fmt::Debug for AgentGuard {
 }
 
 /// Current wall-clock seconds since the unix epoch.
+///
+/// A clock fault is a host condition, not client input, so it maps to
+/// `Storage` (HTTP 500), never to a 400-class validation variant.
 fn now_unix() -> Result<i64, StoreError> {
+    let clock_fault = |reason: String| StoreError::Storage {
+        path: std::path::PathBuf::from("<system clock>"),
+        reason,
+    };
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| StoreError::InvalidName {
-            name: String::new(),
-            reason: format!("system clock is before the unix epoch: {e}"),
-        })?
+        .map_err(|e| clock_fault(format!("system clock is before the unix epoch: {e}")))?
         .as_secs();
-    i64::try_from(secs).map_err(|_| StoreError::InvalidName {
-        name: String::new(),
-        reason: "system clock is beyond the representable range".into(),
-    })
+    i64::try_from(secs)
+        .map_err(|_| clock_fault("system clock is beyond the representable range".into()))
 }
 
 /// Idempotent schema. Every statement is `IF NOT EXISTS`, so re-running the
@@ -385,8 +393,10 @@ async fn owned_row_for(
     owner: &str,
     name: &str,
 ) -> Result<Option<OwnedRow>, StoreError> {
-    let sql =
-        format!("SELECT {OWNED_COLUMNS} FROM providers WHERE owner_agent = ?1 AND name = ?2");
+    let sql = format!(
+        "SELECT {} FROM providers WHERE owner_agent = ?1 AND name = ?2",
+        OWNED_COLUMNS.as_str()
+    );
     let mut rows = conn.query_all(&sql, params![owner, name], owned_row).await?;
     Ok(rows.pop())
 }
@@ -465,7 +475,8 @@ impl ProviderStore {
     /// by name. Never carries a credential value.
     pub async fn list(&self, agent: &str) -> Result<Vec<ProviderRecord>, StoreError> {
         let owned_sql = format!(
-            "SELECT {OWNED_COLUMNS} FROM providers WHERE owner_agent = ?1 ORDER BY name"
+            "SELECT {} FROM providers WHERE owner_agent = ?1 ORDER BY name",
+            OWNED_COLUMNS.as_str()
         );
         let mut records: Vec<ProviderRecord> = self
             .conn
@@ -478,14 +489,15 @@ impl ProviderStore {
         // Correlated EXISTS rather than a join so every column in
         // `OWNED_COLUMNS` stays unambiguously a `providers` column.
         let borrowed_sql = format!(
-            "SELECT {OWNED_COLUMNS} FROM providers
+            "SELECT {} FROM providers
              WHERE EXISTS (
                  SELECT 1 FROM provider_borrows
                  WHERE provider_borrows.borrower_agent = ?1
                    AND provider_borrows.owner_agent = providers.owner_agent
                    AND provider_borrows.name = providers.name
              )
-             ORDER BY providers.name"
+             ORDER BY providers.name",
+            OWNED_COLUMNS.as_str()
         );
         records.extend(
             self.conn
@@ -556,9 +568,21 @@ fn kind_columns(kind: &ProviderKind) -> Result<KindColumns, StoreError> {
 async fn bound_env_vars(conn: &Connection, agent: &str) -> Result<Vec<String>, StoreError> {
     let mut env_vars = Vec::new();
     for held in held_providers(conn, agent).await? {
-        let Some(row) = owned_row_for(conn, &held.owner_agent, &held.name).await? else {
-            continue;
-        };
+        // A borrow row without its owning row is corruption (a dangling
+        // reference), not a miss — resolve() fails loud on the same condition,
+        // and a create's env-var collision check must not silently pass
+        // against an env var the missing row already bound.
+        let row = owned_row_for(conn, &held.owner_agent, &held.name)
+            .await?
+            .ok_or_else(|| {
+                StoreError::storage(
+                    conn.path(),
+                    format!(
+                        "agent \"{agent}\" holds \"{}\" from \"{}\", which has no such record",
+                        held.name, held.owner_agent
+                    ),
+                )
+            })?;
         let record = row.into_record(None);
         env_vars.push(record.env_var);
     }
@@ -893,6 +917,18 @@ fn publish_source_value(var: &str, value: &str) {
     // SAFETY: serialized against every other writer in this process; see the
     // function docs for why an environment write is unavoidable here.
     unsafe { std::env::set_var(var, value) };
+}
+
+/// Remove a published source variable. Test-only: lets tests of the
+/// source-ref publish path leave the process environment as they found it, so
+/// a later test never observes a value an earlier test set.
+#[cfg(test)]
+pub(crate) fn remove_source_value(var: &str) {
+    let _guard = ENV_PUBLISH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: serialized against every other writer in this process.
+    unsafe { std::env::remove_var(var) };
 }
 
 impl ProviderStore {

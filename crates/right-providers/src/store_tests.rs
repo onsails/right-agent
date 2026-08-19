@@ -393,6 +393,8 @@ async fn source_ref_binding_carries_names_and_hosts_only() -> Result<()> {
         std::env::var("RIGHT_PROVIDER_FAL_A1B2C3").ok().as_deref(),
         Some("real-value")
     );
+    // Leave the process environment as we found it (AGENTS.rust.md §5).
+    crate::store::remove_source_value("RIGHT_PROVIDER_FAL_A1B2C3");
     Ok(())
 }
 
@@ -407,6 +409,7 @@ async fn a_borrower_can_bind_the_owner_s_credential() -> Result<()> {
     let binding = store.source_ref_binding("right", "generic-b0rr0w").await?;
     assert_eq!(binding.env_var, "BORROW_KEY");
     assert_eq!(binding.allowed_hosts, vec!["api.example.com"]);
+    crate::store::remove_source_value("RIGHT_PROVIDER_GENERIC_B0RR0W");
     Ok(())
 }
 
