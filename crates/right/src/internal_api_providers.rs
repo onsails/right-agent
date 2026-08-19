@@ -720,8 +720,24 @@ pub(crate) async fn handle_provider_unshare(
         .unshare(&req.borrower_agent, &req.provider)
         .await
         .map_err(store_err)?;
-    remove_provider_from_yaml(&state.agents_dir, &req.borrower_agent, &req.provider)
-        .map_err(|e| ProviderApiError::AgentYamlWrite(format!("{e:#}")))?;
+    if let Err(e) =
+        remove_provider_from_yaml(&state.agents_dir, &req.borrower_agent, &req.provider)
+    {
+        // Compensate: re-attach the borrow so the store never drops a
+        // reference the yaml still declares (mirrors the share handler's
+        // rollback). `record` was fetched before the unshare and still holds
+        // the true owner.
+        state
+            .providers
+            .share(&record.owner_agent, &req.provider, &req.borrower_agent)
+            .await
+            .map_err(|rollback_err| {
+                ProviderApiError::Internal(format!(
+                    "agent.yaml removal failed ({e:#}) AND unshare rollback failed: {rollback_err:#}"
+                ))
+            })?;
+        return Err(ProviderApiError::AgentYamlWrite(format!("{e:#}")));
+    }
 
     Ok(axum::Json(ProviderRemoveResp { removed: true }))
 }
@@ -754,6 +770,12 @@ pub(crate) async fn handle_provider_remove(
     // read-only) and re-homes the record to a surviving borrower when the
     // owner deletes it — the credential stays reachable for every agent that
     // still declares it and exactly one authority remains.
+    //
+    // Accepted divergence: once the credential is destroyed the store
+    // mutation cannot be compensated, so a subsequent agent.yaml failure
+    // leaves the yaml declaring a provider the store no longer has. That
+    // diverges fail-loud (the next spawn's source_ref_binding returns
+    // NotFound) rather than silently. Matches the old gateway behavior.
     state
         .providers
         .remove(&req.agent, &req.name)
