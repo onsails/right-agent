@@ -61,13 +61,13 @@ This task adds new files only. `ARCHITECTURE.md` is not edited — content is br
 - [ ] Run:
 
 ```bash
-mkdir -p /Users/developer/dev/rightclaw/docs/architecture
+mkdir -p /Users/molt/dev/rightclaw/docs/architecture
 ```
 
 ### Step 1.2: Create `modules.md`
 
 - [ ] Read `ARCHITECTURE.md` lines 13–42 (the `## Module Map` section through end of `### right-bot` subsection).
-- [ ] Write `/Users/developer/dev/rightclaw/docs/architecture/modules.md` with this structure:
+- [ ] Write `/Users/molt/dev/rightclaw/docs/architecture/modules.md` with this structure:
   - Line 1: `# Modules`
   - Line 2: blank
   - Lines 3–5: the status-header blockquote (verbatim, see "File Structure" above).
@@ -78,7 +78,7 @@ The result is a self-contained file that preserves the original section verbatim
 
 ### Step 1.3: Create `lifecycle.md`
 
-- [ ] Write `/Users/developer/dev/rightclaw/docs/architecture/lifecycle.md` containing, in order:
+- [ ] Write `/Users/molt/dev/rightclaw/docs/architecture/lifecycle.md` containing, in order:
   - Title: `# Lifecycle and runtime flows`
   - blank line
   - status-header blockquote (verbatim)
@@ -91,7 +91,7 @@ The result is a self-contained file that preserves the original section verbatim
 
 ### Step 1.4: Create `sandbox.md`
 
-- [ ] Write `/Users/developer/dev/rightclaw/docs/architecture/sandbox.md` containing:
+- [ ] Write `/Users/molt/dev/rightclaw/docs/architecture/sandbox.md` containing:
   - `# OpenShell sandbox`
   - blank line
   - status-header blockquote
@@ -102,7 +102,7 @@ The result is a self-contained file that preserves the original section verbatim
 
 ### Step 1.5: Create `mcp.md`
 
-- [ ] Write `/Users/developer/dev/rightclaw/docs/architecture/mcp.md` containing:
+- [ ] Write `/Users/molt/dev/rightclaw/docs/architecture/mcp.md` containing:
   - `# MCP Aggregator and token refresh`
   - blank line
   - status-header blockquote
@@ -113,7 +113,7 @@ The result is a self-contained file that preserves the original section verbatim
 
 ### Step 1.6: Create `memory.md`
 
-- [ ] Write `/Users/developer/dev/rightclaw/docs/architecture/memory.md` containing:
+- [ ] Write `/Users/molt/dev/rightclaw/docs/architecture/memory.md` containing:
   - `# Memory subsystem`
   - blank line
   - status-header blockquote
@@ -124,7 +124,7 @@ The result is a self-contained file that preserves the original section verbatim
 
 ### Step 1.7: Create `sessions.md`
 
-- [ ] Write `/Users/developer/dev/rightclaw/docs/architecture/sessions.md` containing:
+- [ ] Write `/Users/molt/dev/rightclaw/docs/architecture/sessions.md` containing:
   - `# Sessions, streams, reflection, cron schedules`
   - blank line
   - status-header blockquote
@@ -142,8 +142,8 @@ The result is a self-contained file that preserves the original section verbatim
 - [ ] Run:
 
 ```bash
-ls -la /Users/developer/dev/rightclaw/docs/architecture/
-wc -c /Users/developer/dev/rightclaw/docs/architecture/*.md
+ls -la /Users/molt/dev/rightclaw/docs/architecture/
+wc -c /Users/molt/dev/rightclaw/docs/architecture/*.md
 ```
 
 Expected output: six `.md` files, with sizes roughly: `modules.md` ~3 KB, `lifecycle.md` ~7 KB, `sandbox.md` ~2 KB, `mcp.md` ~2 KB, `memory.md` ~5 KB, `sessions.md` ~5 KB. ±20 % is fine — the targets are guidance, not contracts.
@@ -153,7 +153,7 @@ Expected output: six `.md` files, with sizes roughly: `modules.md` ~3 KB, `lifec
 - [ ] Run:
 
 ```bash
-rg '^@' /Users/developer/dev/rightclaw/docs/architecture/ || echo "OK: no @-imports"
+rg '^@' /Users/molt/dev/rightclaw/docs/architecture/ || echo "OK: no @-imports"
 ```
 
 Expected: `OK: no @-imports`. (The `^@` pattern catches `@`-import lines specifically; mid-line `@` mentions in prose are fine.)
@@ -163,7 +163,7 @@ Expected: `OK: no @-imports`. (The `^@` pattern catches `@`-import lines specifi
 - [ ] Run:
 
 ```bash
-for f in /Users/developer/dev/rightclaw/docs/architecture/*.md; do
+for f in /Users/molt/dev/rightclaw/docs/architecture/*.md; do
   if ! grep -q "Status:.*descriptive doc" "$f"; then
     echo "MISSING status header: $f"
   fi
@@ -178,7 +178,7 @@ Expected: only `Status check done.` printed (no `MISSING` lines).
 - [ ] Run:
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 git add docs/architecture/
 git status
 ```
@@ -206,7 +206,7 @@ EOF
 This task deletes `MOVE` sections, replaces `TIGHTEN` sections with shorter prescriptive versions, and adds plain-path pointers where deletions happened. After this commit there is no duplicated content.
 
 **Files:**
-- Modify: `/Users/developer/dev/rightclaw/ARCHITECTURE.md`
+- Modify: `/Users/molt/dev/rightclaw/ARCHITECTURE.md`
 
 ### Step 2.1: Delete `## Module Map` and replace with pointer
 
@@ -445,7 +445,7 @@ for stream-logging detail.
 - [ ] Run:
 
 ```bash
-wc -c /Users/developer/dev/rightclaw/ARCHITECTURE.md
+wc -c /Users/molt/dev/rightclaw/ARCHITECTURE.md
 ```
 
 Expected: between **12,000 and 20,000 bytes** (target ~14,000–16,000). If significantly larger, check that all `MOVE` sections were actually deleted, not just commented.
@@ -453,7 +453,7 @@ Expected: between **12,000 and 20,000 bytes** (target ~14,000–16,000). If sign
 - [ ] Run:
 
 ```bash
-grep -c '^See: `docs/architecture/' /Users/developer/dev/rightclaw/ARCHITECTURE.md
+grep -c '^See: `docs/architecture/' /Users/molt/dev/rightclaw/ARCHITECTURE.md
 ```
 
 Expected: **at least 11** (one per `MOVE`/`TIGHTEN` row that points at a satellite — Module Map, Agent Lifecycle, Voice transcription, OpenShell Sandbox, Login Flow, MCP Token Refresh, MCP Aggregator, Reflection, Stream Logging, Cron Schedule Kinds, Per-session mutex, Memory, Memory Resilience, Logging — count ≥11; some sections may share pointers).
@@ -461,7 +461,7 @@ Expected: **at least 11** (one per `MOVE`/`TIGHTEN` row that points at a satelli
 - [ ] Run:
 
 ```bash
-grep -E '^(##|###) ' /Users/developer/dev/rightclaw/ARCHITECTURE.md
+grep -E '^(##|###) ' /Users/molt/dev/rightclaw/ARCHITECTURE.md
 ```
 
 Expected: every original `STAY`/`TIGHTEN` heading is still present. The `MOVE` headings (Module Map, Agent Lifecycle, Voice transcription, Login Flow, MCP Token Refresh, Stream Logging, Per-session mutex, Memory, Memory Resilience Layer) **must still appear as headings** — they were replaced with pointers, not deleted, so the heading remains followed by a 1–2 line pointer.
@@ -471,7 +471,7 @@ Expected: every original `STAY`/`TIGHTEN` heading is still present. The `MOVE` h
 - [ ] Run:
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 rg 'ARCHITECTURE\.md#' --type md --type rust 2>/dev/null
 ```
 
@@ -484,7 +484,7 @@ Expected: results, if any, point only at headings that still exist in the trimme
 - [ ] Run:
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 git add ARCHITECTURE.md
 git status
 ```
@@ -516,7 +516,7 @@ EOF
 Drop the dependency-rationale block, add the "Architecture docs split" convention, and add a one-line Stack note under `### Constraints`.
 
 **Files:**
-- Modify: `/Users/developer/dev/rightclaw/CLAUDE.md`
+- Modify: `/Users/molt/dev/rightclaw/CLAUDE.md`
 
 ### Step 3.1: Drop the dependency-rationale block (lines 21–110)
 
@@ -563,7 +563,7 @@ Code is authoritative; the satellite doc is a courtesy to readers.
 - [ ] Run:
 
 ```bash
-wc -c /Users/developer/dev/rightclaw/CLAUDE.md
+wc -c /Users/molt/dev/rightclaw/CLAUDE.md
 ```
 
 Expected: between **3,500 and 6,000 bytes** (target ~5,000).
@@ -571,7 +571,7 @@ Expected: between **3,500 and 6,000 bytes** (target ~5,000).
 - [ ] Run:
 
 ```bash
-grep -E '^##' /Users/developer/dev/rightclaw/CLAUDE.md
+grep -E '^##' /Users/molt/dev/rightclaw/CLAUDE.md
 ```
 
 Expected sections (in order): `## Project`, `## Docs`, `## Conventions`, `## Architecture docs split`, `## Architecture`. The original `## Technology Stack`, `## Recommended Stack`, `## External Dependencies (Not Rust Crates)`, `## Integration Patterns`, `## Alternatives Considered`, `## Cargo.toml Dependencies`, `## Sources` must NOT appear.
@@ -579,7 +579,7 @@ Expected sections (in order): `## Project`, `## Docs`, `## Conventions`, `## Arc
 - [ ] Run:
 
 ```bash
-grep -A1 '^### Constraints' /Users/developer/dev/rightclaw/CLAUDE.md | head -20
+grep -A1 '^### Constraints' /Users/molt/dev/rightclaw/CLAUDE.md | head -20
 ```
 
 Verify the `**Stack**` bullet is present in the Constraints list.
@@ -589,7 +589,7 @@ Verify the `**Stack**` bullet is present in the Constraints list.
 - [ ] Run:
 
 ```bash
-grep '^@' /Users/developer/dev/rightclaw/CLAUDE.md
+grep '^@' /Users/molt/dev/rightclaw/CLAUDE.md
 ```
 
 Expected output (exactly):
@@ -606,7 +606,7 @@ Expected output (exactly):
 - [ ] Run:
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 git add CLAUDE.md
 git status
 ```
@@ -644,7 +644,7 @@ Run the full success-criteria battery from the spec.
 - [ ] Run:
 
 ```bash
-wc -c /Users/developer/dev/rightclaw/ARCHITECTURE.md /Users/developer/dev/rightclaw/CLAUDE.md
+wc -c /Users/molt/dev/rightclaw/ARCHITECTURE.md /Users/molt/dev/rightclaw/CLAUDE.md
 ```
 
 Expected:
@@ -658,7 +658,7 @@ If either is over budget, revisit the corresponding task and tighten further. Bu
 - [ ] Run:
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 rg 'ARCHITECTURE\.md#' --type md --type rust 2>/dev/null || echo "OK: no anchor references"
 ```
 
@@ -669,7 +669,7 @@ Expected: `OK: no anchor references`. If any results appear, verify each anchor 
 - [ ] Run:
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 rg '@docs/architecture' . 2>/dev/null || echo "OK: no @-imports of satellites"
 ```
 
@@ -680,7 +680,7 @@ Expected: `OK: no @-imports of satellites`. (A non-empty result would mean someo
 - [ ] Run:
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 grep -oE 'docs/architecture/[a-z]+\.md' ARCHITECTURE.md | sort -u
 ```
 
@@ -696,7 +696,7 @@ Expected: all `OK:` lines, no `MISSING:`.
 
 ### Step 4.5: SessionStart smoke test
 
-- [ ] In a new terminal, navigate to `/Users/developer/dev/rightclaw` and start `claude` (or your equivalent CLI). Verify the SessionStart hook **does not** fire the `Large ARCHITECTURE.md will impact performance` warning. (The trigger is ≥40 KB; we are well under.)
+- [ ] In a new terminal, navigate to `/Users/molt/dev/rightclaw` and start `claude` (or your equivalent CLI). Verify the SessionStart hook **does not** fire the `Large ARCHITECTURE.md will impact performance` warning. (The trigger is ≥40 KB; we are well under.)
 
 If the warning still fires: the trim was insufficient. Revisit Task 2 and remove more descriptive content.
 
@@ -713,7 +713,7 @@ There should be no remaining 50-line pseudocode blocks, 30-line schema dumps, or
 This plan creates three commits on `master`. **Do not push without the user's go-ahead.** When asked, run:
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 git push
 ```
 

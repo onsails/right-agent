@@ -105,9 +105,9 @@ Add to the `#[cfg(test)] mod tests` block in `crates/rightclaw/src/mcp/internal_
 ```rust
     #[test]
     fn reload_response_deserializes() {
-        let json = r#"{"added":["agent-b","test"],"total":3}"#;
+        let json = r#"{"added":["him","test"],"total":3}"#;
         let resp: ReloadResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.added, vec!["agent-b", "test"]);
+        assert_eq!(resp.added, vec!["him", "test"]);
         assert_eq!(resp.total, 3);
     }
 

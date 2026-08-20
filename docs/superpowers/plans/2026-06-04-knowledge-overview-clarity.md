@@ -798,7 +798,7 @@ Expected: PASS (record any pre-existing unrelated failures noted at baseline).
 Run: `cd crates/right-dashboard/frontend && pnpm vitest run && pnpm build`
 Expected: PASS, build succeeds.
 
-- [ ] **Step 3: Manual smoke against `agent-b` (if a live dashboard is available)**
+- [ ] **Step 3: Manual smoke against `him` (if a live dashboard is available)**
 
 - Overview chart: no chips, no pins under the cost river.
 - Knowledge → Learning: "Failed 7d" shows `0`; a "Refused 5 — …" caption

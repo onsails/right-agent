@@ -152,18 +152,14 @@ pub(crate) struct InternalState {
     token_map: AgentTokenMap,
     token_map_path: PathBuf,
     pub(crate) agents_dir: PathBuf,
-    /// Per-agent serialization for provider mutations. Keyed on agent name
-    /// alone — every provider operation eventually does an RMW on the same
-    /// `agents/<agent>/agent.yaml`, so a finer (agent, name) key would let
-    /// two concurrent creates for distinct providers on the same agent race
-    /// the file and silently drop one entry (gateway/policy mutated, but
-    /// agent.yaml only retains the last writer's content). Different agents
-    /// remain independent.
-    pub(crate) provider_locks: std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
-        >,
-    >,
+    /// Right's provider credential store — the single authority for provider
+    /// records and credentials (stage 3; replaces the OpenShell provider
+    /// gateway in these handlers). Never exposes a credential value on a read
+    /// path.
+    pub(crate) providers: std::sync::Arc<right_providers::ProviderStore>,
+    // Per-agent provider-mutation serialization lives in the store
+    // (`ProviderStore::agent_lock`), which is the single lock owner — there is
+    // no second per-agent lock domain here to fall out of sync with it.
 }
 
 #[cfg(test)]
@@ -179,6 +175,7 @@ impl InternalState {
         token_map: AgentTokenMap,
         token_map_path: PathBuf,
         agents_dir: PathBuf,
+        providers: right_providers::ProviderStore,
     ) -> Self {
         Self {
             dispatcher,
@@ -187,8 +184,19 @@ impl InternalState {
             token_map,
             token_map_path,
             agents_dir,
-            provider_locks: Default::default(),
+            providers: std::sync::Arc::new(providers),
         }
+    }
+}
+
+/// Open (creating if absent) the provider credential store at
+/// `<home>/providers.db`. FATAL on error: the store is the single authority
+/// for provider state, so serving the internal API without it would answer
+/// `/provider-list` with lies. FAIL FAST per AGENTS.rust.md §2.
+pub(crate) async fn open_provider_store(home: &std::path::Path) -> right_providers::ProviderStore {
+    match right_providers::ProviderStore::open(home).await {
+        Ok(store) => store,
+        Err(e) => panic!("cannot open providers.db under {}: {e:#}", home.display()),
     }
 }
 
@@ -199,6 +207,7 @@ pub(crate) fn internal_router(
     token_map: AgentTokenMap,
     token_map_path: PathBuf,
     agents_dir: PathBuf,
+    providers: right_providers::ProviderStore,
 ) -> Router {
     let state = InternalState {
         dispatcher,
@@ -207,7 +216,7 @@ pub(crate) fn internal_router(
         token_map,
         token_map_path,
         agents_dir,
-        provider_locks: Default::default(),
+        providers: std::sync::Arc::new(providers),
     };
     Router::new()
         .route("/mcp-add", post(handle_mcp_add))
@@ -1113,19 +1122,10 @@ async fn handle_reload(State(state): State<InternalState>) -> axum::response::Re
             continue;
         }
 
-        // Determine mTLS dir for sandbox agents
-        let agent_config = right_agent::agent::discovery::parse_agent_config(&agent_dir)
-            .ok()
-            .flatten();
-        let mtls_dir = match &agent_config {
-            Some(config)
-                if *config.sandbox_mode() == right_agent::agent::SandboxMode::Openshell =>
-            {
-                match right_openshell::openshell::preflight_check() {
-                    right_openshell::openshell::OpenShellStatus::Ready(dir) => Some(dir),
-                    _ => None,
-                }
-            }
+        // Every agent is sandboxed, so the mTLS dir is available whenever the
+        // gateway preflight succeeds.
+        let mtls_dir = match right_openshell::openshell::preflight_check() {
+            right_openshell::openshell::OpenShellStatus::Ready(dir) => Some(dir),
             _ => None,
         };
 
@@ -1261,6 +1261,7 @@ mod tests {
             token_map,
             token_map_path,
             tmp.join("agents"),
+            open_provider_store(tmp).await,
         );
         (router, dispatcher)
     }
@@ -2366,6 +2367,7 @@ mod tests {
             token_map,
             token_map_path,
             tmp.path().join("agents"),
+            open_provider_store(tmp.path()).await,
         );
 
         let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;
@@ -2410,7 +2412,8 @@ mod tests {
             reconnect_managers,
             token_map.clone(),
             token_map_path,
-            agents_dir,
+            agents_dir.clone(),
+            open_provider_store(tmp.path()).await,
         );
 
         let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;
@@ -2467,7 +2470,8 @@ mod tests {
             reconnect_managers,
             token_map.clone(),
             token_map_path,
-            agents_dir,
+            agents_dir.clone(),
+            open_provider_store(tmp.path()).await,
         );
 
         let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;

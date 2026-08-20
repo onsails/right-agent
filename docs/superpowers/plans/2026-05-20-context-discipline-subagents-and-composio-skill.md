@@ -480,8 +480,8 @@ If any test fails that pre-existed on the branch (per AGENTS.md: "Record any pre
 This step is operator verification, not part of the automated suite. On a machine with running agents:
 
 ```bash
-right restart agent-b && right restart right
-ls ~/.right/agents/agent-b/.claude/skills/right-composio/
+right restart him && right restart right
+ls ~/.right/agents/him/.claude/skills/right-composio/
 ls ~/.right/agents/right/.claude/skills/right-composio/
 ```
 

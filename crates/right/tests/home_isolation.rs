@@ -52,8 +52,6 @@ fn init_agent_claude_json_has_trust() {
             "-y",
             "--tunnel-hostname",
             "test.example.com",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .success();
@@ -96,8 +94,6 @@ fn init_agent_credentials_is_symlink() {
             "-y",
             "--tunnel-hostname",
             "test.example.com",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .success();

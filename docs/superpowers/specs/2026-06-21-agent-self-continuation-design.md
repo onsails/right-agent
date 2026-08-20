@@ -8,9 +8,9 @@ halting.
 
 ## 1. Motivation
 
-### The incident (agent "agent-b")
+### The incident (agent "him")
 
-Agent `agent-b` (sandbox `openshell`, model `claude-opus-4-7[1m]`) ran a turn in a
+Agent `him` (sandbox `openshell`, model `claude-opus-4-7[1m]`) ran a turn in a
 Telegram group that:
 
 1. launched **4 browser-use cloud sessions** via

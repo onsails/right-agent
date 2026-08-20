@@ -16,7 +16,7 @@
 
 This is one coupled contract change: schema, parser, DB storage, delivery queue, and prompt docs must move together. Splitting it would leave intermediate states where cron output validates but cannot be delivered, or delivery reads renamed columns before producers write them.
 
-Repository instruction requires `rust-dev:rust-dev` before writing Rust. In this planning session that skill was not available in the skill list and `fd -a rust-dev /Users/developer/.codex/skills` plus `fd -a rust-dev /Users/developer/.codex/plugins/cache` returned no files. At implementation start, check again and record the result before editing Rust.
+Repository instruction requires `rust-dev:rust-dev` before writing Rust. In this planning session that skill was not available in the skill list and `fd -a rust-dev /Users/molt/.codex/skills` plus `fd -a rust-dev /Users/molt/.codex/plugins/cache` returned no files. At implementation start, check again and record the result before editing Rust.
 
 If implementation uses subagents, do not use Haiku models for subagents. Use the repo's required Rust review subagent only if the `rust-dev` skill pack becomes available; otherwise record that it is unavailable and rely on compiler, tests, and local review.
 
@@ -59,8 +59,8 @@ Expected: no output. If there are unrelated user changes, record them and do not
 Run:
 
 ```bash
-devenv shell -- fd -a rust-dev /Users/developer/.codex/skills
-devenv shell -- fd -a rust-dev /Users/developer/.codex/plugins/cache
+devenv shell -- fd -a rust-dev /Users/molt/.codex/skills
+devenv shell -- fd -a rust-dev /Users/molt/.codex/plugins/cache
 ```
 
 Expected in the current environment: no output. If the skill appears, load `rust-dev:rust-dev` before editing Rust. If it is still absent, add an implementation note in the first commit message body: `rust-dev skill unavailable in this session`.

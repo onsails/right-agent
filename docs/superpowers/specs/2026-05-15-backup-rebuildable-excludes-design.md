@@ -4,7 +4,7 @@
 
 `right agent backup <name>` currently archives all of `/sandbox` for sandboxed
 agents. That produces a forensic snapshot, but it also captures rebuildable
-agent-writable dependency state. Empirical checks on `agent-b` showed `/sandbox` is
+agent-writable dependency state. Empirical checks on `him` showed `/sandbox` is
 9.1G, mostly:
 
 - `/sandbox/.venv` - 5.0G

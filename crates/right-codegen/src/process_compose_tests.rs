@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::tempdir;
 
-use right_agent_config::{AgentConfig, AgentDef, RestartPolicy, SandboxConfig, SandboxMode};
+use right_agent_config::{AgentConfig, AgentDef, RestartPolicy, SandboxConfig};
 
 use crate::{ProcessComposeConfig, generate_process_compose};
 
@@ -36,8 +36,6 @@ fn make_bot_agent(name: &str, token: &str) -> AgentDef {
         model: None,
         debug: None,
         sandbox: Some(SandboxConfig {
-            mode: SandboxMode::None,
-            policy_file: None,
             name: None,
             providers: vec![],
         }),
@@ -74,8 +72,6 @@ fn make_agent_no_token(name: &str) -> AgentDef {
         model: None,
         debug: None,
         sandbox: Some(SandboxConfig {
-            mode: SandboxMode::None,
-            policy_file: None,
             name: None,
             providers: vec![],
         }),
@@ -126,8 +122,6 @@ fn make_agent_with_restart(name: &str, token: &str, restart: RestartPolicy) -> A
         model: None,
         debug: None,
         sandbox: Some(SandboxConfig {
-            mode: SandboxMode::None,
-            policy_file: None,
             name: None,
             providers: vec![],
         }),
@@ -406,112 +400,10 @@ fn bot_depends_on_cloudflared() {
     );
 }
 
-// ── Sandbox mode env vars ───────────────────────────────────────────────────
-
-fn make_agent_with_sandbox(
-    name: &str,
-    token: &str,
-    mode: SandboxMode,
-    policy_file: Option<&str>,
-) -> AgentDef {
-    let config = Some(AgentConfig {
-        restart: RestartPolicy::OnFailure,
-        max_restarts: 3,
-        backoff_seconds: 5,
-        network_policy: Default::default(),
-        model: None,
-        debug: None,
-        sandbox: Some(SandboxConfig {
-            mode,
-            policy_file: policy_file.map(std::path::PathBuf::from),
-            name: None,
-            providers: vec![],
-        }),
-        telegram_token: Some(token.to_string()),
-        allowed_chat_ids: vec![],
-        env: std::collections::HashMap::new(),
-        secret: None,
-        attachments: Default::default(),
-        show_thinking: true,
-        learning: Default::default(),
-        memory: None,
-        stt: Default::default(),
-    });
-    AgentDef {
-        name: name.to_owned(),
-        path: PathBuf::from(format!("/home/user/.right/agents/{name}")),
-        identity_path: PathBuf::from(format!("/home/user/.right/agents/{name}/IDENTITY.md")),
-        config,
-        soul_path: None,
-        user_path: None,
-        tools_path: None,
-        bootstrap_path: None,
-        heartbeat_path: None,
-    }
-}
-
-#[test]
-fn per_agent_sandbox_openshell_emits_openshell_mode() {
-    let agents = vec![make_agent_with_sandbox(
-        "sandboxed",
-        "123:tok",
-        SandboxMode::Openshell,
-        Some("policy.yaml"),
-    )];
-    let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
-    assert!(
-        output.contains("RC_SANDBOX_MODE=openshell"),
-        "expected RC_SANDBOX_MODE=openshell:\n{output}"
-    );
-    assert!(
-        output.contains("RC_SANDBOX_POLICY=/home/user/.right/agents/sandboxed/policy.yaml"),
-        "expected policy path:\n{output}"
-    );
-    assert!(
-        !output.contains("--no-sandbox"),
-        "--no-sandbox must not appear:\n{output}"
-    );
-}
-
-#[test]
-fn per_agent_sandbox_none_emits_none_mode() {
-    let agents = vec![make_agent_with_sandbox(
-        "unsandboxed",
-        "123:tok",
-        SandboxMode::None,
-        None,
-    )];
-    let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
-    assert!(
-        output.contains("RC_SANDBOX_MODE=none"),
-        "expected RC_SANDBOX_MODE=none:\n{output}"
-    );
-    assert!(
-        !output.contains("RC_SANDBOX_POLICY"),
-        "RC_SANDBOX_POLICY must be absent:\n{output}"
-    );
-}
-
-#[test]
-fn mixed_sandbox_modes_in_same_config() {
-    let agents = vec![
-        make_agent_with_sandbox(
-            "sandboxed",
-            "123:tok",
-            SandboxMode::Openshell,
-            Some("policy.yaml"),
-        ),
-        make_agent_with_sandbox("direct", "456:tok", SandboxMode::None, None),
-    ];
-    let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
-    assert!(output.contains("sandboxed-bot:"));
-    assert!(output.contains("direct-bot:"));
-    assert!(output.contains("RC_SANDBOX_MODE=openshell"));
-    assert!(output.contains("RC_SANDBOX_MODE=none"));
-}
+// The `RC_SANDBOX_MODE` / `RC_SANDBOX_POLICY` env vars are gone from
+// process-compose.yaml: every agent is sandboxed, no runtime reads either
+// variable, and OpenShell policy files are retired. The tests that asserted
+// per-agent and mixed-mode env emission went with them.
 
 // ── Login process ───────────────────────────────────────────────────────────
 
@@ -576,77 +468,5 @@ fn right_mcp_server_process_included_when_token_map_provided() {
     assert!(
         yaml.contains("depends_on:"),
         "bot must depend on mcp server"
-    );
-}
-
-#[test]
-fn mixed_mode_agents_correct_env_vars() {
-    let agents = vec![
-        make_agent_with_sandbox(
-            "coder",
-            "111:tok",
-            SandboxMode::Openshell,
-            Some("policy.yaml"),
-        ),
-        make_agent_with_sandbox("browser", "222:tok", SandboxMode::None, None),
-        make_agent_with_sandbox(
-            "reviewer",
-            "333:tok",
-            SandboxMode::Openshell,
-            Some("custom-policy.yaml"),
-        ),
-    ];
-    let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
-
-    // coder: sandboxed
-    assert!(output.contains("coder-bot:"));
-    assert!(output.contains("RC_SANDBOX_POLICY=/home/user/.right/agents/coder/policy.yaml"));
-
-    // browser: unsandboxed — should not have RC_SANDBOX_POLICY in its section
-    assert!(output.contains("browser-bot:"));
-
-    // reviewer: sandboxed with custom policy
-    assert!(
-        output.contains("RC_SANDBOX_POLICY=/home/user/.right/agents/reviewer/custom-policy.yaml")
-    );
-}
-
-#[test]
-fn agent_without_sandbox_config_defaults_to_openshell_in_process_compose() {
-    let config = Some(AgentConfig {
-        restart: RestartPolicy::OnFailure,
-        max_restarts: 3,
-        backoff_seconds: 5,
-        network_policy: Default::default(),
-        model: None,
-        debug: None,
-        sandbox: None, // absent from yaml → default openshell
-        telegram_token: Some("123:tok".to_string()),
-        allowed_chat_ids: vec![],
-        env: std::collections::HashMap::new(),
-        secret: None,
-        attachments: Default::default(),
-        show_thinking: true,
-        learning: Default::default(),
-        memory: None,
-        stt: Default::default(),
-    });
-    let agents = vec![AgentDef {
-        name: "default-agent".to_owned(),
-        path: PathBuf::from("/home/user/.right/agents/default-agent"),
-        identity_path: PathBuf::from("/home/user/.right/agents/default-agent/IDENTITY.md"),
-        config,
-        soul_path: None,
-        user_path: None,
-        tools_path: None,
-        bootstrap_path: None,
-        heartbeat_path: None,
-    }];
-    let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
-    assert!(
-        output.contains("RC_SANDBOX_MODE=openshell"),
-        "agent without explicit sandbox config should default to openshell:\n{output}"
     );
 }

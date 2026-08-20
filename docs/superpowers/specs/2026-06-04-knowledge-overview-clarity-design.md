@@ -1,14 +1,14 @@
 # Knowledge & Overview clarity redesign
 
 **Date:** 2026-06-04
-**Agent that surfaced it:** `agent-b`
+**Agent that surfaced it:** `him`
 **Status:** design, awaiting implementation plan
 
 ## Problem
 
 The Overview tab renders a row of marker chips under the cost chart. Each
 chip is one finished learning event, labelled with the raw skill slug
-(`rightx-obsidian-vault-sync`). For `agent-b` the same skill appeared seven
+(`rightx-obsidian-vault-sync`). For `him` the same skill appeared seven
 times in a row, reading as a meaningless list of "cron names".
 
 Investigating the data exposed a deeper defect than the chips:
@@ -29,7 +29,7 @@ The same conflation lives in the Knowledge → Learning subtab. Both
 `recent_failed_events` and the `failed_or_aborted_7d` counter filter on
 `status IN ('failed','aborted')` and ignore `hint_outcome`. Refusals
 carry `status='aborted'` + `hint_outcome='refused'`, so they leak into
-"Failed skills" and inflate the "Failed 7d" card. For `agent-b` this turns
+"Failed skills" and inflate the "Failed 7d" card. For `him` this turns
 five healthy no-ops into "five failures".
 
 A genuine failure means a learning attempt errored out. A refusal means
@@ -186,6 +186,6 @@ Tests:
   changes; `npm test` (or project equivalent) for the dashboard frontend
   after each component change.
 - Final: `devenv shell -- cargo test --workspace`.
-- Manual against `agent-b`: Overview chart shows no chips/pins; Learning
+- Manual against `him`: Overview chart shows no chips/pins; Learning
   subtab shows "Failed 7d = 0" and a "Refused 5 …" caption; a failed
   skill (once one exists) expands on click.

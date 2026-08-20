@@ -1694,10 +1694,10 @@ mod deprecation_warn_tests {
 
     #[test]
     fn message_mentions_agent_name_and_yaml_key() {
-        let msg = deprecation_warn_message("agent-b");
-        assert!(msg.contains("agent-b"));
+        let msg = deprecation_warn_message("him");
+        assert!(msg.contains("him"));
         assert!(msg.contains("background_review_enabled"));
-        assert!(msg.contains("agents/agent-b/agent.yaml"));
+        assert!(msg.contains("agents/him/agent.yaml"));
     }
 }
 ```

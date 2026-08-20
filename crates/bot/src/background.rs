@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,9 +41,8 @@ pub(crate) async fn spawn_background_continuation(
     agent_dir: PathBuf,
     agent_name: String,
     model: Option<String>,
-    ssh_config_path: Option<PathBuf>,
+    sandbox: Option<crate::sandbox::Sandbox>,
     internal_client: Arc<right_mcp::internal_client::InternalClient>,
-    resolved_sandbox: Option<String>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     _session_guard: tokio::sync::OwnedMutexGuard<()>,
     debug: Arc<std::sync::atomic::AtomicBool>,
@@ -63,10 +61,7 @@ pub(crate) async fn spawn_background_continuation(
     let mcp_instructions =
         fetch_mcp_instructions(&internal_client, &agent_name, &request.run_id).await;
     let invocation = crate::cc::invocation::ClaudeInvocation {
-        mcp_config_path: Some(crate::cc::invocation::mcp_config_path(
-            ssh_config_path.as_deref(),
-            &agent_dir,
-        )),
+        mcp_config_path: Some(crate::sandbox::SANDBOX_MCP_JSON_PATH.to_owned()),
         json_schema: Some(right_codegen::BG_CONTINUATION_SCHEMA_JSON.into()),
         output_format: crate::cc::invocation::OutputFormat::StreamJson,
         model,
@@ -87,25 +82,21 @@ pub(crate) async fn spawn_background_continuation(
     };
     let claude_args = invocation.into_args();
 
-    let mut cmd = match build_background_command(
+    let command = match build_background_command(
         &agent_dir,
         &agent_name,
-        ssh_config_path.as_deref(),
-        resolved_sandbox.as_deref(),
+        sandbox.as_ref(),
         &claude_args,
         mcp_instructions.as_deref(),
     )
     .await
     {
-        Ok(cmd) => cmd,
+        Ok(command) => command,
         Err(reason) => {
             persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason).await;
             return HandoffStatus::Failed(reason);
         }
     };
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
 
     tracing::info!(
         run_id = %request.run_id,
@@ -114,7 +105,12 @@ pub(crate) async fn spawn_background_continuation(
         target_thread_id = ?request.target_thread_id,
         "spawning immediate background continuation"
     );
-    let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
+    let mut child = match command
+        .stdout(crate::cc::sandbox_process::Capture::Pipe)
+        .stderr(crate::cc::sandbox_process::Capture::Pipe)
+        .spawn()
+        .await
+    {
         Ok(child) => child,
         Err(e) => {
             let reason = format!("spawn failed: {e:#}");
@@ -185,7 +181,7 @@ pub(crate) async fn spawn_background_continuation(
     tokio::spawn(complete_background_run(
         request,
         agent_dir,
-        resolved_sandbox,
+        sandbox,
         child,
         reader_handle,
         stderr_handle,
@@ -232,26 +228,14 @@ async fn fetch_mcp_instructions(
 async fn build_background_command(
     agent_dir: &Path,
     agent_name: &str,
-    ssh_config_path: Option<&Path>,
-    resolved_sandbox: Option<&str>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
     claude_args: &[String],
     mcp_instructions: Option<&str>,
-) -> Result<tokio::process::Command, String> {
-    let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
-        (
-            right_agent::agent::types::SandboxMode::Openshell,
-            "/sandbox".to_owned(),
-        )
-    } else {
-        (
-            right_agent::agent::types::SandboxMode::None,
-            agent_dir.to_string_lossy().into_owned(),
-        )
-    };
-    let base_prompt = right_codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+) -> Result<crate::cc::sandbox_process::SandboxCommand, String> {
+    let base_prompt = right_codegen::generate_system_prompt(agent_name, "/sandbox");
     let memory_mode: Option<crate::cc::prompt::MemoryMode> = None;
 
-    crate::cc::invocation::guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)
+    let sandbox = crate::cc::invocation::guard_no_sandboxed_host_exec(agent_name, sandbox)
         .map_err(|e| format!("{e:#}"))?;
 
     // Per-agent notice token for the trusted `## Platform Notice Token` prompt
@@ -265,75 +249,27 @@ async fn build_background_command(
             .map_err(|e| format!("fetch notice token: {e:#}"))?
     };
 
-    if let Some(ssh_config) = ssh_config_path {
-        let Some(sandbox_name) = resolved_sandbox else {
-            return Err("resolved sandbox missing for sandboxed background run".to_string());
-        };
-        let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            crate::cc::prompt::PromptMode::Cron,
-            "/sandbox",
-            "/tmp/right-system-prompt.md",
-            "/sandbox",
-            claude_args,
-            mcp_instructions,
-            memory_mode.as_ref(),
-            None,
-            None,
-            Some(&notice_token),
-        );
-        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
-            let escaped = token.replace('\'', "'\\''");
-            assembly_script =
-                format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
-        }
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sandbox_name);
-        let mut cmd = tokio::process::Command::new("ssh");
-        cmd.arg("-F").arg(ssh_config);
-        cmd.arg("-o").arg("ControlMaster=no");
-        cmd.arg("-o").arg("ControlPath=none");
-        cmd.arg(&ssh_host);
-        cmd.arg("--");
-        cmd.arg(assembly_script);
-        Ok(cmd)
-    } else {
-        if which::which("claude").is_err() && which::which("claude-bun").is_err() {
-            return Err("claude binary not found in PATH".to_string());
-        }
-        let claude_dir = agent_dir.join(".claude");
-        std::fs::create_dir_all(&claude_dir)
-            .map_err(|e| format!("failed to create .claude dir: {e:#}"))?;
-        let agent_dir_str = agent_dir.to_string_lossy();
-        let prompt_path = claude_dir.join("background-system-prompt.md");
-        let prompt_path_str = prompt_path.to_string_lossy();
-        let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            crate::cc::prompt::PromptMode::Cron,
-            &agent_dir_str,
-            &prompt_path_str,
-            &agent_dir_str,
-            claude_args,
-            mcp_instructions,
-            memory_mode.as_ref(),
-            None,
-            None,
-            Some(&notice_token),
-        );
-        let mut cmd = tokio::process::Command::new("bash");
-        cmd.arg("-c");
-        cmd.arg(&assembly_script);
-        cmd.env("HOME", agent_dir);
-        cmd.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
-            cmd.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
-        }
-        cmd.current_dir(agent_dir);
-        Ok(cmd)
-    }
+    let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
+        &base_prompt,
+        crate::cc::prompt::PromptMode::Cron,
+        "/sandbox",
+        "/tmp/right-system-prompt.md",
+        "/sandbox",
+        claude_args,
+        mcp_instructions,
+        memory_mode.as_ref(),
+        None,
+        None,
+        Some(&notice_token),
+    );
+    Ok(
+        crate::cc::invocation::build_claude_script_command(assembly_script, agent_dir, sandbox)
+            .await,
+    )
 }
 
 async fn read_background_stdout(
-    stdout: tokio::process::ChildStdout,
+    stdout: tokio::io::ReadHalf<tokio::io::SimplexStream>,
     log_path: PathBuf,
     run_id: String,
     init_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
@@ -410,7 +346,7 @@ async fn append_log_line(
 }
 
 fn spawn_stderr_reader(
-    stderr: Option<tokio::process::ChildStderr>,
+    stderr: Option<tokio::io::ReadHalf<tokio::io::SimplexStream>>,
     log_path: PathBuf,
     run_id: String,
 ) -> Option<JoinHandle<Result<String, String>>> {
@@ -475,24 +411,20 @@ fn send_init_failure(
 }
 
 async fn kill_child_and_collect_stderr(
-    mut child: right_process::ProcessGroupChild,
+    mut child: crate::cc::sandbox_process::SandboxChild,
     stderr_handle: Option<JoinHandle<Result<String, String>>>,
 ) -> String {
-    if let Err(e) = child.kill().await {
-        tracing::warn!("failed to kill background child: {e:#}");
-    }
+    child.kill().await;
     drop(child);
     await_stderr_reader(stderr_handle).await
 }
 
 async fn kill_unconfirmed_child(
-    mut child: right_process::ProcessGroupChild,
+    mut child: crate::cc::sandbox_process::SandboxChild,
     reader_handle: JoinHandle<Result<Vec<String>, String>>,
     stderr_handle: Option<JoinHandle<Result<String, String>>>,
 ) -> String {
-    if let Err(e) = child.kill().await {
-        tracing::warn!("failed to kill unconfirmed background child: {e:#}");
-    }
+    child.kill().await;
     drop(child);
     if tokio::time::timeout(POST_STDOUT_WAIT_TIMEOUT, reader_handle)
         .await
@@ -506,15 +438,15 @@ async fn kill_unconfirmed_child(
 async fn complete_background_run(
     request: BackgroundRunRequest,
     agent_dir: PathBuf,
-    resolved_sandbox: Option<String>,
-    mut child: right_process::ProcessGroupChild,
+    sandbox: Option<crate::sandbox::Sandbox>,
+    mut child: crate::cc::sandbox_process::SandboxChild,
     reader_handle: JoinHandle<Result<Vec<String>, String>>,
     stderr_handle: Option<JoinHandle<Result<String, String>>>,
 ) {
     let lines = match reader_handle.await {
         Ok(Ok(lines)) => lines,
         Ok(Err(reason)) => {
-            let _ = child.kill().await;
+            child.kill().await;
             drop(child);
             let stderr = await_stderr_reader(stderr_handle).await;
             let reason = append_stderr_to_reason(&reason, &stderr);
@@ -529,7 +461,7 @@ async fn complete_background_run(
             return;
         }
         Err(e) => {
-            let _ = child.kill().await;
+            child.kill().await;
             drop(child);
             let stderr = await_stderr_reader(stderr_handle).await;
             let reason = append_stderr_to_reason(
@@ -548,8 +480,8 @@ async fn complete_background_run(
         }
     };
 
-    let exit_status = match tokio::time::timeout(POST_STDOUT_WAIT_TIMEOUT, child.wait()).await {
-        Ok(Ok(status)) => status,
+    let exit_code = match tokio::time::timeout(POST_STDOUT_WAIT_TIMEOUT, child.wait()).await {
+        Ok(Ok(code)) => Some(code),
         Ok(Err(e)) => {
             let stderr = await_stderr_reader(stderr_handle).await;
             let reason =
@@ -565,7 +497,7 @@ async fn complete_background_run(
             return;
         }
         Err(_) => {
-            let _ = child.kill().await;
+            child.kill().await;
             drop(child);
             let stderr = await_stderr_reader(stderr_handle).await;
             let reason = append_stderr_to_reason(
@@ -583,7 +515,6 @@ async fn complete_background_run(
             return;
         }
     };
-    let exit_code = exit_status.code();
     let stderr = await_stderr_reader(stderr_handle).await;
     if !stderr.trim().is_empty() {
         tracing::warn!(
@@ -614,7 +545,7 @@ async fn complete_background_run(
         return;
     }
 
-    if !exit_status.success() {
+    if exit_code != Some(0) {
         let reason = if stderr.trim().is_empty() {
             format!("background subprocess failed with exit code {exit_code:?}")
         } else {
@@ -638,7 +569,7 @@ async fn complete_background_run(
                 &request.run_id,
                 exit_code,
                 &output,
-                resolved_sandbox.as_deref(),
+                sandbox.as_ref(),
             )
             .await
             {
@@ -700,14 +631,14 @@ async fn persist_successful_background_output(
     run_id: &str,
     exit_code: Option<i32>,
     output: &crate::cron::CronReplyOutput,
-    resolved_sandbox: Option<&str>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
 ) -> Result<(), String> {
     let notify = output
         .delivery
         .as_notify()
         .ok_or_else(|| "background continuation returned non-notify delivery".to_string())?;
     let delivery_json =
-        serialize_notify_delivery_for_host(agent_dir, run_id, &notify, resolved_sandbox).await?;
+        serialize_notify_delivery_for_host(agent_dir, run_id, &notify, sandbox).await?;
 
     let conn = right_db::open_connection(agent_dir, false)
         .await
@@ -741,18 +672,16 @@ async fn serialize_notify_delivery_for_host(
     agent_dir: &Path,
     run_id: &str,
     notify: &crate::cron::CronNotify,
-    resolved_sandbox: Option<&str>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
 ) -> Result<String, String> {
     let Some(attachments) = notify.attachments.as_ref() else {
         return crate::cron::notify_delivery_json(&notify.content, notify.attachments.as_deref())
             .map_err(|e| format!("serialize background delivery_json: {e:#}"));
     };
-    if attachments.is_empty() || resolved_sandbox.is_none() {
+    let Some(sandbox) = sandbox.filter(|_| !attachments.is_empty()) else {
         return crate::cron::notify_delivery_json(&notify.content, notify.attachments.as_deref())
             .map_err(|e| format!("serialize background delivery_json: {e:#}"));
-    }
-
-    let sandbox = resolved_sandbox.expect("checked above");
+    };
     let outbox_dir = agent_dir.join("outbox").join("background").join(run_id);
     std::fs::create_dir_all(&outbox_dir)
         .map_err(|e| format!("create background outbox dir: {e:#}"))?;
@@ -760,7 +689,8 @@ async fn serialize_notify_delivery_for_host(
     let mut host_attachments = Vec::with_capacity(attachments.len());
     for attachment in attachments {
         let dest = outbox_dir.join(crate::cron::attachment_filename(&attachment.path));
-        right_openshell::openshell::download_file(sandbox, &attachment.path, &dest)
+        sandbox
+            .fs_copy_to_host(&attachment.path, &dest)
             .await
             .map_err(|e| {
                 format!(
@@ -964,12 +894,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn build_background_command_refuses_sandboxed_host_exec() {
-        // Sandboxed agent (resolved_sandbox Some) with no sandbox connection
-        // (ssh_config_path None) must refuse — never build a host command.
+    async fn build_background_command_refuses_without_a_sandbox() {
+        // Fail-closed: a degraded backend has no host fallback to build against.
         let tmp = tempfile::tempdir().unwrap();
-        let result =
-            build_background_command(tmp.path(), "agent", None, Some("sbx"), &[], None).await;
+        let result = build_background_command(tmp.path(), "agent", None, &[], None).await;
         assert!(result.is_err());
     }
 

@@ -2,10 +2,10 @@
 //! HTML-escaped for `ParseMode::Html`, no raw CLI prefixes.
 
 use crate::cc::markdown_utils::html_escape;
-use right_openshell::diagnosis::GatewayDiagnosis;
+use right_sandbox::SandboxDiagnosis;
 
 /// Message shown when a sandboxed turn is blocked by an unavailable backend.
-pub(crate) fn unavailable_message(d: &GatewayDiagnosis) -> String {
+pub(crate) fn unavailable_message(d: &SandboxDiagnosis) -> String {
     let summary = html_escape(&d.summary);
     let fix = d.fixes.first().map(|f| html_escape(f)).unwrap_or_default();
     format!(

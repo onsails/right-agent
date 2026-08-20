@@ -15,7 +15,7 @@ gate uses a shared SQL counter `skill_nudge_state.daily_review_count` capped at
 The counter is incremented at *start*, never decremented, and counts failures
 the same as successes.
 
-Observed on production agent `agent-b` on 2026-05-20 (UTC):
+Observed on production agent `him` on 2026-05-20 (UTC):
 
 - 00:01–02:02 UTC: 12 selector invocations failed with `claude exited Some(1)`
   and empty stderr. Most likely caused by `episode_selector_max_budget_usd = 0.10`
@@ -58,7 +58,7 @@ spends.
 - No destructive ALTER to drop `daily_review_count` / `daily_review_date`
   columns. They become dead, dropped in a later release.
 - No automatic backlog cleanup. One-off SQL is documented at the end of this
-  spec for `agent-b` and any agent in a similar state.
+  spec for `him` and any agent in a similar state.
 - No new dashboard visual grouping for `learning_*` sources. Three new source
   blocks render alongside existing ones; visual grouping is a separate
   dashboard task if it becomes a problem.
@@ -385,7 +385,7 @@ post-hoc cost lands in `usage_events` and the next gate query catches it.
 
 ## Operational notes
 
-After this change ships, `agent-b` needs a one-time cleanup:
+After this change ships, `him` needs a one-time cleanup:
 
 ```sql
 -- 1. Free stuck pending episodes older than 24h.
@@ -393,7 +393,7 @@ UPDATE learning_episodes
 SET status = 'no_episode',
     selector_output_json = json_object('status', 'no_episode', 'reason', 'stale_cleanup'),
     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-WHERE agent_name = 'agent-b'
+WHERE agent_name = 'him'
   AND status = 'pending'
   AND created_at < datetime('now', '-24 hours');
 
@@ -404,10 +404,10 @@ UPDATE skill_nudge_state SET
     consecutive_review_failures = 0,
     review_circuit_open_until = NULL,
     review_running = 0
-WHERE agent_name = 'agent-b';
+WHERE agent_name = 'him';
 ```
 
-Run before the first `right restart agent-b` after the new code is deployed.
+Run before the first `right restart him` after the new code is deployed.
 
 ## Future work
 

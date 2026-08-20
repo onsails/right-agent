@@ -21,7 +21,7 @@ Every other agent-content path already converts: the worker reply
 (`worker.rs:2105`) all run `md_to_telegram_html` + `split_html_message` and set
 `ParseMode::Html`.
 
-### Root-cause evidence (agent-a, 2026-06-13)
+### Root-cause evidence (riskoff, 2026-06-13)
 
 The reported `**Стоп-лосс…**` literal post was **not** `send_progress`. The
 session stream (`aedc2d10…ndjson`) shows the agent returned the post as a

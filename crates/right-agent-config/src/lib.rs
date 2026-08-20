@@ -3,7 +3,7 @@
 #![warn(unreachable_pub)]
 
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -221,39 +221,11 @@ impl std::str::FromStr for NetworkPolicy {
     }
 }
 
-/// Sandbox execution mode for an agent.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SandboxMode {
-    /// Run inside OpenShell container (default: secure).
-    #[default]
-    Openshell,
-    /// Run directly on host (needed for computer-use, Chrome, etc.).
-    None,
-}
-
-impl std::fmt::Display for SandboxMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SandboxMode::Openshell => write!(f, "openshell"),
-            SandboxMode::None => write!(f, "none (host)"),
-        }
-    }
-}
-
-impl std::str::FromStr for SandboxMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "openshell" => Ok(SandboxMode::Openshell),
-            "none" => Ok(SandboxMode::None),
-            other => Err(format!(
-                "invalid sandbox mode: '{other}'. Expected 'openshell' or 'none'."
-            )),
-        }
-    }
-}
+/// Rejection message for the removed sandboxless mode. Emitted verbatim when an
+/// agent.yaml still carries `sandbox: mode: none`.
+const SANDBOXLESS_REMOVED: &str = "`sandbox.mode: none` is no longer supported — every agent runs inside a microsandbox VM. \
+Run `right agent migrate-sandbox <agent>` to move this agent's host files into a sandbox, \
+then delete the `mode:` line from agent.yaml.";
 
 /// Provider type slug. Built-in slugs are validated against the OpenShell
 /// profile catalog at API boundaries; `claude` is rejected by Right (see
@@ -354,53 +326,56 @@ pub struct ProviderEntry {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generic: Option<GenericProvider>,
-    /// Present ⇒ this entry is a *borrowed* reference to a record owned by the
-    /// named agent. Absent ⇒ this agent owns the record. Owned vs borrowed
-    /// drives rotation rights, UI read-only state, and the destroy cascade.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shared_from: Option<String>,
-}
-
-impl ProviderEntry {
-    pub fn is_borrowed(&self) -> bool {
-        self.shared_from.is_some()
-    }
-
-    pub fn is_owned(&self) -> bool {
-        self.shared_from.is_none()
-    }
 }
 
 /// Per-agent sandbox configuration in agent.yaml.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(try_from = "SandboxConfigRaw")]
 pub struct SandboxConfig {
-    /// Execution mode: openshell (sandboxed) or none (direct host).
-    #[serde(default)]
-    pub mode: SandboxMode,
-    /// Path to the OpenShell policy file, relative to the agent directory.
-    /// Defaults to `policy.yaml` when omitted.
-    pub policy_file: Option<PathBuf>,
     /// Explicit sandbox name. When set, overrides the deterministic
-    /// `right_openshell::openshell::sandbox_name(agent)` derivation
-    /// (`right-{agent_name}`, fitted to the 19-char upstream cap).
+    /// `right_sandbox::sandbox_name(agent)` derivation (`right-{agent_name}`).
     /// New agents (created via `right agent init`) get the derived name
     /// written here explicitly.
-    #[serde(default)]
     pub name: Option<String>,
     /// Providers attached to this sandbox. Empty by default. Per-agent source of truth.
-    #[serde(default)]
     pub providers: Vec<ProviderEntry>,
 }
 
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            mode: SandboxMode::Openshell,
-            policy_file: Some(PathBuf::from("policy.yaml")),
-            name: None,
-            providers: Vec::new(),
+/// Wire shape of `sandbox:`. It still carries the two retired keys so an
+/// agent.yaml written before the microsandbox migration keeps loading: `mode`
+/// is accepted and ignored (except `none`, which is rejected outright — see
+/// [`SANDBOXLESS_REMOVED`]) and `policy_file` is inert now that OpenShell
+/// policy files are gone. Both keys are dropped one release from now.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SandboxConfigRaw {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default, rename = "policy_file")]
+    _policy_file: Option<PathBuf>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    providers: Vec<ProviderEntry>,
+}
+
+impl TryFrom<SandboxConfigRaw> for SandboxConfig {
+    type Error = String;
+
+    fn try_from(raw: SandboxConfigRaw) -> Result<Self, Self::Error> {
+        match raw.mode.as_deref() {
+            None | Some("openshell") => {}
+            Some("none") => return Err(SANDBOXLESS_REMOVED.to_owned()),
+            Some(other) => {
+                return Err(format!(
+                    "invalid sandbox mode: '{other}'. The `mode:` key is retired; delete it."
+                ));
+            }
         }
+        Ok(SandboxConfig {
+            name: raw.name,
+            providers: raw.providers,
+        })
     }
 }
 
@@ -797,19 +772,6 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
-    /// Whether this agent runs in an OpenShell sandbox (default: true).
-    pub fn is_sandboxed(&self) -> bool {
-        *self.sandbox_mode() == SandboxMode::Openshell
-    }
-
-    /// Effective sandbox mode; defaults to Openshell when `sandbox` section is absent.
-    pub fn sandbox_mode(&self) -> &SandboxMode {
-        self.sandbox
-            .as_ref()
-            .map(|s| &s.mode)
-            .unwrap_or(&SandboxMode::Openshell)
-    }
-
     /// Declared `sandbox.providers`, or an empty slice when the `sandbox`
     /// section is absent. This is the agent-local source for gateway provider
     /// attach reconciliation; provider endpoints are composed by OpenShell.
@@ -818,49 +780,6 @@ impl AgentConfig {
             .as_ref()
             .map(|s| s.providers.as_slice())
             .unwrap_or(&[])
-    }
-
-    /// Resolves the effective policy file path, or `None` for sandbox mode `none`.
-    ///
-    /// OpenShell mode defaults a missing `sandbox.policy_file` (including a
-    /// missing `sandbox` section) to `policy.yaml`. Absolute paths and paths
-    /// containing `..` are rejected. Returns an error if the effective policy
-    /// file does not exist.
-    pub fn resolve_policy_path(&self, agent_dir: &Path) -> miette::Result<Option<PathBuf>> {
-        match self.sandbox_mode() {
-            SandboxMode::None => Ok(Option::None),
-            SandboxMode::Openshell => {
-                let rel = self
-                    .sandbox
-                    .as_ref()
-                    .and_then(|sandbox| sandbox.policy_file.as_deref())
-                    .unwrap_or_else(|| Path::new("policy.yaml"));
-                if rel.is_absolute() {
-                    return Err(miette::miette!(
-                        "sandbox.policy_file must be relative to agent dir: {}",
-                        rel.display()
-                    ));
-                }
-                if rel
-                    .components()
-                    .any(|component| matches!(component, Component::ParentDir))
-                {
-                    return Err(miette::miette!(
-                        "sandbox.policy_file must not contain '..': {}",
-                        rel.display()
-                    ));
-                }
-                let abs = agent_dir.join(rel);
-                if !abs.exists() {
-                    return Err(miette::miette!(
-                        help = "Run `right agent init <name>` to generate a default policy, or create the file manually",
-                        "policy file not found: {}",
-                        abs.display()
-                    ));
-                }
-                Ok(Some(abs))
-            }
-        }
     }
 }
 
@@ -918,157 +837,52 @@ pub struct AgentDef {
     pub heartbeat_path: Option<PathBuf>,
 }
 
-impl AgentDef {
-    /// Effective sandbox mode; defaults to Openshell when `config` or `sandbox` section is absent.
-    pub fn sandbox_mode(&self) -> &SandboxMode {
-        self.config
-            .as_ref()
-            .map(|c| c.sandbox_mode())
-            .unwrap_or(&SandboxMode::Openshell)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn policy_test_agent_dir(test_name: &str) -> PathBuf {
-        let agent_dir = std::env::temp_dir().join(format!(
-            "right-agent-config-{}-{test_name}",
-            std::process::id()
-        ));
-        if agent_dir.exists() {
-            std::fs::remove_dir_all(&agent_dir).unwrap();
-        }
-        std::fs::create_dir(&agent_dir).unwrap();
-        agent_dir
-    }
+    #[test]
+    fn sandbox_mode_none_is_rejected_with_migration_help() {
+        let error = serde_saphyr::from_str::<AgentConfig>("sandbox: { mode: none }").unwrap_err();
 
-    fn remove_policy_test_agent_dir(agent_dir: &Path) {
-        std::fs::remove_dir_all(agent_dir).unwrap();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("no longer supported"),
+            "unexpected error: {rendered}"
+        );
+        assert!(
+            rendered.contains("right agent migrate-sandbox"),
+            "error must name the migration path: {rendered}"
+        );
     }
 
     #[test]
-    fn resolve_policy_path_legacy_config_uses_existing_default_policy() {
-        let config: AgentConfig = serde_saphyr::from_str("{}").unwrap();
-        let agent_dir = policy_test_agent_dir("legacy-default");
-        let policy_path = agent_dir.join("policy.yaml");
-        std::fs::write(&policy_path, "filesystem: {}\n").unwrap();
+    fn sandbox_mode_openshell_is_accepted_and_ignored() {
+        let config: AgentConfig =
+            serde_saphyr::from_str("sandbox:\n  mode: openshell\n  name: right-alpha\n").unwrap();
 
-        let resolved = config.resolve_policy_path(&agent_dir).unwrap();
-
-        assert_eq!(resolved, Some(policy_path));
-        remove_policy_test_agent_dir(&agent_dir);
+        let sandbox = config.sandbox.expect("sandbox section");
+        assert_eq!(sandbox.name.as_deref(), Some("right-alpha"));
     }
 
     #[test]
-    fn resolve_policy_path_explicit_openshell_uses_existing_default_policy() {
-        let config: AgentConfig = serde_saphyr::from_str("sandbox: { mode: openshell }").unwrap();
-        let agent_dir = policy_test_agent_dir("explicit-openshell-default");
-        let policy_path = agent_dir.join("policy.yaml");
-        std::fs::write(&policy_path, "filesystem: {}\n").unwrap();
+    fn sandbox_policy_file_is_accepted_and_ignored() {
+        let config: AgentConfig =
+            serde_saphyr::from_str("sandbox:\n  policy_file: custom-policy.yaml\n").unwrap();
 
-        let resolved = config.resolve_policy_path(&agent_dir).unwrap();
-
-        assert_eq!(resolved, Some(policy_path));
-        remove_policy_test_agent_dir(&agent_dir);
+        let sandbox = config.sandbox.expect("sandbox section");
+        assert_eq!(sandbox.name, None);
+        assert!(sandbox.providers.is_empty());
     }
 
     #[test]
-    fn resolve_policy_path_none_does_not_require_policy_file() {
-        let config: AgentConfig = serde_saphyr::from_str("sandbox: { mode: none }").unwrap();
-        let agent_dir = policy_test_agent_dir("none");
-
-        let resolved = config.resolve_policy_path(&agent_dir).unwrap();
-
-        assert_eq!(resolved, None);
-        remove_policy_test_agent_dir(&agent_dir);
-    }
-
-    #[test]
-    fn resolve_policy_path_missing_default_policy_errors() {
-        let config: AgentConfig = serde_saphyr::from_str("{}").unwrap();
-        let agent_dir = policy_test_agent_dir("missing-default");
-        let expected_path = agent_dir.join("policy.yaml");
-
-        let error = config.resolve_policy_path(&agent_dir).unwrap_err();
+    fn sandbox_unknown_mode_is_rejected() {
+        let error = serde_saphyr::from_str::<AgentConfig>("sandbox: { mode: bogus }").unwrap_err();
 
         assert!(
-            error.to_string().contains(&format!(
-                "policy file not found: {}",
-                expected_path.display()
-            )),
-            "unexpected error: {error:?}"
+            format!("{error:#}").contains("invalid sandbox mode: 'bogus'"),
+            "unexpected error: {error:#}"
         );
-        remove_policy_test_agent_dir(&agent_dir);
-    }
-
-    #[test]
-    fn resolve_policy_path_preserves_explicit_custom_policy() {
-        let config: AgentConfig = serde_saphyr::from_str(
-            "sandbox:\n  mode: openshell\n  policy_file: custom-policy.yaml\n",
-        )
-        .unwrap();
-        let agent_dir = policy_test_agent_dir("explicit-custom");
-        let policy_path = agent_dir.join("custom-policy.yaml");
-        std::fs::write(&policy_path, "filesystem: {}\n").unwrap();
-
-        let resolved = config.resolve_policy_path(&agent_dir).unwrap();
-
-        assert_eq!(resolved, Some(policy_path));
-        remove_policy_test_agent_dir(&agent_dir);
-    }
-
-    #[test]
-    fn resolve_policy_path_rejects_absolute_policy_file() {
-        let agent_dir = policy_test_agent_dir("absolute-policy");
-        let policy_path = agent_dir.join("absolute-policy.yaml");
-        std::fs::write(&policy_path, "filesystem: {}\n").unwrap();
-        let config: AgentConfig = serde_saphyr::from_str(&format!(
-            "sandbox:\n  mode: openshell\n  policy_file: {}\n",
-            policy_path.display()
-        ))
-        .unwrap();
-
-        let error = config.resolve_policy_path(&agent_dir).unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "sandbox.policy_file must be relative to agent dir: {}",
-                policy_path.display()
-            )
-        );
-        remove_policy_test_agent_dir(&agent_dir);
-    }
-
-    #[test]
-    fn resolve_policy_path_rejects_parent_directory_policy_file() {
-        let agent_dir = policy_test_agent_dir("parent-policy");
-        let policy_name = format!(
-            "right-agent-config-parent-policy-{}.yaml",
-            std::process::id()
-        );
-        let policy_path = agent_dir.parent().unwrap().join(&policy_name);
-        std::fs::write(&policy_path, "filesystem: {}\n").unwrap();
-        let configured_path = PathBuf::from("..").join(&policy_name);
-        let config: AgentConfig = serde_saphyr::from_str(&format!(
-            "sandbox:\n  mode: openshell\n  policy_file: {}\n",
-            configured_path.display()
-        ))
-        .unwrap();
-
-        let error = config.resolve_policy_path(&agent_dir).unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "sandbox.policy_file must not contain '..': {}",
-                configured_path.display()
-            )
-        );
-        std::fs::remove_file(policy_path).unwrap();
-        remove_policy_test_agent_dir(&agent_dir);
     }
 
     #[test]
@@ -1252,25 +1066,18 @@ prefilter_enabled: false
     }
 
     #[test]
-    fn provider_entry_shared_from_round_trips_and_defaults_absent() {
-        // Absent shared_from = owned (backward compatible).
-        let owned: ProviderEntry =
-            serde_saphyr::from_str("name: fal-a1b2c3\ntype: right-fal\n").unwrap();
-        assert!(owned.shared_from.is_none());
-        assert!(owned.is_owned() && !owned.is_borrowed());
-
-        // Present shared_from = borrowed.
-        let borrowed: ProviderEntry =
-            serde_saphyr::from_str("name: fal-a1b2c3\ntype: right-fal\nshared_from: agent-a\n")
+    fn provider_entry_ignores_legacy_shared_from_key() {
+        // Ownership lives in providers.db since stage 3; an agent.yaml written
+        // before that still carries `shared_from:` and must keep loading.
+        let entry: ProviderEntry =
+            serde_saphyr::from_str("name: fal-a1b2c3\ntype: right-fal\nshared_from: riskoff\n")
                 .unwrap();
-        assert_eq!(borrowed.shared_from.as_deref(), Some("agent-a"));
-        assert!(borrowed.is_borrowed() && !borrowed.is_owned());
+        assert_eq!(entry.name, "fal-a1b2c3");
 
-        // Serialization omits shared_from when None.
-        let s = serde_saphyr::to_string(&owned).unwrap();
+        let s = serde_saphyr::to_string(&entry).unwrap();
         assert!(
             !s.contains("shared_from"),
-            "owned entry must not emit shared_from; got: {s}"
+            "shared_from must never be emitted; got: {s}"
         );
     }
 }

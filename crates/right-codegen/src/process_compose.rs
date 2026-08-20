@@ -3,7 +3,7 @@ use std::path::Path;
 use minijinja::{Environment, context};
 use serde::Serialize;
 
-use right_agent_config::{AgentDef, RestartPolicy, SandboxMode};
+use right_agent_config::{AgentDef, RestartPolicy};
 use right_runtime_state::{MCP_HTTP_PORT, PC_PORT};
 
 const PC_TEMPLATE: &str = include_str!("../templates/process-compose.yaml.j2");
@@ -24,10 +24,6 @@ struct BotProcessAgent {
     max_restarts: u32,
     /// When true, passes `--debug` to `right bot` so CC stderr is logged at debug level.
     debug: bool,
-    /// Sandbox mode string: "openshell" or "none".
-    sandbox_mode: String,
-    /// Absolute path to the generated OpenShell policy.yaml for this agent. None when sandbox_mode == "none".
-    sandbox_policy_path: Option<String>,
     /// Right home directory (for deterministic SSH config path in login process).
     home_dir: String,
 }
@@ -126,25 +122,6 @@ pub fn generate_process_compose(
                 config.max_restarts,
             );
 
-            let mode = config.sandbox_mode();
-            let sandbox_mode = match mode {
-                SandboxMode::Openshell => "openshell",
-                SandboxMode::None => "none",
-            };
-
-            let sandbox_policy_path = match mode {
-                SandboxMode::Openshell => {
-                    let policy_file = config
-                        .sandbox
-                        .as_ref()
-                        .and_then(|s| s.policy_file.as_ref())
-                        .cloned()
-                        .unwrap_or_else(|| std::path::PathBuf::from("policy.yaml"));
-                    Some(agent.path.join(&policy_file).display().to_string())
-                }
-                SandboxMode::None => None,
-            };
-
             Some(BotProcessAgent {
                 name: agent.name.clone(),
                 agent_name: agent.name.clone(),
@@ -154,8 +131,6 @@ pub fn generate_process_compose(
                 backoff_seconds: backoff,
                 max_restarts: max,
                 debug,
-                sandbox_mode: sandbox_mode.to_owned(),
-                sandbox_policy_path,
                 home_dir: home.display().to_string(),
             })
         })

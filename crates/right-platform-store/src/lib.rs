@@ -7,9 +7,38 @@
 #![warn(unreachable_pub)]
 
 use futures::stream::{self, StreamExt};
-use right_openshell::{openshell, sandbox_exec::SandboxExec};
+use right_sandbox::{ExecRequest, SandboxHandle};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::time::Duration;
+
+/// Timeout for the small shell operations this module runs in the guest
+/// (`mkdir`, `ln`, `mv`, `find`). Deployment itself moves bytes over the fs
+/// API, which is not bounded by this.
+const EXEC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run `argv` in the guest and return `(stdout, exit_code)`.
+///
+/// A non-zero exit code is data; only a transport failure is an `Err`.
+async fn exec(sbox: &SandboxHandle, argv: &[&str]) -> miette::Result<(String, i32)> {
+    let (cmd, args) = argv
+        .split_first()
+        .ok_or_else(|| miette::miette!("exec argv must name a program"))?;
+    let request = ExecRequest {
+        cmd: (*cmd).to_owned(),
+        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        timeout: Some(EXEC_TIMEOUT),
+        ..ExecRequest::default()
+    };
+    let outcome = sbox
+        .exec(&request)
+        .await
+        .map_err(|e| miette::miette!("sandbox exec {argv:?} failed: {e:#}"))?;
+    Ok((
+        String::from_utf8_lossy(&outcome.stdout).into_owned(),
+        outcome.code,
+    ))
+}
 
 #[cfg(test)]
 #[path = "platform_store_tests.rs"]
@@ -159,11 +188,11 @@ pub fn build_manifest(agent_dir: &Path, builtin_skill_names: &[&str]) -> miette:
 /// Create an atomic symlink: tmp link → rm old → mv into place.
 ///
 /// Uses `ln -sfn` (works for both files and directories).
-async fn atomic_symlink(sbox: &SandboxExec, target: &str, link_path: &str) -> miette::Result<()> {
+async fn atomic_symlink(sbox: &SandboxHandle, target: &str, link_path: &str) -> miette::Result<()> {
     // Ensure parent directory exists.
     if let Some(parent) = Path::new(link_path).parent() {
         let parent_str = parent.to_string_lossy();
-        let (_, code) = sbox.exec(&["mkdir", "-p", &parent_str]).await?;
+        let (_, code) = exec(sbox, &["mkdir", "-p", &parent_str]).await?;
         if code != 0 {
             miette::bail!("mkdir -p {parent_str} failed with exit code {code}");
         }
@@ -175,15 +204,15 @@ async fn atomic_symlink(sbox: &SandboxExec, target: &str, link_path: &str) -> mi
         .unwrap_or_else(|| "link".to_owned());
     let tmp_link = format!("/tmp/right-link-{link_name}");
 
-    let (_, code) = sbox.exec(&["ln", "-sfn", target, &tmp_link]).await?;
+    let (_, code) = exec(sbox, &["ln", "-sfn", target, &tmp_link]).await?;
     if code != 0 {
         miette::bail!("ln -sfn {target} {tmp_link} failed with exit code {code}");
     }
 
     // Remove old target (handles migration from direct files/dirs).
-    sbox.exec(&["rm", "-rf", link_path]).await?;
+    exec(sbox, &["rm", "-rf", link_path]).await?;
 
-    let (_, code) = sbox.exec(&["mv", "-fT", &tmp_link, link_path]).await?;
+    let (_, code) = exec(sbox, &["mv", "-fT", &tmp_link, link_path]).await?;
     if code != 0 {
         miette::bail!("mv -fT {tmp_link} {link_path} failed with exit code {code}");
     }
@@ -196,7 +225,7 @@ async fn atomic_symlink(sbox: &SandboxExec, target: &str, link_path: &str) -> mi
 ///
 /// Returns the full platform path (for GC tracking).
 pub async fn deploy_file(
-    sbox: &SandboxExec,
+    sbox: &SandboxHandle,
     name: &str,
     content: &[u8],
     hash: &str,
@@ -207,32 +236,21 @@ pub async fn deploy_file(
     let full_platform_path = format!("{PLATFORM_DIR}/{platform_prefix}{addressed_name}");
 
     // Check if content-addressed file already exists (dedup).
-    let (_, exit_code) = sbox.exec(&["test", "-e", &full_platform_path]).await?;
-    if exit_code != 0 {
+    let exists = sbox
+        .fs_exists(&full_platform_path)
+        .await
+        .map_err(|e| miette::miette!("stat {full_platform_path} failed: {e:#}"))?;
+    if !exists {
         let platform_dir = format!("{PLATFORM_DIR}/{}", platform_prefix.trim_end_matches('/'));
-        let (_, code) = sbox.exec(&["mkdir", "-p", &platform_dir]).await?;
-        if code != 0 {
-            miette::bail!("mkdir -p {platform_dir} failed with exit code {code}");
-        }
+        sbox.fs_mkdir(&platform_dir)
+            .await
+            .map_err(|e| miette::miette!("mkdir -p {platform_dir} failed: {e:#}"))?;
 
-        // Write content to temp file, upload, rename to content-addressed name.
-        let tmp_dir = tempfile::tempdir().map_err(|e| miette::miette!("create tempdir: {e:#}"))?;
-        let tmp_file = tmp_dir.path().join(name);
-        std::fs::write(&tmp_file, content)
-            .map_err(|e| miette::miette!("write temp file {}: {e:#}", tmp_file.display()))?;
-
-        let upload_dest = format!("{platform_dir}/");
-        openshell::upload_file(sbox.sandbox_name(), &tmp_file, &upload_dest).await?;
-
-        let uploaded_path = format!("{platform_dir}/{name}");
-        let (_, code) = sbox
-            .exec(&["mv", &uploaded_path, &full_platform_path])
-            .await?;
-        if code != 0 {
-            miette::bail!(
-                "mv {uploaded_path} -> {full_platform_path} failed with exit code {code}"
-            );
-        }
+        // The fs API writes straight to the content-addressed name, so there
+        // is no host temp file and no upload-then-rename step.
+        sbox.fs_write(&full_platform_path, content)
+            .await
+            .map_err(|e| miette::miette!("write {full_platform_path} failed: {e:#}"))?;
     }
 
     atomic_symlink(sbox, &full_platform_path, link_path).await?;
@@ -243,7 +261,7 @@ pub async fn deploy_file(
 ///
 /// Returns the full platform path (for GC tracking).
 pub async fn deploy_directory(
-    sbox: &SandboxExec,
+    sbox: &SandboxHandle,
     name: &str,
     host_dir: &std::path::Path,
     hash: &str,
@@ -254,12 +272,14 @@ pub async fn deploy_directory(
     let full_platform_path = format!("{PLATFORM_DIR}/{platform_prefix}{addressed_name}");
 
     // Check if content-addressed directory already exists (dedup).
-    let (_, exit_code) = sbox.exec(&["test", "-d", &full_platform_path]).await?;
-    if exit_code != 0 {
-        let (_, code) = sbox.exec(&["mkdir", "-p", &full_platform_path]).await?;
-        if code != 0 {
-            miette::bail!("mkdir -p {full_platform_path} failed with exit code {code}");
-        }
+    let exists = sbox
+        .fs_exists(&full_platform_path)
+        .await
+        .map_err(|e| miette::miette!("stat {full_platform_path} failed: {e:#}"))?;
+    if !exists {
+        sbox.fs_mkdir(&full_platform_path)
+            .await
+            .map_err(|e| miette::miette!("mkdir -p {full_platform_path} failed: {e:#}"))?;
 
         // Collect files with relative paths.
         let mut file_entries: Vec<(std::path::PathBuf, String)> = Vec::new();
@@ -290,30 +310,22 @@ pub async fn deploy_directory(
         }
         for subdir in &subdirs {
             let dir_path = format!("{full_platform_path}/{subdir}");
-            let (_, code) = sbox.exec(&["mkdir", "-p", &dir_path]).await?;
-            if code != 0 {
-                miette::bail!("mkdir -p {dir_path} failed with exit code {code}");
-            }
+            sbox.fs_mkdir(&dir_path)
+                .await
+                .map_err(|e| miette::miette!("mkdir -p {dir_path} failed: {e:#}"))?;
         }
 
         // Upload files in parallel.
-        let sandbox_name = sbox.sandbox_name().to_owned();
-        let platform_base = full_platform_path.clone();
+        let platform_base = full_platform_path.as_str();
 
         let results: Vec<miette::Result<()>> = stream::iter(file_entries)
-            .map(|(host_path, rel_path)| {
-                let sandbox_name = sandbox_name.clone();
-                let base = platform_base.clone();
-                async move {
-                    let dest_dir = match Path::new(&rel_path).parent() {
-                        Some(p) if !p.as_os_str().is_empty() => {
-                            format!("{base}/{}/", p.display())
-                        }
-                        _ => format!("{base}/"),
-                    };
-                    openshell::upload_file(&sandbox_name, &host_path, &dest_dir).await?;
-                    Ok(())
-                }
+            .map(|(host_path, rel_path)| async move {
+                let dest = format!("{platform_base}/{rel_path}");
+                sbox.fs_copy_from_host(&host_path, &dest)
+                    .await
+                    .map_err(|e| {
+                        miette::miette!("upload {} -> {dest} failed: {e:#}", host_path.display())
+                    })
             })
             .buffer_unordered(10)
             .collect()
@@ -331,13 +343,15 @@ pub async fn deploy_directory(
 /// Garbage-collect stale entries from /platform/.
 ///
 /// Best-effort: logs warnings but does not fail.
-pub async fn gc_platform(sbox: &SandboxExec, active_targets: &[String]) -> miette::Result<()> {
+pub async fn gc_platform(sbox: &SandboxHandle, active_targets: &[String]) -> miette::Result<()> {
     let active_set: std::collections::HashSet<&str> =
         active_targets.iter().map(|s| s.as_str()).collect();
 
-    let (stdout, exit_code) = sbox
-        .exec(&["find", PLATFORM_DIR, "-mindepth", "1", "-maxdepth", "2"])
-        .await?;
+    let (stdout, exit_code) = exec(
+        sbox,
+        &["find", PLATFORM_DIR, "-mindepth", "1", "-maxdepth", "2"],
+    )
+    .await?;
 
     if exit_code != 0 {
         tracing::warn!("gc_platform: find {PLATFORM_DIR} exited with code {exit_code}");
@@ -366,7 +380,7 @@ pub async fn gc_platform(sbox: &SandboxExec, active_targets: &[String]) -> miett
     if !stale.is_empty() {
         let mut rm_args: Vec<&str> = vec!["rm", "-rf"];
         rm_args.extend(&stale);
-        let (_, code) = sbox.exec(&rm_args).await?;
+        let (_, code) = exec(sbox, &rm_args).await?;
         if code != 0 {
             tracing::warn!("gc_platform: rm -rf failed with exit code {code}");
         } else {
@@ -378,18 +392,18 @@ pub async fn gc_platform(sbox: &SandboxExec, active_targets: &[String]) -> miett
 }
 
 /// Deploy all entries from a manifest, then GC stale entries.
-pub async fn deploy_manifest(sbox: &SandboxExec, manifest: &Manifest) -> miette::Result<()> {
-    // Ensure /platform/ exists.
-    let (_, code) = sbox.exec(&["mkdir", "-p", PLATFORM_DIR]).await?;
-    if code != 0 {
-        miette::bail!(
-            "mkdir -p {PLATFORM_DIR} failed (exit {code}). \
-             Sandbox filesystem policy is outdated — recreate the sandbox."
-        );
-    }
+pub async fn deploy_manifest(sbox: &SandboxHandle, manifest: &Manifest) -> miette::Result<()> {
+    // Ensure /platform/ exists. The parent stays root-owned; agent-owned
+    // content lives under the agent's own subdirectory.
+    sbox.fs_mkdir(PLATFORM_DIR).await.map_err(|e| {
+        miette::miette!(
+            "mkdir -p {PLATFORM_DIR} failed: {e:#}. \
+             Recreate the sandbox if this persists."
+        )
+    })?;
 
     // Make writable (previous run made it a-w). Best-effort on first run.
-    if let Err(e) = sbox.exec(&["chmod", "-R", "u+w", PLATFORM_DIR]).await {
+    if let Err(e) = exec(sbox, &["chmod", "-R", "u+w", PLATFORM_DIR]).await {
         tracing::warn!("chmod u+w {PLATFORM_DIR} failed (may be first run): {e:#}");
     }
 
@@ -428,7 +442,7 @@ pub async fn deploy_manifest(sbox: &SandboxExec, manifest: &Manifest) -> miette:
     gc_platform(sbox, &active_targets).await?;
 
     // Make read-only to prevent agent modification.
-    let (_, code) = sbox.exec(&["chmod", "-R", "a-w", PLATFORM_DIR]).await?;
+    let (_, code) = exec(sbox, &["chmod", "-R", "a-w", PLATFORM_DIR]).await?;
     if code != 0 {
         miette::bail!("chmod -R a-w {PLATFORM_DIR} failed with exit code {code}");
     }

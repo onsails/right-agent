@@ -31,7 +31,7 @@ Nothing else ever touches it. Two failure modes follow:
   so the **agent gives up without trying.**
 
 This second mode is the confirmed root cause of the 2026-05-27 incident
-with agent `agent-b`: Composio's gateway flapped (unreachable → 502 →
+with agent `him`: Composio's gateway flapped (unreachable → 502 →
 recovered), but the displayed status (and the agent's willingness to call
 it) only tracked reality through incidental restart/refresh events, not
 through any active check. The agent declared "composio unreachable,
@@ -57,7 +57,7 @@ dashboard open. Concretely:
 
 - A `Connected` server that dies (non-auth) flips to `Unreachable`.
 - An `Unreachable` server that recovers flips back to `Connected` (the
-  `agent-b` regression).
+  `him` regression).
 - A server whose probe reveals auth death flips to `NeedsAuth`.
 - `tool_count` stays current as upstream tool sets change.
 

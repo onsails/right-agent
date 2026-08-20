@@ -32,10 +32,6 @@ use super::worker::{SessionKey, WorkerContext, spawn_worker};
 #[derive(Clone)]
 pub struct AgentDir(pub PathBuf);
 
-/// SSH config path for the agent's OpenShell sandbox.
-#[derive(Clone)]
-pub struct SshConfigPath(pub Option<PathBuf>);
-
 /// Newtype wrapper for the right home directory passed via dptree dependencies.
 /// Distinct from AgentDir to prevent TypeId collision in dptree.
 #[derive(Clone)]
@@ -66,8 +62,6 @@ pub struct AgentSettings {
     /// Lock-free swap cell — `/model` callback and `config_watcher` (model-only diff)
     /// store new values; CC invocations load on every call.
     pub model: std::sync::Arc<arc_swap::ArcSwap<Option<String>>>,
-    /// Resolved sandbox name (None when running without sandbox).
-    pub resolved_sandbox: Option<String>,
     /// Hindsight memory client (None when using file-based memory).
     pub hindsight: Option<std::sync::Arc<right_memory::ResilientHindsight>>,
     /// Prefetch cache for Hindsight recall results.
@@ -87,8 +81,9 @@ pub struct AgentSettings {
     pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
     /// Process shutdown token used to cancel detached user-turn repair work.
     pub(crate) shutdown: tokio_util::sync::CancellationToken,
-    /// Shared sandbox-backend health. Read before every sandboxed turn by the
-    /// pre-invocation health gate (Task 9) to fail-closed when Unavailable.
+    /// Shared sandbox-backend state. Read before every sandboxed turn by the
+    /// pre-invocation health gate (Task 9) to fail-closed when Unavailable,
+    /// and to resolve the live sandbox handle for the turn.
     pub sandbox_runtime: std::sync::Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
 }
 
@@ -336,8 +331,13 @@ pub(crate) async fn handle_message(
                     bot: ctx.bot.clone(),
                     agent_db_dir: ctx.agent_dir.0.clone(),
                     debug: Arc::clone(&settings.debug),
-                    ssh_config_path: ctx.ssh_config.0.clone(),
-                    resolved_sandbox: settings.resolved_sandbox.clone(),
+                    // Seeded empty on purpose: `spawn_worker`'s debounce loop
+                    // re-resolves this from `sandbox_runtime` at the top of
+                    // every batch, because the supervisor publishes a new
+                    // handle after each recovery. Seeding a handle here would
+                    // be dead on arrival and invite the next reader to trust
+                    // a snapshot.
+                    sandbox: None,
                     auth_watcher_active: Arc::clone(&ctx.intercept_slots.auth_watcher),
                     auth_code_tx: Arc::clone(&ctx.intercept_slots.auth_code),
                     show_thinking: settings.show_thinking,
@@ -785,7 +785,6 @@ pub(crate) async fn handle_providers(
         );
         return Ok(());
     }
-    // Sandbox-mode guard: providers are only valid for openshell-sandboxed agents.
     let agent_name = agent_dir
         .0
         .file_name()
@@ -796,21 +795,6 @@ pub(crate) async fn handle_providers(
                 agent_dir.0.display()
             ))
         })?;
-    let cfg = right_agent::agent::discovery::parse_agent_config(&agent_dir.0)
-        .map_err(|e| other_err(format!("providers dashboard: load agent.yaml: {e:#}")))?;
-    let mode = cfg
-        .as_ref()
-        .map(|c| *c.sandbox_mode())
-        .unwrap_or(right_agent_config::SandboxMode::Openshell);
-    if mode != right_agent_config::SandboxMode::Openshell {
-        let _ = bot
-            .send_text(
-                msg.chat.id,
-                "Providers are only available for sandboxed agents. This agent runs in host mode.",
-            )
-            .await;
-        return Ok(());
-    }
     tracing::info!(agent_dir = %agent_dir.0.display(), "providers: opening dashboard");
     let global_config = right_config::read_global_config(&home.0)
         .map_err(|e| other_err(format!("providers dashboard: read config.yaml: {e:#}")))?;

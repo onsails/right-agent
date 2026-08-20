@@ -28,14 +28,14 @@ pub enum CodegenKind {
 }
 
 /// How a `Regenerated` change reaches a running sandbox.
+///
+/// Only one path remains: egress is a typed value applied at sandbox create
+/// (`right_sandbox::Egress`), and the filesystem boundary is the microVM
+/// itself, so neither has a generated file to hot-apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotReload {
     /// Takes effect on next CC invocation. No sandbox RPC needed.
     BotRestart,
-    /// Applied via `openshell policy set --wait` after write. Network-only.
-    SandboxPolicyApply,
-    /// Boot-time-only (landlock, filesystem). Requires sandbox migration.
-    SandboxRecreate,
 }
 
 /// An entry in the codegen registry.
@@ -45,12 +45,8 @@ pub struct CodegenFile {
     pub path: PathBuf,
 }
 
-/// Unconditional write — the sanctioned writer for
-/// `Regenerated(BotRestart)` and `Regenerated(SandboxRecreate)` outputs.
-///
-/// `Regenerated(SandboxPolicyApply)` outputs MUST go through
-/// [`write_and_apply_sandbox_policy`] instead — there is no other writer for
-/// that category, so callers cannot skip `apply_policy`.
+/// Unconditional write — the sanctioned writer for every `Regenerated`
+/// output.
 ///
 /// Creates parent directories if absent.
 pub fn write_regenerated(path: &Path, content: &str) -> miette::Result<()> {
@@ -126,54 +122,6 @@ where
         .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
 }
 
-/// The ONLY way to update policy for a running sandbox. Writes `content` to
-/// `path`, then applies it via `openshell policy set --wait`. Network-only
-/// policy changes hot-reload; filesystem changes require sandbox migration
-/// (handled separately by `maybe_migrate_sandbox`).
-pub async fn write_and_apply_sandbox_policy(
-    sandbox: &str,
-    path: &Path,
-    content: &str,
-) -> miette::Result<()> {
-    write_regenerated(path, content)?;
-    right_openshell::openshell::apply_policy(sandbox, path).await
-}
-
-/// Write policy + hot-apply with rollback support.
-///
-/// Returns a [`PolicySnapshot`] carrying the prior bytes; call
-/// [`PolicySnapshot::restore`] to roll back if a follow-on gateway
-/// operation fails.
-pub async fn write_apply_with_snapshot(
-    sandbox_name: &str,
-    policy_path: &Path,
-    new_content: String,
-) -> miette::Result<PolicySnapshot> {
-    let prior = std::fs::read_to_string(policy_path)
-        .map_err(|e| miette::miette!("read policy.yaml: {e:#}"))?;
-    write_and_apply_sandbox_policy(sandbox_name, policy_path, &new_content).await?;
-    Ok(PolicySnapshot {
-        path: policy_path.to_path_buf(),
-        prior,
-        sandbox: sandbox_name.to_string(),
-    })
-}
-
-/// Snapshot of a policy file prior to a hot-apply. Created by
-/// [`write_apply_with_snapshot`]; call [`PolicySnapshot::restore`] to
-/// roll back the sandbox to the previous policy.
-pub struct PolicySnapshot {
-    path: PathBuf,
-    prior: String,
-    sandbox: String,
-}
-
-impl PolicySnapshot {
-    pub async fn restore(self) -> miette::Result<()> {
-        write_and_apply_sandbox_policy(&self.sandbox, &self.path, &self.prior).await
-    }
-}
-
 /// Per-agent codegen outputs. Source of truth for guard tests.
 ///
 /// Every file produced by [`crate::run_single_agent_codegen`] MUST
@@ -193,10 +141,6 @@ pub fn codegen_registry(agent_dir: &Path) -> Vec<CodegenFile> {
         CodegenFile {
             kind: CodegenKind::Regenerated(HotReload::BotRestart),
             path: agent_dir.join("mcp.json"),
-        },
-        CodegenFile {
-            kind: CodegenKind::Regenerated(HotReload::SandboxRecreate),
-            path: agent_dir.join("policy.yaml"),
         },
         CodegenFile {
             kind: CodegenKind::Regenerated(HotReload::BotRestart),
@@ -268,7 +212,7 @@ mod tests {
         std::fs::write(agent_path.join("IDENTITY.md"), "# Test Identity\n").unwrap();
         std::fs::write(
             agent_path.join("agent.yaml"),
-            "restart: never\nnetwork_policy: permissive\nsandbox:\n  mode: none\n",
+            "restart: never\nnetwork_policy: permissive\n",
         )
         .unwrap();
         agent_from_path(&agent_path, name)
@@ -448,8 +392,9 @@ mod tests {
                 .any(|f| matches!(f.kind, CodegenKind::Regenerated(HotReload::BotRestart)))
         );
         assert!(
-            reg.iter()
-                .any(|f| matches!(f.kind, CodegenKind::Regenerated(HotReload::SandboxRecreate)))
+            !reg.iter()
+                .any(|f| f.path.file_name().is_some_and(|name| name == "policy.yaml")),
+            "policy.yaml codegen is gone: egress is a typed value applied at sandbox create"
         );
     }
 

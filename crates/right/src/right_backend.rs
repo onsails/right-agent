@@ -144,6 +144,7 @@ pub(crate) struct ProviderCapabilitiesParams {}
 pub struct RightBackend {
     agents_dir: PathBuf,
     mtls_dir: Option<PathBuf>,
+    skill_probe: crate::learning::SkillPackageProbe,
     progress: crate::progress::ProgressRegistry,
 }
 
@@ -152,8 +153,19 @@ impl RightBackend {
         Self {
             agents_dir,
             mtls_dir,
+            skill_probe: crate::learning::SkillPackageProbe::Sandbox,
             progress: crate::progress::ProgressRegistry::default(),
         }
+    }
+
+    /// Test-only: answer skill-package probes with `exists` instead of asking
+    /// the agent's sandbox, so the learning bookkeeping around the probe can be
+    /// exercised without a live VM. Reads no filesystem — a host read would be
+    /// a different answer than the guest's, not a cheaper one.
+    #[cfg(test)]
+    pub(crate) fn with_canned_skill_probe(mut self, exists: bool) -> Self {
+        self.skill_probe = crate::learning::SkillPackageProbe::Canned(exists);
+        self
     }
 
     pub(crate) fn progress_registry(&self) -> crate::progress::ProgressRegistry {
@@ -1083,8 +1095,8 @@ impl RightBackend {
             crate::learning::LearningActionParam::Update => SkillPackageExpectation::MustExist,
         };
         if let Err(result) = crate::learning::validate_skill_package_state(
+            self.skill_probe,
             agent_name,
-            self.mtls_dir.as_deref(),
             agent_dir,
             &params.skill_name,
             expectation,
@@ -1214,8 +1226,8 @@ impl RightBackend {
 
         if params.status.is_success()
             && let Err(result) = crate::learning::validate_skill_package_state(
+                self.skill_probe,
                 agent_name,
-                self.mtls_dir.as_deref(),
                 agent_dir,
                 &params.skill_name,
                 SkillPackageExpectation::MustExist,
@@ -1983,14 +1995,15 @@ impl RightBackend {
             ));
         }
 
+        // Every agent is sandboxed, so a missing mTLS dir means the sandbox
+        // gateway is not reachable — surface it instead of reporting an empty
+        // provider list as if the agent had none.
         let Some(mtls_dir) = &self.mtls_dir else {
-            let json = serde_json::json!({
-                "providers": [],
-                "note": "This agent has no sandbox; gateway providers are not available."
-            });
-            return Ok(CallToolResult::success(vec![Content::text(
-                json.to_string(),
-            )]));
+            return Ok(tool_error(
+                "provider_capabilities_failed",
+                "sandbox gateway unavailable: mTLS credentials were not found",
+                None,
+            ));
         };
 
         let agent_dir = self.agents_dir.join(agent_name);

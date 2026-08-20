@@ -70,8 +70,12 @@ pub(crate) struct ProgressTarget {
     pub(crate) chat_id: i64,
     pub(crate) thread_id: i64,
     pub(crate) agent_dir: std::path::PathBuf,
-    pub(crate) ssh_config_path: Option<std::path::PathBuf>,
-    pub(crate) resolved_sandbox: Option<String>,
+    /// Sandbox the registering invocation runs in — the only place its
+    /// outbound attachments exist. `None` once the backend has degraded: the
+    /// registry outlives any single turn, and this endpoint is reachable
+    /// independently of it, so the attachment path re-checks rather than
+    /// assuming the handle from registration time is still there.
+    pub(crate) sandbox: Option<crate::sandbox::Sandbox>,
     /// Per-turn `channel_post` attempts; capped at MAX_CHANNEL_POST_PER_TURN.
     pub(crate) channel_post_count: Arc<std::sync::atomic::AtomicU32>,
 }
@@ -84,8 +88,7 @@ impl std::fmt::Debug for ProgressTarget {
             .field("thread_id", &self.thread_id)
             .field("token", &"<redacted>")
             .field("agent_dir", &self.agent_dir)
-            .field("ssh_config_path", &self.ssh_config_path)
-            .field("resolved_sandbox", &self.resolved_sandbox)
+            .field("sandbox", &self.sandbox.as_ref().map(|s| s.name()))
             .finish()
     }
 }
@@ -339,6 +342,22 @@ async fn handle_message_send(
     }
 
     if !req.attachments.is_empty() {
+        // Outbound attachments live inside the guest; a degraded backend means
+        // there is nothing to fetch them from. Fail closed rather than
+        // silently dropping the files from an otherwise-successful send.
+        let Some(sandbox) = target.sandbox.as_ref() else {
+            tracing::warn!(
+                invocation_id = %req.invocation_id,
+                "message_send attachments refused: sandbox unavailable",
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ProgressErrorResponse {
+                    error: "sandbox_unavailable".to_owned(),
+                }),
+            )
+                .into_response();
+        };
         let outbound: Vec<_> = req
             .attachments
             .iter()
@@ -350,8 +369,7 @@ async fn handle_message_send(
             target.chat_id,
             target.thread_id,
             &target.agent_dir,
-            target.ssh_config_path.as_deref(),
-            target.resolved_sandbox.as_deref(),
+            sandbox,
         )
         .await
         {
@@ -712,8 +730,7 @@ mod tests {
             chat_id: 42,
             thread_id: 7,
             agent_dir: std::path::PathBuf::from("/tmp/agent"),
-            ssh_config_path: None,
-            resolved_sandbox: None,
+            sandbox: None,
             channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
 
@@ -736,8 +753,7 @@ mod tests {
             chat_id: 42,
             thread_id: 7,
             agent_dir: std::path::PathBuf::from("/tmp/agent"),
-            ssh_config_path: None,
-            resolved_sandbox: None,
+            sandbox: None,
             channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
         let s = format!("{target:?}");
@@ -753,8 +769,7 @@ mod tests {
             chat_id: 42,
             thread_id: 0,
             agent_dir: std::path::PathBuf::from("/tmp/agent"),
-            ssh_config_path: None,
-            resolved_sandbox: None,
+            sandbox: None,
             channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
 
@@ -845,8 +860,7 @@ mod tests {
             chat_id: 42,
             thread_id: 0,
             agent_dir: std::path::PathBuf::from("/tmp"),
-            ssh_config_path: None,
-            resolved_sandbox: None,
+            sandbox: None,
             channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         });
         let state = test_state(progress);
@@ -875,8 +889,7 @@ mod tests {
             chat_id: 42,
             thread_id: 0,
             agent_dir: std::path::PathBuf::from("/tmp"),
-            ssh_config_path: None,
-            resolved_sandbox: None,
+            sandbox: None,
             channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         });
 
@@ -896,8 +909,7 @@ mod tests {
             chat_id: 42,
             thread_id: 0,
             agent_dir: agent_dir.to_owned(),
-            ssh_config_path: None,
-            resolved_sandbox: None,
+            sandbox: None,
             channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
@@ -969,8 +981,7 @@ mod tests {
             chat_id: 42,
             thread_id: 0,
             agent_dir: agent_dir.path().to_owned(),
-            ssh_config_path: None,
-            resolved_sandbox: None,
+            sandbox: None,
             channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         });
 

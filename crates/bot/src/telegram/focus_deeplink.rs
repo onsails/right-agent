@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn roundtrip_real_world_supergroup_topic() {
-        // The exact scope from agent-a.log.2026-06-13: a negative supergroup id
+        // The exact scope from riskoff.log.2026-06-13: a negative supergroup id
         // and a topic thread id.
         let chat_id = -1003929337699;
         let thread_id = 29;

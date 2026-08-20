@@ -450,9 +450,8 @@ async fn run_delivery_once(
     bot: &crate::telegram::BotType,
     allowlist: &right_agent::agent::allowlist::AllowlistHandle,
     idle_ts: &Arc<IdleTimestamp>,
-    ssh_config_path: Option<&Path>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
     internal_client: &Arc<right_mcp::internal_client::InternalClient>,
-    resolved_sandbox: Option<&str>,
     upgrade_lock: &Arc<tokio::sync::RwLock<()>>,
     session_locks: &crate::telegram::SessionLocks,
     debug: &Arc<std::sync::atomic::AtomicBool>,
@@ -594,11 +593,10 @@ async fn run_delivery_once(
         bot,
         target_chat_id,
         target_thread_id,
-        ssh_config_path,
+        sandbox,
         crate::snapshot_model(model),
         session_id,
         internal_client,
-        resolved_sandbox,
         upgrade_lock,
         session_locks.clone(),
         Arc::clone(debug),
@@ -703,10 +701,9 @@ pub(crate) async fn run_delivery_loop(
     bot: crate::telegram::BotType,
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
     idle_ts: Arc<IdleTimestamp>,
-    ssh_config_path: Option<PathBuf>,
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: std::sync::Arc<right_mcp::internal_client::InternalClient>,
     shutdown: tokio_util::sync::CancellationToken,
-    resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     session_locks: crate::telegram::SessionLocks,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -732,6 +729,10 @@ pub(crate) async fn run_delivery_loop(
             }
         }
 
+        // Resolved per poll: the loop outlives any one sandbox handle, and a
+        // recovery between polls retires the previous one.
+        let sandbox = sandbox_runtime.current_sandbox();
+
         run_delivery_once(
             &mut conn,
             &mut state,
@@ -742,9 +743,8 @@ pub(crate) async fn run_delivery_loop(
             &bot,
             &allowlist,
             &idle_ts,
-            ssh_config_path.as_deref(),
+            sandbox.as_ref(),
             &internal_client,
-            resolved_sandbox.as_deref(),
             &upgrade_lock,
             &session_locks,
             &debug,
@@ -864,9 +864,8 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
     bot: crate::telegram::BotType,
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
     idle_ts: Arc<IdleTimestamp>,
-    ssh_config_path: Option<PathBuf>,
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: Arc<right_mcp::internal_client::InternalClient>,
-    resolved_sandbox: Option<String>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     session_locks: crate::telegram::SessionLocks,
     debug: Arc<std::sync::atomic::AtomicBool>,
@@ -885,6 +884,7 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
             tracing::warn!("async delivery shutdown flush timed out");
             return;
         }
+        let sandbox = sandbox_runtime.current_sandbox();
         let delivered = run_delivery_once(
             &mut conn,
             &mut state,
@@ -895,9 +895,8 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
             &bot,
             &allowlist,
             &idle_ts,
-            ssh_config_path.as_deref(),
+            sandbox.as_ref(),
             &internal_client,
-            resolved_sandbox.as_deref(),
             &upgrade_lock,
             &session_locks,
             &debug,
@@ -995,18 +994,15 @@ async fn deliver_through_session(
     bot: &crate::telegram::BotType,
     target_chat_id: i64,
     target_thread_id: Option<i64>,
-    ssh_config_path: Option<&Path>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
     configured_model: Option<String>,
     session_id: Option<String>,
     internal_client: &right_mcp::internal_client::InternalClient,
-    resolved_sandbox: Option<&str>,
     upgrade_lock: &tokio::sync::RwLock<()>,
     session_locks: crate::telegram::SessionLocks,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     shutdown: DeliveryShutdownControl<'_>,
 ) -> Result<DeliverySendReport, String> {
-    use std::process::Stdio;
-
     // Block while upgrade is running.
     let _upgrade_guard = run_or_delivery_shutdown(shutdown, upgrade_lock.read()).await?;
 
@@ -1024,7 +1020,7 @@ async fn deliver_through_session(
         None => None,
     };
 
-    let mcp_path = crate::cc::invocation::mcp_config_path(ssh_config_path, agent_dir);
+    let mcp_path = crate::sandbox::SANDBOX_MCP_JSON_PATH.to_owned();
 
     let reply_schema_path = agent_dir.join(".claude").join("reply-schema.json");
     let json_schema = std::fs::read_to_string(&reply_schema_path).unwrap_or_default();
@@ -1037,19 +1033,7 @@ async fn deliver_through_session(
         Some(debug),
     );
 
-    // Derive sandbox_mode and home_dir from ssh_config_path.
-    let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
-        (
-            right_agent::agent::types::SandboxMode::Openshell,
-            "/sandbox".to_owned(),
-        )
-    } else {
-        (
-            right_agent::agent::types::SandboxMode::None,
-            agent_dir.to_string_lossy().into_owned(),
-        )
-    };
-    let base_prompt = right_codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+    let base_prompt = right_codegen::generate_system_prompt(agent_name, "/sandbox");
 
     // Fetch MCP instructions from aggregator (non-fatal).
     let mcp_instructions: Option<String> =
@@ -1076,76 +1060,34 @@ async fn deliver_through_session(
     // Delivery sessions skip memory injection — same rationale as cron jobs.
     let memory_mode: Option<crate::cc::prompt::MemoryMode> = None;
 
-    crate::cc::invocation::guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)
+    let sandbox = crate::cc::invocation::guard_no_sandboxed_host_exec(agent_name, sandbox)
         .map_err(|e| format!("{e:#}"))?;
 
-    let mut cmd = if let Some(ssh_config) = ssh_config_path {
-        let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            crate::cc::prompt::PromptMode::Normal,
-            "/sandbox",
-            "/tmp/right-system-prompt.md",
-            "/sandbox",
-            &claude_args,
-            mcp_instructions.as_deref(),
-            memory_mode.as_ref(),
-            None,
-            None,
-            None,
-        );
-        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
-            let escaped = token.replace('\'', "'\\''");
-            assembly_script =
-                format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
-        }
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
-        let mut c = tokio::process::Command::new("ssh");
-        c.arg("-F").arg(ssh_config);
-        c.arg(&ssh_host);
-        c.arg("--");
-        c.arg(assembly_script);
-        c
-    } else {
-        let agent_dir_str = agent_dir.to_string_lossy();
-        let prompt_path = agent_dir.join(".claude").join("delivery-system-prompt.md");
-        let prompt_path_str = prompt_path.to_string_lossy();
-        let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            crate::cc::prompt::PromptMode::Normal,
-            &agent_dir_str,
-            &prompt_path_str,
-            &agent_dir_str,
-            &claude_args,
-            mcp_instructions.as_deref(),
-            memory_mode.as_ref(),
-            None,
-            None,
-            None,
-        );
-        let cc_bin = which::which("claude")
-            .or_else(|_| which::which("claude-bun"))
-            .map_err(|_| "claude binary not found in PATH".to_string())?;
-        let _ = cc_bin; // Existence check only — bash -c runs the script
-        let mut c = tokio::process::Command::new("bash");
-        c.arg("-c");
-        c.arg(&assembly_script);
-        c.env("HOME", agent_dir);
-        c.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
-            c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
-        }
-        c.current_dir(agent_dir);
-        c
-    };
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
+    let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
+        &base_prompt,
+        crate::cc::prompt::PromptMode::Normal,
+        "/sandbox",
+        "/tmp/right-system-prompt.md",
+        "/sandbox",
+        &claude_args,
+        mcp_instructions.as_deref(),
+        memory_mode.as_ref(),
+        None,
+        None,
+        None,
+    );
 
     let mut child =
-        right_process::ProcessGroupChild::spawn(cmd).map_err(|e| format!("spawn failed: {e:#}"))?;
+        crate::cc::invocation::build_claude_script_command(assembly_script, agent_dir, sandbox)
+            .await
+            .stdin_piped()
+            .stdout(crate::cc::sandbox_process::Capture::Pipe)
+            .stderr(crate::cc::sandbox_process::Capture::Pipe)
+            .spawn()
+            .await
+            .map_err(|e| format!("spawn failed: {e:#}"))?;
 
     if let Some(mut stdin) = child.stdin() {
-        use tokio::io::AsyncWriteExt;
         run_or_delivery_shutdown(shutdown, stdin.write_all(yaml_input.as_bytes()))
             .await?
             .map_err(|e| format!("stdin write: {e:#}"))?;
@@ -1160,7 +1102,7 @@ async fn deliver_through_session(
     .map_err(|_| "delivery CC subprocess timed out after 120s".to_string())?
     .map_err(|e| format!("wait_with_output: {e:#}"))?;
 
-    if !output.status.success() {
+    if !output.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         // CC writes errors to stdout (as JSON) when using --output-format json.
@@ -1173,7 +1115,7 @@ async fn deliver_through_session(
         } else {
             "(no output)".into()
         };
-        return Err(format!("CC exited with {}: {detail}", output.status));
+        return Err(format!("CC exited with {}: {detail}", output.code));
     }
 
     let raw = String::from_utf8_lossy(&output.stdout);
@@ -1276,8 +1218,7 @@ async fn deliver_through_session(
                 target_chat_id,
                 target_thread_id.unwrap_or(0),
                 agent_dir,
-                ssh_config_path,
-                resolved_sandbox,
+                sandbox,
             ),
         )
         .await?;

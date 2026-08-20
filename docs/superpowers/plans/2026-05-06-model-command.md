@@ -28,7 +28,7 @@ Open `crates/bot/Cargo.toml` and add `arc-swap = "1.7"` to the `[dependencies]` 
 
 - [ ] **Step 2: Verify it compiles**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo check -p right-bot`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo check -p right-bot`
 Expected: succeeds (the dep is fetched but not yet used; that's fine).
 
 - [ ] **Step 3: Commit**
@@ -179,7 +179,7 @@ Append to the `tests` module starting around `crates/right-agent/src/agent/types
 
 - [ ] **Step 2: Run tests, verify they fail**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-agent --lib write_agent_yaml_model`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-agent --lib write_agent_yaml_model`
 Expected: FAIL with "cannot find function `write_agent_yaml_model` in module `super`" (or similar).
 
 - [ ] **Step 3: Implement the helper**
@@ -250,7 +250,7 @@ pub fn write_agent_yaml_model(
 
 - [ ] **Step 4: Run tests, verify they pass**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-agent --lib write_agent_yaml_model`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-agent --lib write_agent_yaml_model`
 Expected: all 6 tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -312,7 +312,7 @@ with:
 
 - [ ] **Step 3: Verify it compiles (will fail until Task 4)**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo check -p right-bot`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo check -p right-bot`
 Expected: FAIL with type errors at `worker.rs:1154` and `worker.rs:1652` (`model: ctx.model.clone()` type mismatch). That's expected — Task 4 fixes both.
 
 - [ ] **Step 4: Don't commit yet** — wait until Task 4 closes the loop.
@@ -378,12 +378,12 @@ The invariant: both fields must hold a clone of the same `Arc<ArcSwap<Option<Str
 
 - [ ] **Step 5: Run cargo check**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo check -p right-bot`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo check -p right-bot`
 Expected: PASS.
 
 - [ ] **Step 6: Run all bot tests**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib`
 Expected: PASS (no behavior change yet — model field is still set the same way at startup).
 
 - [ ] **Step 7: Commit**
@@ -629,7 +629,7 @@ next to the existing `pub(crate) mod handler;` / `pub(crate) mod allowlist_comma
 
 - [ ] **Step 4: Run tests**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib model_command`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib model_command`
 Expected: 10 tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -744,7 +744,7 @@ Append to the `tests` mod in `model_command.rs`:
 
 - [ ] **Step 3: Run tests**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib model_command`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib model_command`
 Expected: 12 tests PASS.
 
 - [ ] **Step 4: Commit**
@@ -875,12 +875,12 @@ fn persist_model(agent_yaml: &Path, model_id: Option<&str>) -> miette::Result<()
 
 - [ ] **Step 2: Verify it compiles**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo check -p right-bot`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo check -p right-bot`
 Expected: PASS.
 
 - [ ] **Step 3: Run existing tests**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib model_command`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib model_command`
 Expected: 12 tests PASS (no new tests yet — handler is hard to unit-test without a mock bot; integration covered in Task 11).
 
 - [ ] **Step 4: Commit**
@@ -952,14 +952,14 @@ In `dispatch.rs:453-460`, the current callback handler routes `bg:` to `handle_b
 
 - [ ] **Step 5: Verify it compiles + smoke test**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib dispatcher_builds_without_panic`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib dispatcher_builds_without_panic`
 Expected: PASS. (This is the dptree DI sanity smoke test mentioned at `dispatch.rs:507`. Any unsatisfied DI dependency would panic at build time.)
 
 If it fails with `type X not provided`, the missing dep is one of `AllowlistHandle` (already wired), `Arc<AgentSettings>` (already wired as `settings_arc`), or `Arc<AgentDir>` (already wired as `agent_dir_arc`). Confirm the existing `.dependencies(dptree::deps![...])` block at `dispatch.rs:467-480` already includes these — it does.
 
 - [ ] **Step 6: Run all bot tests**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib`
 Expected: PASS.
 
 - [ ] **Step 7: Commit**
@@ -1079,7 +1079,7 @@ mod tests {
 
 - [ ] **Step 2: Run tests, verify they fail**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib config_watcher::tests`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib config_watcher::tests`
 Expected: FAIL — `cannot find type ChangeKind` and `cannot find function diff_classify`.
 
 - [ ] **Step 3: Add `ChangeKind`, `diff_classify`, and update the watcher**
@@ -1248,7 +1248,7 @@ pub fn spawn_config_watcher(
 
 - [ ] **Step 4: Run tests, verify they pass**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib config_watcher`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-bot --lib config_watcher`
 Expected: 8 tests PASS.
 
 - [ ] **Step 5: Don't commit yet** — Task 10 wires this through and the workspace won't compile until then.
@@ -1295,12 +1295,12 @@ Confirm the local variable name (`settings_arc` per `dispatch.rs`; in `lib.rs` i
 
 - [ ] **Step 3: cargo check**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo check -p right-bot`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo check -p right-bot`
 Expected: PASS.
 
 - [ ] **Step 4: Run all bot tests**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-bot`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-bot`
 Expected: PASS.
 
 - [ ] **Step 5: Commit (combines Tasks 9 + 10)**
@@ -1418,7 +1418,7 @@ arc-swap = "1.7"
 
 - [ ] **Step 4: Run the integration test**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-bot --test model_command`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-bot --test model_command`
 Expected: 3 tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -1453,7 +1453,7 @@ Append to `crates/right-agent/templates/right/agent/agent.yaml` (after the exist
 
 - [ ] **Step 2: Verify the template still parses**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test -p right-agent --lib agent_config`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test -p right-agent --lib agent_config`
 Expected: PASS — the template is loaded by tests via `include_str!` at `init.rs:29` and parsed in init tests.
 
 - [ ] **Step 3: Commit**
@@ -1518,17 +1518,17 @@ Verify the whole workspace builds and tests pass; do a manual smoke if the dev e
 
 - [ ] **Step 1: Workspace build**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo build --workspace`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo build --workspace`
 Expected: PASS.
 
 - [ ] **Step 2: Workspace tests**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo test --workspace --lib`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo test --workspace --lib`
 Expected: PASS.
 
 - [ ] **Step 3: Workspace clippy (warning floor)**
 
-Run: `cd /Users/developer/dev/rightclaw && devenv shell -- cargo clippy --workspace --all-targets -- -D warnings`
+Run: `cd /Users/molt/dev/rightclaw && devenv shell -- cargo clippy --workspace --all-targets -- -D warnings`
 Expected: PASS. If clippy flags `arc-swap` `Guard` patterns or similar, address inline (the deref-deref-clone pattern `(**guard).clone()` is idiomatic and clippy should accept it).
 
 - [ ] **Step 4: Manual smoke (only if a dev agent is running)**

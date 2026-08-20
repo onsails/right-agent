@@ -6,8 +6,9 @@ import {
   detectCredentialPrefix,
   evaluateCredentialSubmit,
   isBorrowed,
-  providerCompositionClass,
-  providerCompositionLabel,
+  isGhost,
+  providerStatusClass,
+  providerStatusLabel,
   shareTargetState,
   validateUpstreamHosts,
   CREDENTIAL_HINT,
@@ -23,8 +24,7 @@ function providerView(overrides: Partial<ProviderView> = {}): ProviderView {
     env_var: 'ACME_API_KEY',
     generic: null,
     updated_at: null,
-    composed: false,
-    status: { kind: 'healthy' },
+    status: { kind: 'ready' },
     ...overrides,
   }
 }
@@ -70,23 +70,26 @@ describe('evaluateCredentialSubmit', () => {
   })
 })
 
-describe('provider composition labels', () => {
-  it('shows composed state independently from provider health status', () => {
-    expect(providerCompositionLabel(providerView({ composed: true }))).toBe('Composed')
-    expect(providerCompositionClass(providerView({ composed: true }))).toBe('ok')
+describe('provider status labels (tri-state)', () => {
+  it('renders each status with its own pill tone', () => {
+    expect(providerStatusLabel(providerView())).toBe('Ready')
+    expect(providerStatusClass(providerView())).toBe('ok')
 
-    expect(providerCompositionLabel(providerView({ composed: false }))).toBe('Not composed')
-    expect(providerCompositionClass(providerView({ composed: false }))).toBe('bad')
+    const needsValue = providerView({ status: { kind: 'needs_value' } })
+    expect(providerStatusLabel(needsValue)).toBe('Needs credential')
+    expect(providerStatusClass(needsValue)).toBe('warn')
 
-    expect(providerCompositionLabel(providerView({ composed: null }))).toBe('Unknown')
-    expect(providerCompositionClass(providerView({ composed: null }))).toBe('warn')
-
-    const degradedButComposed = providerView({
-      composed: true,
-      status: { kind: 'gateway_error', message: 'temporary lookup failure' },
+    const broken = providerView({
+      status: { kind: 'error', message: 'unknown built-in slug "acme" — config migration required' },
     })
-    expect(providerCompositionLabel(degradedButComposed)).toBe('Composed')
-    expect(providerCompositionClass(degradedButComposed)).toBe('ok')
+    expect(providerStatusLabel(broken)).toContain('unknown built-in slug "acme"')
+    expect(providerStatusClass(broken)).toBe('bad')
+  })
+
+  it('treats only the error status as a ghost (re-create instead of rotate/edit)', () => {
+    expect(isGhost(providerView())).toBe(false)
+    expect(isGhost(providerView({ status: { kind: 'needs_value' } }))).toBe(false)
+    expect(isGhost(providerView({ status: { kind: 'error', message: 'boom' } }))).toBe(true)
   })
 })
 
@@ -124,15 +127,15 @@ describe('isBorrowed / borrowedOwnerLabel', () => {
   })
 
   it('treats a non-empty shared_from as borrowed and builds the owner label', () => {
-    const p = providerView({ shared_from: 'agent-a' })
+    const p = providerView({ shared_from: 'riskoff' })
     expect(isBorrowed(p)).toBe(true)
-    expect(borrowedOwnerLabel(p)).toBe('Shared from agent-a')
+    expect(borrowedOwnerLabel(p)).toBe('Shared from riskoff')
   })
 })
 
 describe('shareTargetState', () => {
   function peer(overrides: Partial<ProviderPeer> = {}): ProviderPeer {
-    return { agent: 'agent-a', network_policy: 'permissive', providers: [], ...overrides }
+    return { agent: 'riskoff', network_policy: 'permissive', providers: [], ...overrides }
   }
 
   it('allows sharing an owned provider to a peer that lacks it', () => {
@@ -165,18 +168,18 @@ describe('borrowCandidates', () => {
     return { name: 'fal', type: 'right-fal', env_var: 'FAL_KEY', label: null, generic: null, ...overrides }
   }
   function peer(overrides: Partial<ProviderPeer> = {}): ProviderPeer {
-    return { agent: 'agent-a', network_policy: 'permissive', providers: [], ...overrides }
+    return { agent: 'riskoff', network_policy: 'permissive', providers: [], ...overrides }
   }
 
   it('flattens every peer provider into a candidate tagged with its owner agent', () => {
     const peers = [
-      peer({ agent: 'agent-a', providers: [peerProvider({ name: 'fal' }), peerProvider({ name: 'openai' })] }),
+      peer({ agent: 'riskoff', providers: [peerProvider({ name: 'fal' }), peerProvider({ name: 'openai' })] }),
       peer({ agent: 'scout', providers: [peerProvider({ name: 'gh' })] }),
     ]
     const got = borrowCandidates(peers, [])
     expect(got.map((c) => [c.owner, c.provider.name])).toEqual([
-      ['agent-a', 'fal'],
-      ['agent-a', 'openai'],
+      ['riskoff', 'fal'],
+      ['riskoff', 'openai'],
       ['scout', 'gh'],
     ])
     expect(got.every((c) => c.blocked === null)).toBe(true)

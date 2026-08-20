@@ -315,9 +315,8 @@ async fn spawn_then_continuation(
     agent_dir: &std::path::Path,
     agent_name: &str,
     model: Option<&str>,
-    ssh_config_path: Option<&std::path::Path>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
     internal_client: &Arc<right_mcp::internal_client::InternalClient>,
-    resolved_sandbox: Option<&str>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     session_locks: &crate::telegram::SessionLocks,
     debug: Arc<std::sync::atomic::AtomicBool>,
@@ -350,9 +349,8 @@ async fn spawn_then_continuation(
         agent_dir.to_path_buf(),
         agent_name.to_string(),
         model.map(|s| s.to_owned()),
-        ssh_config_path.map(|p| p.to_path_buf()),
+        sandbox.map(Arc::clone),
         Arc::clone(internal_client),
-        resolved_sandbox.map(|s| s.to_owned()),
         upgrade_lock,
         session_guard,
         debug,
@@ -362,12 +360,14 @@ async fn spawn_then_continuation(
 }
 
 /// Delete old cron log files for a job, keeping the most recent `keep` files.
+///
+/// Logs live inside the guest, so this is a guest command; a degraded backend
+/// simply skips the sweep (the next successful run retries it).
 async fn cleanup_old_logs(
     job_name: &str,
     log_dir: &str,
     keep: usize,
-    ssh_config_path: Option<&std::path::Path>,
-    resolved_sandbox: Option<&str>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
 ) {
     // Defense-in-depth: job names should be alphanumeric + hyphens only (validated at creation).
     if !job_name
@@ -377,63 +377,23 @@ async fn cleanup_old_logs(
         tracing::error!(job = %job_name, "job name contains unsafe characters, skipping log cleanup");
         return;
     }
-    if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
-        // List matching files sorted newest-first, skip `keep`, delete the rest.
-        // Using find+stat avoids ls parsing pitfalls with special characters in filenames.
-        let cleanup_cmd = format!(
-            "find {log_dir} -maxdepth 1 -name '{job_name}-*.ndjson' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | tail -n +{} | cut -d' ' -f2- | xargs -r rm -f",
-            keep + 1
-        );
-        let mut c = tokio::process::Command::new("ssh");
-        c.arg("-F")
-            .arg(ssh_config)
-            .arg(&ssh_host)
-            .arg("--")
-            .arg(&cleanup_cmd);
-        c.stdout(std::process::Stdio::piped());
-        c.stderr(std::process::Stdio::piped());
-        let output = match right_process::ProcessGroupChild::spawn(c) {
-            Ok(mut child) => child.wait_with_output().await,
-            Err(e) => Err(e),
-        };
-        match output {
-            Ok(o) if !o.status.success() => {
-                tracing::warn!(
-                    job = %job_name,
-                    "log cleanup via SSH failed: {}",
-                    String::from_utf8_lossy(&o.stderr)
-                );
-            }
-            Err(e) => {
-                tracing::warn!(job = %job_name, "log cleanup SSH command failed: {e:#}");
-            }
-            _ => {}
+    let Some(sandbox) = sandbox else {
+        tracing::debug!(job = %job_name, "skipping cron log cleanup: sandbox unavailable");
+        return;
+    };
+    // List matching files sorted newest-first, skip `keep`, delete the rest.
+    // Using find+stat avoids ls parsing pitfalls with special characters in filenames.
+    let cleanup_cmd = format!(
+        "find {log_dir} -maxdepth 1 -name '{job_name}-*.ndjson' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | tail -n +{} | cut -d' ' -f2- | xargs -r rm -f",
+        keep + 1
+    );
+    match crate::sandbox::exec_argv(sandbox, &["sh", "-c", &cleanup_cmd]).await {
+        Ok((_, 0)) => {}
+        Ok((output, code)) => {
+            tracing::warn!(job = %job_name, code, "cron log cleanup failed: {}", output.trim());
         }
-    } else {
-        let pattern = format!("{job_name}-");
-        let dir = match std::fs::read_dir(log_dir) {
-            Ok(d) => d,
-            Err(_) => return,
-        };
-        let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = dir
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_str()
-                    .is_some_and(|n| n.starts_with(&pattern) && n.ends_with(".ndjson"))
-            })
-            .filter_map(|e| {
-                let path = e.path();
-                let mtime = e.metadata().ok()?.modified().ok()?;
-                Some((path, mtime))
-            })
-            .collect();
-        files.sort_by_key(|f| std::cmp::Reverse(f.1));
-        for (old, _) in files.into_iter().skip(keep) {
-            if let Err(e) = std::fs::remove_file(&old) {
-                tracing::warn!(job = %job_name, path = %old.display(), "failed to delete old log: {e:#}");
-            }
+        Err(e) => {
+            tracing::warn!(job = %job_name, "cron log cleanup exec failed: {e:#}");
         }
     }
 }
@@ -649,17 +609,14 @@ async fn execute_job(
     agent_dir: &std::path::Path,
     agent_name: &str,
     model: Option<&str>,
-    ssh_config_path: Option<&std::path::Path>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
     internal_client: &Arc<right_mcp::internal_client::InternalClient>,
-    resolved_sandbox: Option<&str>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent_config::LearningConfig,
     session_locks: &crate::telegram::SessionLocks,
     progress_state: &crate::telegram::progress::ProgressState,
 ) {
-    use std::process::Stdio;
-
     // Lock check (CRON-04)
     let lock_ttl = effective_lock_ttl(spec);
     if is_lock_fresh(agent_dir, job_name, lock_ttl) {
@@ -687,19 +644,9 @@ async fn execute_job(
     let run_id = uuid::Uuid::new_v4().to_string();
     let started_at = chrono::Utc::now().to_rfc3339();
 
-    // Compute sandbox-relative log path (agents read this via Read tool).
-    // For sandbox mode: /sandbox/crons/logs/{job_name}-{run_id}.ndjson
-    // For no-sandbox: {agent_dir}/crons/logs/{job_name}-{run_id}.ndjson
+    // Guest-relative log path (agents read this via the Read tool).
     let log_filename = format!("{job_name}-{run_id}.ndjson");
-    let sandbox_log_dir = if ssh_config_path.is_some() {
-        "/sandbox/crons/logs".to_owned()
-    } else {
-        agent_dir
-            .join("crons")
-            .join("logs")
-            .to_string_lossy()
-            .into_owned()
-    };
+    let sandbox_log_dir = "/sandbox/crons/logs";
     let log_path_str = format!("{sandbox_log_dir}/{log_filename}");
 
     // DB insert: status='running' (D-04)
@@ -730,8 +677,16 @@ async fn execute_job(
         crate::cc::invocation::NonForegroundInvocationRegistration {
             agent_name: agent_name.to_owned(),
             agent_dir: agent_dir.to_path_buf(),
-            ssh_config_path: ssh_config_path.map(|p| p.to_path_buf()),
-            resolved_sandbox: resolved_sandbox.map(|s| s.to_owned()),
+            sandbox: match crate::cc::invocation::guard_no_sandboxed_host_exec(agent_name, sandbox)
+            {
+                Ok(sandbox) => Arc::clone(sandbox),
+                Err(e) => {
+                    tracing::error!(job = %job_name, "{e:#}");
+                    update_failed_run_record(&conn, &run_id, None).await;
+                    std::fs::remove_file(&lock_path).ok();
+                    return;
+                }
+            },
             internal_client: Arc::clone(internal_client),
             kind: right_mcp::internal_client::ProgressInvocationKindDto::Cron,
             chat_id: spec.target_chat_id,
@@ -811,19 +766,7 @@ async fn execute_job(
 
     let claude_args = invocation.into_args();
 
-    // Derive sandbox_mode and home_dir from ssh_config_path (same as worker).
-    let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
-        (
-            right_agent::agent::types::SandboxMode::Openshell,
-            "/sandbox".to_owned(),
-        )
-    } else {
-        (
-            right_agent::agent::types::SandboxMode::None,
-            agent_dir.to_string_lossy().into_owned(),
-        )
-    };
-    let base_prompt = right_codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+    let base_prompt = right_codegen::generate_system_prompt(agent_name, "/sandbox");
 
     // Fetch MCP instructions from aggregator (non-fatal).
     let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await
@@ -850,111 +793,51 @@ async fn execute_job(
     // tools explicitly from within cron prompts.
     let memory_mode: Option<crate::cc::prompt::MemoryMode> = None;
 
-    if let Err(e) =
-        crate::cc::invocation::guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)
-    {
-        tracing::error!(job = %job_name, "{e:#}");
-        registered_cron.cleanup().await;
-        update_failed_run_record(&conn, &run_id, None).await;
-        std::fs::remove_file(&lock_path).ok();
-        return;
-    }
-
-    let mut cmd = if let Some(ssh_config) = ssh_config_path {
-        // Sandbox mode: assemble system prompt via shell script (same as worker).
-        let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            crate::cc::prompt::PromptMode::Cron,
-            "/sandbox",
-            "/tmp/right-system-prompt.md",
-            "/sandbox",
-            &claude_args,
-            mcp_instructions.as_deref(),
-            memory_mode.as_ref(),
-            None,
-            None,
-            Some(&notice_token),
-        );
-        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
-            let escaped = token.replace('\'', "'\\''");
-            assembly_script =
-                format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
-        }
-        assembly_script = format!(
-            "set -o pipefail\nmkdir -p /sandbox/crons/logs\n{assembly_script} | tee /sandbox/crons/logs/{log_filename}"
-        );
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
-        let mut c = tokio::process::Command::new("ssh");
-        c.arg("-F").arg(ssh_config);
-        // Opt out of multiplexing — see worker.rs `invoke_cc` for the
-        // rationale. Cron jobs are long-lived just like worker turns and hit
-        // the same hang if the master holds forwarded FDs after we kill the
-        // slave.
-        c.arg("-o").arg("ControlMaster=no");
-        c.arg("-o").arg("ControlPath=none");
-        c.arg(&ssh_host);
-        c.arg("--");
-        c.arg(assembly_script);
-        c
-    } else {
-        // Direct exec (no sandbox): verify claude binary exists for clear error.
-        let agent_dir_str = agent_dir.to_string_lossy();
-        let prompt_path = agent_dir.join(".claude").join("cron-system-prompt.md");
-        let prompt_path_str = prompt_path.to_string_lossy();
-        let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            crate::cc::prompt::PromptMode::Cron,
-            &agent_dir_str,
-            &prompt_path_str,
-            &agent_dir_str,
-            &claude_args,
-            mcp_instructions.as_deref(),
-            memory_mode.as_ref(),
-            None,
-            None,
-            Some(&notice_token),
-        );
-        if which::which("claude").is_err() && which::which("claude-bun").is_err() {
-            tracing::error!(job = %job_name, "claude binary not found in PATH");
+    // The guard already ran (its handle is what registered the invocation), so
+    // this is the same live sandbox, re-borrowed for the turn itself.
+    let sandbox = match crate::cc::invocation::guard_no_sandboxed_host_exec(agent_name, sandbox) {
+        Ok(sandbox) => sandbox,
+        Err(e) => {
+            tracing::error!(job = %job_name, "{e:#}");
             registered_cron.cleanup().await;
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
         }
-        let host_log_dir = agent_dir.join("crons").join("logs");
-        if let Err(e) = std::fs::create_dir_all(&host_log_dir) {
-            tracing::error!(job = %job_name, "failed to create log dir: {e:#}");
-            registered_cron.cleanup().await;
-            update_failed_run_record(&conn, &run_id, None).await;
-            std::fs::remove_file(&lock_path).ok();
-            return;
-        }
-        let assembly_script =
-            format!("set -o pipefail\n{assembly_script} | tee {sandbox_log_dir}/{log_filename}");
-        let mut c = tokio::process::Command::new("bash");
-        c.arg("-c");
-        c.arg(&assembly_script);
-        c.env("HOME", agent_dir);
-        // CC internal env var — "0" = skip bundled rg, use system rg from PATH (D-05, D-06, SBOX-02).
-        // Counterintuitive: A_("0")=true means "builtin disabled" -> falls through to system rg.
-        // "1" = use CC's vendored rg (default; broken in nix — vendor binary lacks execute bit).
-        // UNDOCUMENTED: re-verify after CC version bumps.
-        // See: https://github.com/anthropics/claude-code/issues/6415
-        c.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
-            c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
-        }
-        c.current_dir(agent_dir);
-        c
     };
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
+
+    let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
+        &base_prompt,
+        crate::cc::prompt::PromptMode::Cron,
+        "/sandbox",
+        "/tmp/right-system-prompt.md",
+        "/sandbox",
+        &claude_args,
+        mcp_instructions.as_deref(),
+        memory_mode.as_ref(),
+        None,
+        None,
+        Some(&notice_token),
+    );
+    // `tee` the run's NDJSON into the guest log dir the agent reads back.
+    let assembly_script = format!(
+        "set -o pipefail\nmkdir -p {sandbox_log_dir}\n{assembly_script} | tee {sandbox_log_dir}/{log_filename}"
+    );
 
     tracing::info!(job = %job_name, run_id = %run_id, "executing cron job");
 
     let run_started = tokio::time::Instant::now();
-    let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
+    let mut child = match crate::cc::invocation::build_claude_script_command(
+        assembly_script,
+        agent_dir,
+        sandbox,
+    )
+    .await
+    .stdout(crate::cc::sandbox_process::Capture::Pipe)
+    .stderr(crate::cc::sandbox_process::Capture::Pipe)
+    .spawn()
+    .await
+    {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
             registered_cron.cleanup().await;
@@ -966,7 +849,7 @@ async fn execute_job(
     };
 
     // Stream stdout; break on the terminal result event (do not wait for EOF —
-    // the SSH stdout pipe can linger open after CC exits).
+    // the guest stdout pipe can linger open after CC exits).
     let outcome = consume_cron_stream(&mut child).await;
     let collected_lines: Vec<String> = match &outcome {
         CronStreamOutcome::Success { collected_lines }
@@ -984,20 +867,23 @@ async fn execute_job(
     // downstream probe-skip check still works.
     registered_cron.cleanup().await;
 
-    // Post-stream-loop cleanup. ProcessGroupChild::Drop kills the slave's
-    // group on function return, so a hang here can never outlive `execute_job`.
-    // Inside the function we still bound each blocking syscall (the same
-    // wedged-pipe defense the worker uses).
-    let child_pid = child.id();
+    // Post-stream-loop cleanup. `SandboxChild::Drop` kills the guest process on
+    // function return, so a hang here can never outlive `execute_job`. Inside
+    // the function we still bound each blocking syscall (the same wedged-pipe
+    // defense the worker uses).
+    let child_pid = child.pid();
 
     let wait_started = tokio::time::Instant::now();
-    let exit_status = match tokio::time::timeout(
+    // Best-effort only: the outcome (Task 1) decides success/failure, not the
+    // exit code. A wedged transport leaves `exit_code` None; we still deliver
+    // a Success outcome.
+    let exit_code: Option<i32> = match tokio::time::timeout(
         std::time::Duration::from_secs(POST_BREAK_WAIT_TIMEOUT_SECS),
         child.wait(),
     )
     .await
     {
-        Ok(Ok(s)) => Some(s),
+        Ok(Ok(code)) => Some(code),
         Ok(Err(e)) => {
             tracing::error!(job = %job_name, child_pid, "wait failed: {e:#}");
             None
@@ -1007,15 +893,11 @@ async fn execute_job(
                 job = %job_name,
                 child_pid,
                 elapsed_ms = wait_started.elapsed().as_millis() as u64,
-                "child.wait timed out — slave wedged; ProcessGroupChild::Drop will killpg on return",
+                "child.wait timed out — guest process wedged; SandboxChild::Drop will kill it on return",
             );
             None
         }
     };
-    // Best-effort only: the outcome (Task 1) decides success/failure, not the
-    // exit code. A wedged transport leaves `exit_status` None; we still deliver
-    // a Success outcome. ProcessGroupChild::Drop killpg's the group on return.
-    let exit_code: Option<i32> = exit_status.and_then(|s| s.code());
     tracing::debug!(
         job = %job_name,
         child_pid,
@@ -1090,20 +972,13 @@ async fn execute_job(
     // Delete lock on completion (CRON-04)
     std::fs::remove_file(&lock_path).ok();
 
-    // Retention: keep last 10 log files per job (fire-and-forget to avoid SSH overhead on hot path)
+    // Retention: keep last 10 log files per job (fire-and-forget to keep the
+    // guest round-trip off the hot path).
     let job_name_owned = job_name.to_owned();
-    let log_dir_owned = sandbox_log_dir.clone();
-    let ssh_config_owned = ssh_config_path.map(|p| p.to_owned());
-    let sandbox_owned = resolved_sandbox.map(|s| s.to_owned());
+    let log_dir_owned = sandbox_log_dir.to_owned();
+    let sandbox_owned = Arc::clone(sandbox);
     tokio::spawn(async move {
-        cleanup_old_logs(
-            &job_name_owned,
-            &log_dir_owned,
-            10,
-            ssh_config_owned.as_deref(),
-            sandbox_owned.as_deref(),
-        )
-        .await;
+        cleanup_old_logs(&job_name_owned, &log_dir_owned, 10, Some(&sandbox_owned)).await;
     });
 
     tracing::info!(job = %job_name, run_id = %run_id, %status, "cron job completed");
@@ -1122,14 +997,10 @@ async fn execute_job(
                             let outbox_dir = agent_dir.join("outbox").join("cron").join(&run_id);
                             if let Err(e) = std::fs::create_dir_all(&outbox_dir) {
                                 tracing::error!(job = %job_name, "failed to create cron outbox dir: {e:#}");
-                            } else if ssh_config_path.is_some() {
-                                let sandbox = resolved_sandbox.unwrap();
+                            } else {
                                 for att in atts {
                                     let dest = outbox_dir.join(attachment_filename(&att.path));
-                                    if let Err(e) = right_openshell::openshell::download_file(
-                                        sandbox, &att.path, &dest,
-                                    )
-                                    .await
+                                    if let Err(e) = sandbox.fs_copy_to_host(&att.path, &dest).await
                                     {
                                         tracing::error!(
                                             job = %job_name,
@@ -1226,9 +1097,8 @@ async fn execute_job(
                                         agent_dir,
                                         agent_name,
                                         model,
-                                        ssh_config_path,
+                                        Some(sandbox),
                                         internal_client,
-                                        resolved_sandbox,
                                         Arc::clone(&upgrade_lock),
                                         session_locks,
                                         Arc::clone(&debug),
@@ -1288,8 +1158,7 @@ async fn execute_job(
                                         agent_dir: agent_dir.to_path_buf(),
                                         agent_db_dir: agent_dir.to_path_buf(),
                                         agent_name: agent_name.to_owned(),
-                                        ssh_config_path: ssh_config_path.map(|p| p.to_path_buf()),
-                                        resolved_sandbox: resolved_sandbox.map(|s| s.to_owned()),
+                                        sandbox: Some(Arc::clone(sandbox)),
                                         internal_client: Arc::clone(internal_client),
                                         session_locks: session_locks.clone(),
                                         debug_flag: Arc::clone(&debug),
@@ -1378,9 +1247,8 @@ async fn execute_job(
                             agent_dir,
                             agent_name,
                             model,
-                            ssh_config_path,
+                            Some(sandbox),
                             internal_client,
-                            resolved_sandbox,
                             Arc::clone(&upgrade_lock),
                             session_locks,
                             Arc::clone(&debug),
@@ -1462,8 +1330,7 @@ async fn execute_job(
                     limits: crate::reflection::ReflectionLimits::CRON,
                     agent_name: agent_name.to_string(),
                     agent_dir: agent_dir.to_path_buf(),
-                    ssh_config_path: ssh_config_path.map(std::path::PathBuf::from),
-                    resolved_sandbox: resolved_sandbox.map(String::from),
+                    sandbox: Some(Arc::clone(sandbox)),
                     parent_source: crate::reflection::ParentSource::Cron {
                         job_name: job_name.to_string(),
                     },
@@ -1517,9 +1384,8 @@ async fn execute_job(
                     agent_dir,
                     agent_name,
                     model,
-                    ssh_config_path,
+                    Some(sandbox),
                     internal_client,
-                    resolved_sandbox,
                     Arc::clone(&upgrade_lock),
                     session_locks,
                     Arc::clone(&debug),
@@ -1774,9 +1640,16 @@ fn terminal_failure_detail(line: &str) -> Option<String> {
 /// result is `Failed`. There is no wall-clock bound here; a turn that never
 /// emits a result is bounded by the shutdown-drain (`SHUTDOWN_JOB_TIMEOUT`).
 pub(crate) async fn consume_cron_stream(
-    child: &mut right_process::ProcessGroupChild,
+    child: &mut crate::cc::sandbox_process::SandboxChild,
 ) -> CronStreamOutcome {
-    let stdout = child.stdout().expect("stdout piped");
+    consume_cron_lines(child.stdout().expect("stdout piped")).await
+}
+
+/// Classification core, generic over the reader so it is exercisable without a
+/// live sandbox. See [`consume_cron_stream`] for the semantics.
+pub(crate) async fn consume_cron_lines<R: tokio::io::AsyncRead + Unpin>(
+    stdout: R,
+) -> CronStreamOutcome {
     let mut lines = tokio::io::BufReader::new(stdout).lines();
 
     let mut collected_lines: Vec<String> = Vec::new();
@@ -1906,10 +1779,9 @@ pub(crate) async fn run_cron_task(
     agent_dir: std::path::PathBuf,
     agent_name: String,
     model: Arc<arc_swap::ArcSwap<Option<String>>>,
-    ssh_config_path: Option<std::path::PathBuf>,
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: Arc<right_mcp::internal_client::InternalClient>,
     shutdown: CancellationToken,
-    resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: right_agent_config::LearningConfig,
@@ -1940,10 +1812,9 @@ pub(crate) async fn run_cron_task(
         &agent_dir,
         &agent_name,
         &model,
-        &ssh_config_path,
+        &sandbox_runtime,
         &internal_client,
         &execute_handles,
-        &resolved_sandbox,
         &upgrade_lock,
         &debug,
         &learning,
@@ -1955,7 +1826,7 @@ pub(crate) async fn run_cron_task(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock, &debug, &learning, &session_locks, &progress_state).await;
+                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &sandbox_runtime, &internal_client, &execute_handles, &upgrade_lock, &debug, &learning, &session_locks, &progress_state).await;
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
@@ -2095,10 +1966,9 @@ fn fire_one_shot_specs(
     agent_dir: &std::path::Path,
     agent_name: &str,
     model: &Arc<arc_swap::ArcSwap<Option<String>>>,
-    ssh_config_path: &Option<std::path::PathBuf>,
+    sandbox_runtime: &Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: &Arc<right_mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
-    resolved_sandbox: &Option<String>,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent_config::LearningConfig,
@@ -2121,9 +1991,10 @@ fn fire_one_shot_specs(
         // changes take effect on the next cron firing rather than next restart.
         // Per-cron model wins over the global agent model.
         let md: Option<String> = resolve_cron_model(&spec, model);
-        let sc = ssh_config_path.clone();
+        // Resolved at fire time, not at reconciler start: recovery publishes a
+        // new handle and the reconciler outlives many of them.
+        let sbx = sandbox_runtime.current_sandbox();
         let ic = Arc::clone(internal_client);
-        let rs = resolved_sandbox.clone();
         let ul = Arc::clone(upgrade_lock);
         let dbg = debug.clone();
         let learn = learning.clone();
@@ -2142,9 +2013,8 @@ fn fire_one_shot_specs(
                 &ad,
                 &an,
                 md.as_deref(),
-                sc.as_deref(),
+                sbx.as_ref(),
                 &ic,
-                rs.as_deref(),
                 ul,
                 dbg,
                 &learn,
@@ -2168,10 +2038,9 @@ async fn reconcile_jobs(
     agent_dir: &std::path::Path,
     agent_name: &str,
     model: &Arc<arc_swap::ArcSwap<Option<String>>>,
-    ssh_config_path: &Option<std::path::PathBuf>,
+    sandbox_runtime: &Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: &Arc<right_mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
-    resolved_sandbox: &Option<String>,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent_config::LearningConfig,
@@ -2203,10 +2072,9 @@ async fn reconcile_jobs(
         agent_dir,
         agent_name,
         model,
-        ssh_config_path,
+        sandbox_runtime,
         internal_client,
         execute_handles,
-        resolved_sandbox,
         upgrade_lock,
         debug,
         learning,
@@ -2228,10 +2096,9 @@ async fn reconcile_jobs(
         agent_dir,
         agent_name,
         model,
-        ssh_config_path,
+        sandbox_runtime,
         internal_client,
         execute_handles,
-        resolved_sandbox,
         upgrade_lock,
         debug,
         learning,
@@ -2267,10 +2134,9 @@ async fn reconcile_jobs(
         let job_agent_dir = agent_dir.to_path_buf();
         let job_agent_name = agent_name.to_string();
         let job_model = Arc::clone(model);
-        let job_ssh_config = ssh_config_path.clone();
+        let job_sandbox_runtime = Arc::clone(sandbox_runtime);
         let job_execute_handles = Arc::clone(execute_handles);
         let job_internal_client = Arc::clone(internal_client);
-        let job_sandbox = resolved_sandbox.clone();
         let job_upgrade_lock = Arc::clone(upgrade_lock);
         let job_debug = debug.clone();
         let job_learning = learning.clone();
@@ -2284,10 +2150,9 @@ async fn reconcile_jobs(
                 job_agent_dir,
                 job_agent_name,
                 job_model,
-                job_ssh_config,
+                job_sandbox_runtime,
                 job_internal_client,
                 job_execute_handles,
-                job_sandbox,
                 job_upgrade_lock,
                 job_debug,
                 job_learning,
@@ -2321,9 +2186,8 @@ async fn reconcile_jobs(
             let ad = agent_dir.to_path_buf();
             let an = agent_name.to_string();
             let md: Option<String> = resolve_cron_model(spec, model);
-            let sc = ssh_config_path.clone();
+            let sbx = sandbox_runtime.current_sandbox();
             let ic = Arc::clone(internal_client);
-            let rs = resolved_sandbox.clone();
             let ul = Arc::clone(upgrade_lock);
             let dbg = debug.clone();
             let learn = learning.clone();
@@ -2339,9 +2203,8 @@ async fn reconcile_jobs(
                     &ad,
                     &an,
                     md.as_deref(),
-                    sc.as_deref(),
+                    sbx.as_ref(),
                     &ic,
-                    rs.as_deref(),
                     ul,
                     dbg,
                     &learn,
@@ -2369,10 +2232,9 @@ async fn run_job_loop(
     agent_dir: std::path::PathBuf,
     agent_name: String,
     model: Arc<arc_swap::ArcSwap<Option<String>>>,
-    ssh_config_path: Option<std::path::PathBuf>,
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: Arc<right_mcp::internal_client::InternalClient>,
     execute_handles: ExecuteHandles,
-    resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: right_agent_config::LearningConfig,
@@ -2422,9 +2284,9 @@ async fn run_job_loop(
         let ad = agent_dir.clone();
         let an = agent_name.clone();
         let md: Option<String> = resolve_cron_model(&spec, &model);
-        let sc = ssh_config_path.clone();
+        // Resolved per firing: the per-job loop outlives individual handles.
+        let sbx = sandbox_runtime.current_sandbox();
         let ic = Arc::clone(&internal_client);
-        let rs = resolved_sandbox.clone();
         let ul = Arc::clone(&upgrade_lock);
         let dbg = debug.clone();
         let learn = learning.clone();
@@ -2446,9 +2308,8 @@ async fn run_job_loop(
                 &ad,
                 &an,
                 md.as_deref(),
-                sc.as_deref(),
+                sbx.as_ref(),
                 &ic,
-                rs.as_deref(),
                 ul,
                 dbg,
                 &learn,
@@ -2637,9 +2498,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn cron_registers_channel_post_target_when_learning_is_disabled() {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
+    async fn cron_without_a_sandbox_refuses_before_registering_anything() {
         let agent_dir = tempdir().expect("agent dir");
         std::fs::write(
             agent_dir.path().join("mcp.json"),
@@ -2650,25 +2509,12 @@ mod tests {
             .await
             .expect("create agent database");
 
+        // Bound to a socket nothing ever accepts on: any progress_register
+        // attempt would hang rather than succeed, so reaching the aggregator at
+        // all is observable as a timeout instead of a fast refusal.
         let socket_dir = tempdir().expect("socket dir");
         let socket_path = socket_dir.path().join("internal.sock");
-        let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind internal socket");
-        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept registration");
-            let mut request = vec![0; 4096];
-            let read = stream.read(&mut request).await.expect("read registration");
-            request.truncate(read);
-            request_tx
-                .send(String::from_utf8(request).expect("UTF-8 request"))
-                .expect("deliver captured registration");
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n{\"ok\":true}",
-                )
-                .await
-                .expect("respond to registration");
-        });
+        let _listener = tokio::net::UnixListener::bind(&socket_path).expect("bind internal socket");
 
         let learning = right_agent_config::LearningConfig {
             prefilter_enabled: false,
@@ -2678,44 +2524,40 @@ mod tests {
             &socket_path,
         ));
         let spec = sample_cron_spec();
-        let agent_path = agent_dir.path().to_path_buf();
         let session_locks = Arc::new(dashmap::DashMap::new());
         let progress_state = crate::telegram::progress::ProgressState::default();
-        let job = tokio::spawn(async move {
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
             execute_job(
                 "default-learning-job",
                 &spec,
-                &agent_path,
+                agent_dir.path(),
                 "agent-1",
                 None,
+                // Fail-closed: no sandbox, no cron turn, and no aggregator
+                // registration to unwind.
                 None,
                 &internal_client,
-                None,
                 Arc::new(tokio::sync::RwLock::new(())),
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 &learning,
                 &session_locks,
                 &progress_state,
-            )
-            .await;
-        });
+            ),
+        )
+        .await
+        .expect("a sandboxless cron must refuse promptly, not reach the aggregator");
 
-        let request = tokio::time::timeout(std::time::Duration::from_secs(2), request_rx)
-            .await
-            .expect("cron must register before invoking Claude")
-            .expect("registration request");
         assert!(
-            request.starts_with("POST /progress/register HTTP/1.1"),
-            "unexpected request: {request}"
+            !agent_dir
+                .path()
+                .join("crons")
+                .join(".locks")
+                .join("default-learning-job.json")
+                .exists(),
+            "a refused run must release its lock"
         );
-        assert!(
-            request.contains(r#""kind":"cron""#),
-            "cron registration must identify its invocation kind: {request}"
-        );
-
-        job.abort();
-        let _ = job.await;
-        server.await.expect("registration server");
     }
 
     #[test]
@@ -3464,15 +3306,20 @@ mod tests {
         let ic = Arc::new(right_mcp::internal_client::InternalClient::new(
             "/nonexistent.sock",
         ));
+        // No sandbox boots in a unit test: the handle carries bring-up's
+        // failure, so every job fires against an unavailable backend.
+        let (sandbox_runtime, _sandbox_rx) =
+            crate::sandbox_runtime::SandboxRuntimeHandle::new(Err(Arc::new(
+                right_sandbox::SandboxCause::HypervisorUnavailable.diagnose(),
+            )));
         let model_cell = Arc::new(arc_swap::ArcSwap::from_pointee(None::<String>));
         let cron_handle = tokio::spawn(run_cron_task(
             agent_dir,
             "test-agent".to_string(),
             model_cell,
-            None,
+            sandbox_runtime,
             ic,
             shutdown_clone,
-            None,
             Arc::new(tokio::sync::RwLock::new(())),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             right_agent_config::LearningConfig::default(),
@@ -3555,8 +3402,9 @@ mod target_snapshot_tests {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         let mut child = right_process::ProcessGroupChild::spawn(cmd).expect("spawn bash");
+        let stdout = child.stdout().expect("stdout piped");
 
-        let outcome = tokio::time::timeout(Duration::from_secs(5), consume_cron_stream(&mut child))
+        let outcome = tokio::time::timeout(Duration::from_secs(5), consume_cron_lines(stdout))
             .await
             .expect("consume_cron_stream must return without waiting for EOF");
 
@@ -3581,8 +3429,9 @@ mod target_snapshot_tests {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         let mut child = right_process::ProcessGroupChild::spawn(cmd).expect("spawn bash");
+        let stdout = child.stdout().expect("stdout piped");
 
-        let outcome = tokio::time::timeout(Duration::from_secs(5), consume_cron_stream(&mut child))
+        let outcome = tokio::time::timeout(Duration::from_secs(5), consume_cron_lines(stdout))
             .await
             .expect("must return at EOF");
         assert!(
@@ -3604,8 +3453,9 @@ mod target_snapshot_tests {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         let mut child = right_process::ProcessGroupChild::spawn(cmd).expect("spawn bash");
+        let stdout = child.stdout().expect("stdout piped");
 
-        let outcome = tokio::time::timeout(Duration::from_secs(5), consume_cron_stream(&mut child))
+        let outcome = tokio::time::timeout(Duration::from_secs(5), consume_cron_lines(stdout))
             .await
             .expect("must return at EOF");
         assert!(
@@ -3630,8 +3480,9 @@ mod target_snapshot_tests {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         let mut child = right_process::ProcessGroupChild::spawn(cmd).expect("spawn bash");
+        let stdout = child.stdout().expect("stdout piped");
 
-        let outcome = tokio::time::timeout(Duration::from_secs(5), consume_cron_stream(&mut child))
+        let outcome = tokio::time::timeout(Duration::from_secs(5), consume_cron_lines(stdout))
             .await
             .expect("must break on the terminal result without waiting for EOF");
 
@@ -3826,138 +3677,6 @@ mod target_snapshot_tests {
             .await
             .unwrap();
         assert_eq!(row, ("failed".to_string(), 0, "none".to_string()));
-    }
-
-    /// Regression guard for the wedged-stdout hang (see `consume_cron_stream`).
-    ///
-    /// Builds the SSH command exactly like cron's sandbox branch
-    /// (`-F <cfg> -o ControlMaster=no -o ControlPath=none <host> -- <script>`)
-    /// and runs a remote script that prints one canonical CC `result` line and
-    /// then holds stdout open without closing it (`sleep`). The SSH stdout pipe
-    /// therefore never reaches EOF.
-    ///
-    /// The fix: `consume_cron_stream` breaks the read loop on the terminal
-    /// top-level `result` event (detected via `terminal_result_is_error`)
-    /// instead of waiting for EOF. There is intentionally NO wall-clock deadline
-    /// — the 60s shutdown-drain (`SHUTDOWN_JOB_TIMEOUT`) is the only backstop.
-    ///
-    /// So `consume_cron_stream` returns `Success` carrying `REPRO-OK` well
-    /// within the outer 25s timeout. If the break-on-terminal-result logic
-    /// regressed to an unbounded `next_line()` EOF loop, the inner call would
-    /// hang on the never-closing pipe, the outer 25s timeout would fire, and
-    /// the `.expect()` below would fail — that timeout IS the reproduction.
-    #[ignore = "ci-openshell: creates real sandbox"]
-    #[tokio::test]
-    async fn ci_openshell_cron_stream_survives_wedged_stdout() {
-        use std::time::Duration;
-
-        let sandbox =
-            right_openshell::test_support::TestSandbox::create("cron-wedged-stdout").await;
-
-        // Materialize the per-sandbox ssh-config the same way the bot does for
-        // cron's sandbox branch (`openshell sandbox ssh-config NAME`).
-        let cfg_dir = tempfile::tempdir().expect("tempdir");
-        let ssh_config =
-            right_openshell::openshell::generate_ssh_config(sandbox.name(), cfg_dir.path())
-                .await
-                .expect("generate ssh-config");
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sandbox.name());
-
-        // Deterministic "result emitted, then stdout never EOFs": print one
-        // canonical CC stream-json result line, then hold the remote shell
-        // (and thus the SSH stdout channel) open so `next_line()` never sees EOF.
-        let remote_script = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"REPRO-OK","session_id":"repro","terminal_reason":"completed"}'
-sleep 120"#;
-
-        let mut cmd = tokio::process::Command::new("ssh");
-        cmd.arg("-F").arg(&ssh_config);
-        cmd.arg("-o").arg("ControlMaster=no");
-        cmd.arg("-o").arg("ControlPath=none");
-        cmd.arg(&ssh_host);
-        cmd.arg("--");
-        cmd.arg(remote_script);
-        cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-
-        let mut child = right_process::ProcessGroupChild::spawn(cmd).expect("spawn ssh");
-
-        // Bound the whole test with an outer timeout so the RED fails fast
-        // instead of hanging CI. ProcessGroupChild Drop killpg's the lingering
-        // ssh/sleep when `child` drops on return.
-        let outcome =
-            tokio::time::timeout(Duration::from_secs(25), consume_cron_stream(&mut child)).await;
-
-        let outcome = outcome.expect(
-            "consume_cron_stream did not return within 25s — wedged-stdout hang reproduced \
-             (the unbounded next_line() loop never sees EOF). This is the RED repro: it goes \
-             GREEN once consume_cron_stream breaks on the terminal result event.",
-        );
-
-        match outcome {
-            CronStreamOutcome::Success { collected_lines } => {
-                assert!(
-                    collected_lines.iter().any(|l| l.contains("REPRO-OK")),
-                    "collected_lines should contain the REPRO-OK result line, got: {collected_lines:?}"
-                );
-            }
-            other => panic!("expected Success with REPRO-OK result, got: {other:?}"),
-        }
-    }
-
-    /// Live end-to-end: a recurring cron run whose prompt demonstrates a clearly
-    /// codifiable procedure feeds the shared learning pipeline (prefilter →
-    /// probe-writer fork of the run's own session) and lands a `rightx-*` skill
-    /// in the sandbox skill index. Verifies spec risk (a): a just-finished cron
-    /// session (fresh `new_session_id = run_id`) is forkable/resumable inside the
-    /// sandbox immediately after the run.
-    #[ignore = "manual-live-todo: requires live sandbox + Claude + OAuth token"]
-    #[tokio::test]
-    async fn manual_live_todo_recurring_cron_creates_skill() {
-        // ARRANGE — real sandbox (reuse the TestSandbox harness; never the CLI,
-        // never a hardcoded sandbox name — see ARCHITECTURE.md "Integration Tests
-        // Using Live Sandboxes").
-        let sandbox = right_openshell::test_support::TestSandbox::create("right-cron-learn").await;
-
-        // Sanity: the rightx skill index reader works against this live sandbox
-        // and starts WITHOUT our target skill, so a later positive read is
-        // attributable to the learning run (not pre-existing state).
-        //
-        // `collect_rightx_skill_index(Some(name), _)` routes to the sandbox gRPC
-        // path; `agent_dir` is only consulted for the `None` (host-mode) branch
-        // and is never read here.
-        let before = crate::learning_prefilter::collect_rightx_skill_index(
-            Some(sandbox.name()),
-            std::path::Path::new(""),
-        )
-        .await
-        .expect("read skill index before learning run");
-        assert!(
-            !before.iter().any(|s| s.name.starts_with("rightx-")),
-            "fresh sandbox should have no rightx-* skills before the learning run; \
-             found: {before:?}"
-        );
-
-        // ACT + ASSERT — drive one recurring cron run through `execute_job` (or
-        // `run_post_turn` directly against a real in-sandbox session) so the
-        // prefilter + probe-writer fork run live, then poll
-        // `collect_rightx_skill_index` until a `rightx-*` skill appears
-        // (bounded wait). This requires:
-        //   - the agent's Claude OAuth token injected as CLAUDE_CODE_OAUTH_TOKEN
-        //     (mirror build_claude_command in crates/bot/src/cc/invocation.rs);
-        //   - a recurring CronSpec (ScheduleKind::Recurring) persisted in a temp
-        //     data.db with learning.prefilter_enabled = true and a funded
-        //     learning.max_daily_budget_usd;
-        //   - a real internal_client (MCP aggregator Unix socket) for the
-        //     probe-writer.
-        // None of these can be constructed/validated offline, so the live drive
-        // is left as a runbook stub per the plan's single sanctioned todo!().
-        let _ = &sandbox;
-        todo!(
-            "wire the live cron→learning drive against TestSandbox + a real OAuth \
-             token + internal_client, then assert a rightx-* skill appears via \
-             collect_rightx_skill_index within a bounded wait"
-        );
     }
 
     #[tokio::test]

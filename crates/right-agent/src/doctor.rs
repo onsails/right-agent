@@ -5,6 +5,10 @@ use right_ui::{self as ui, Glyph};
 const MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
 const MCP_ISSUES_PREFIX: &str = "missing: ";
 
+/// Doctor-check name for the microVM runtime probe. Shared with the dashboard,
+/// which overrides this check with the bot's live sandbox diagnosis.
+pub const SANDBOX_RUNTIME_CHECK: &str = "sandbox-runtime";
+
 /// Status of a single doctor check.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CheckStatus {
@@ -133,11 +137,8 @@ pub async fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     // MCP token status check — Warn when any agent has missing/expired tokens (REFRESH-03)
     checks.push(check_mcp_tokens(home).await);
 
-    // OpenShell mTLS certs check
-    checks.push(check_openshell_mtls_certs());
-
-    // OpenShell gateway health check (gRPC)
-    checks.push(check_openshell_gateway_health().await);
+    // Sandbox runtime check — can this host run microVMs at all?
+    checks.push(check_sandbox_runtime());
 
     checks
 }
@@ -175,47 +176,65 @@ fn check_binary(name: &str, fix_hint: Option<&str>) -> DoctorCheck {
     }
 }
 
-/// Check whether the OpenShell sandbox for a given agent exists and is READY.
+/// Check whether the agent's microVM exists and is running.
 ///
-/// Returns `None` when OpenShell is not ready (certs missing, not installed) —
-/// the caller skips the check silently in that case.
+/// A missing sandbox is not an error the operator must repair: the bot's
+/// supervisor creates it at bring-up.
 async fn check_sandbox_for_agent(
     agent_name: &str,
     config: Option<&crate::agent::types::AgentConfig>,
 ) -> Option<DoctorCheck> {
-    // Only check if OpenShell is available.
-    let mtls_dir = match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-        _ => return None, // OpenShell not ready — skip sandbox check
-    };
-
     let explicit_sandbox_name = config
         .and_then(|c| c.sandbox.as_ref())
         .and_then(|s| s.name.as_deref());
-    let sandbox =
-        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+    let sandbox = right_sandbox::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+    let name = format!("sandbox/{agent_name}");
 
-    let result = async {
-        let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-        right_openshell::openshell::is_sandbox_ready(&mut client, &sandbox).await
-    }
-    .await;
-
-    match result {
-        Ok(true) => Some(DoctorCheck {
-            name: format!("sandbox/{agent_name}"),
-            status: CheckStatus::Pass,
-            detail: format!("sandbox '{sandbox}' exists and READY"),
-            fix: None,
-        }),
-        Ok(false) => Some(DoctorCheck {
-            name: format!("sandbox/{agent_name}"),
-            status: CheckStatus::Fail,
-            detail: format!("sandbox '{sandbox}' not found"),
-            fix: Some(format!("Run `right agent init {agent_name}` to create it")),
-        }),
+    match right_sandbox::SandboxHandle::attach(&sandbox).await {
+        Ok(handle) => match handle.status().await {
+            Ok(phase) if phase.is_running() => Some(DoctorCheck {
+                name,
+                status: CheckStatus::Pass,
+                detail: format!("sandbox '{sandbox}' is {phase}"),
+                fix: None,
+            }),
+            Ok(phase) => Some(DoctorCheck {
+                name,
+                status: CheckStatus::Warn,
+                detail: format!("sandbox '{sandbox}' is {phase}, not running"),
+                fix: Some(
+                    "The bot starts the sandbox when the agent runs; `right up` brings it back"
+                        .to_owned(),
+                ),
+            }),
+            Err(e) => Some(DoctorCheck {
+                name,
+                status: CheckStatus::Warn,
+                detail: format!("sandbox '{sandbox}' status unavailable: {e:#}"),
+                fix: None,
+            }),
+        },
+        // A missing sandbox is normal before the agent has ever run: the
+        // supervisor creates it at bring-up, so this is not a failure the
+        // operator has to repair by hand.
+        Err(e)
+            if matches!(
+                e.cause(),
+                Some(right_sandbox::SandboxCause::SandboxNotFound { .. })
+            ) =>
+        {
+            Some(DoctorCheck {
+                name,
+                status: CheckStatus::Warn,
+                detail: format!("sandbox '{sandbox}' does not exist yet"),
+                fix: Some(
+                    "`right up` creates it on the agent's first run — no manual step is needed"
+                        .to_owned(),
+                ),
+            })
+        }
         Err(e) => Some(DoctorCheck {
-            name: format!("sandbox/{agent_name}"),
+            name,
             status: CheckStatus::Warn,
             detail: format!("sandbox check failed: {e:#}"),
             fix: None,
@@ -328,19 +347,8 @@ async fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
             }
         }
 
-        // Check sandbox existence for openshell agents.
-        let is_openshell = agent_config
-            .as_ref()
-            .map(|c| {
-                matches!(
-                    c.sandbox_mode(),
-                    crate::agent::types::SandboxMode::Openshell
-                )
-            })
-            .unwrap_or(true); // default sandbox mode is openshell
-        if is_openshell
-            && let Some(check) = check_sandbox_for_agent(&name, agent_config.as_ref()).await
-        {
+        // Every agent is sandboxed.
+        if let Some(check) = check_sandbox_for_agent(&name, agent_config.as_ref()).await {
             checks.push(check);
         }
 
@@ -973,89 +981,41 @@ See: https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespace
         .to_string()
 }
 
-/// Check that OpenShell mTLS certificates exist.
+/// Check that the host can actually run microVMs.
 ///
-/// Verifies ca.crt, tls.crt, tls.key in ~/.config/openshell/gateways/openshell/mtls/.
-/// Severity: Fail — without mTLS certs, gRPC connection to OpenShell gateway is impossible.
-fn check_openshell_mtls_certs() -> DoctorCheck {
-    let mtls_dir = right_openshell::openshell::default_mtls_dir();
-    let required = ["ca.crt", "tls.crt", "tls.key"];
-    let missing: Vec<&str> = required
-        .iter()
-        .filter(|f| !mtls_dir.join(f).exists())
-        .copied()
-        .collect();
-
-    if missing.is_empty() {
-        DoctorCheck {
-            name: "openshell-mtls".to_string(),
+/// Replaces the OpenShell mTLS-certs and gateway-health probes: microsandbox
+/// has no gateway and no mTLS material. The runtime is installed on demand
+/// into `~/.microsandbox`, so the two things worth reporting are whether that
+/// install is present and whether the host exposes a usable hypervisor.
+/// Severity: Fail — without a hypervisor no agent can run at all.
+fn check_sandbox_runtime() -> DoctorCheck {
+    match right_sandbox::diagnose_host() {
+        Ok(()) => DoctorCheck {
+            name: SANDBOX_RUNTIME_CHECK.to_string(),
             status: CheckStatus::Pass,
-            detail: format!("certs present in {}", mtls_dir.display()),
+            detail: "host can run microVMs".to_string(),
             fix: None,
+        },
+        Err(e) => {
+            let (detail, fix) = match e.cause() {
+                Some(cause) => {
+                    let diagnosis = cause.diagnose();
+                    let fix = if diagnosis.fixes.is_empty() {
+                        None
+                    } else {
+                        Some(diagnosis.fixes.join("; "))
+                    };
+                    (diagnosis.summary, fix)
+                }
+                None => (format!("{e:#}"), None),
+            };
+            DoctorCheck {
+                name: SANDBOX_RUNTIME_CHECK.to_string(),
+                status: CheckStatus::Fail,
+                detail,
+                fix,
+            }
         }
-    } else {
-        DoctorCheck {
-            name: "openshell-mtls".to_string(),
-            status: CheckStatus::Fail,
-            detail: format!("missing: {} in {}", missing.join(", "), mtls_dir.display()),
-            fix: Some(
-                "Install OpenShell and run `openshell auth login` to generate mTLS certificates"
-                    .to_string(),
-            ),
-        }
-    }
-}
-
-/// Check OpenShell gateway health via gRPC Health RPC.
-///
-/// Connects to 127.0.0.1:8080 with mTLS and calls Health RPC.
-async fn check_openshell_gateway_health() -> DoctorCheck {
-    let mtls_dir = right_openshell::openshell::default_mtls_dir();
-
-    // Skip if certs are missing (the mtls check already flags this)
-    if !mtls_dir.join("ca.crt").exists() {
-        return DoctorCheck {
-            name: "openshell-gateway".to_string(),
-            status: CheckStatus::Warn,
-            detail: "skipped — mTLS certs missing".to_string(),
-            fix: None,
-        };
-    }
-
-    let result = async {
-        let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
-            .await
-            .map_err(|e| format!("{e:#}"))?;
-        let resp = client
-            .health(right_openshell::openshell_proto::openshell::v1::HealthRequest {})
-            .await
-            .map_err(|e| format!("Health RPC failed: {e:#}"))?;
-        Ok::<i32, String>(resp.into_inner().status)
-    }
-    .await;
-
-    match result {
-        Ok(1) => DoctorCheck {
-            name: "openshell-gateway".to_string(),
-            status: CheckStatus::Pass,
-            detail: "gateway healthy".to_string(),
-            fix: None,
-        },
-        Ok(status) => DoctorCheck {
-            name: "openshell-gateway".to_string(),
-            status: CheckStatus::Warn,
-            detail: format!("gateway status: {status} (expected 1=HEALTHY)"),
-            fix: None,
-        },
-        Err(e) => DoctorCheck {
-            name: "openshell-gateway".to_string(),
-            status: CheckStatus::Fail,
-            detail: format!("gateway unreachable: {e}"),
-            fix: Some(
-                "Ensure OpenShell gateway is running: `systemctl --user restart openshell-gateway`"
-                    .to_string(),
-            ),
-        },
     }
 }
 

@@ -84,16 +84,16 @@ devenv shell -- cargo build --workspace
 UAT after final verification:
 
 ```bash
-devenv shell -- target/debug/right agent init agent-b --from-backup /Users/developer/.right/backups/agent-b/20260516-0115 --preserve-source-bindings --yes
-devenv shell -- target/debug/right agent init right --from-backup /Users/developer/.right/backups/right/20260516-0115 --preserve-source-bindings --yes
+devenv shell -- target/debug/right agent init him --from-backup /Users/molt/.right/backups/him/20260516-0115 --preserve-source-bindings --yes
+devenv shell -- target/debug/right agent init right --from-backup /Users/molt/.right/backups/right/20260516-0115 --preserve-source-bindings --yes
 devenv shell -- target/debug/right up --detach
 devenv shell -- target/debug/right agent list
 ```
 
-If a partial `agent-b` agent directory exists from the failed restore, get explicit user approval before removing it. The cleanup command is destructive:
+If a partial `him` agent directory exists from the failed restore, get explicit user approval before removing it. The cleanup command is destructive:
 
 ```bash
-devenv shell -- target/debug/right agent destroy agent-b --force
+devenv shell -- target/debug/right agent destroy him --force
 ```
 
 ## Task 1: Validate Hostless `allowed_ips` With Installed OpenShell
@@ -1079,7 +1079,7 @@ git commit -m "fix(openshell): migrate permissive public web policy"
 
 Expected: commit succeeds.
 
-## Task 11: Restore UAT for `agent-b` and `right`
+## Task 11: Restore UAT for `him` and `right`
 
 **Files:**
 - Runtime state under `~/.right`, not repository files.
@@ -1089,10 +1089,10 @@ Expected: commit succeeds.
 Run:
 
 ```bash
-test -f /Users/developer/.right/backups/agent-b/20260516-0115/sandbox.tar.gz
-test -f /Users/developer/.right/backups/agent-b/20260516-0115/agent.yaml
-test -f /Users/developer/.right/backups/right/20260516-0115/sandbox.tar.gz
-test -f /Users/developer/.right/backups/right/20260516-0115/agent.yaml
+test -f /Users/molt/.right/backups/him/20260516-0115/sandbox.tar.gz
+test -f /Users/molt/.right/backups/him/20260516-0115/agent.yaml
+test -f /Users/molt/.right/backups/right/20260516-0115/sandbox.tar.gz
+test -f /Users/molt/.right/backups/right/20260516-0115/agent.yaml
 ```
 
 Expected: all commands exit 0.
@@ -1105,14 +1105,14 @@ Run:
 devenv shell -- target/debug/right agent list
 ```
 
-Expected: `agent-b` and `right` are absent. If either exists from the failed restore, ask the user before running `right agent destroy <name> --force`.
+Expected: `him` and `right` are absent. If either exists from the failed restore, ask the user before running `right agent destroy <name> --force`.
 
-- [ ] **Step 3: Restore `agent-b`**
+- [ ] **Step 3: Restore `him`**
 
 Run:
 
 ```bash
-devenv shell -- target/debug/right agent init agent-b --from-backup /Users/developer/.right/backups/agent-b/20260516-0115 --preserve-source-bindings --yes
+devenv shell -- target/debug/right agent init him --from-backup /Users/molt/.right/backups/him/20260516-0115 --preserve-source-bindings --yes
 ```
 
 Expected: restore creates a new OpenShell sandbox, uploads `sandbox.tar.gz`, writes `sandbox.name` to `agent.yaml`, and does not fail on `host: "**.*"`.
@@ -1122,7 +1122,7 @@ Expected: restore creates a new OpenShell sandbox, uploads `sandbox.tar.gz`, wri
 Run:
 
 ```bash
-devenv shell -- target/debug/right agent init right --from-backup /Users/developer/.right/backups/right/20260516-0115 --preserve-source-bindings --yes
+devenv shell -- target/debug/right agent init right --from-backup /Users/molt/.right/backups/right/20260516-0115 --preserve-source-bindings --yes
 ```
 
 Expected: restore creates a new OpenShell sandbox, uploads `sandbox.tar.gz`, writes `sandbox.name` to `agent.yaml`, and does not fail on `host: "**.*"`.
@@ -1135,7 +1135,7 @@ Run:
 devenv shell -- target/debug/right up --detach
 ```
 
-Expected: process-compose starts `agent-b-bot`, `right-bot`, MCP server, and cloudflared without policy validation errors.
+Expected: process-compose starts `him-bot`, `right-bot`, MCP server, and cloudflared without policy validation errors.
 
 - [ ] **Step 6: Inspect runtime state**
 
@@ -1146,14 +1146,14 @@ devenv shell -- target/debug/right agent list
 openshell sandbox list
 ```
 
-Expected: `agent-b` and `right` agents exist, their sandboxes exist, and no new sandbox is stuck in failed creation.
+Expected: `him` and `right` agents exist, their sandboxes exist, and no new sandbox is stuck in failed creation.
 
 - [ ] **Step 7: Verify policy files no longer contain rejected wildcard**
 
 Run:
 
 ```bash
-rg -n '\*\*\.\*' /Users/developer/.right/agents/agent-b/policy.yaml /Users/developer/.right/agents/right/policy.yaml
+rg -n '\*\*\.\*' /Users/molt/.right/agents/him/policy.yaml /Users/molt/.right/agents/right/policy.yaml
 ```
 
 Expected: no matches.

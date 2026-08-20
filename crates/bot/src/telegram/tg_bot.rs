@@ -71,7 +71,7 @@ const THROTTLE_PRUNE_INTERVAL: u64 = 256;
 /// request — far too long for the worker's turn path: a blackholed
 /// api.telegram.org parked the thinking-anchor send before the CC turn
 /// deadline was even armed, wedging the chat queue until restart
-/// (agent-a, 2026-07-19). Media uploads keep the client's 500s cap.
+/// (riskoff, 2026-07-19). Media uploads keep the client's 500s cap.
 const TELEGRAM_TEXT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maximum automatic retries on a 429 `retry_after` response. teloxide re-queued
@@ -1350,7 +1350,7 @@ mod with_retry_tests {
 mod stalled_api_tests {
     use super::*;
 
-    /// Regression: 2026-07-19 agent-a worker wedge. A blackholed
+    /// Regression: 2026-07-19 riskoff worker wedge. A blackholed
     /// api.telegram.org (TCP accepted, response never sent) parked the
     /// worker's thinking-anchor send for frankenstein's 500s client default,
     /// before the CC turn deadline was even armed — the chat queue wedged

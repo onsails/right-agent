@@ -12,7 +12,7 @@
 
 ## Execution Notes
 
-- Execute from the repo root: `/Users/developer/dev/rightclaw`.
+- Execute from the repo root: `/Users/molt/dev/rightclaw`.
 - Because `devenv.nix` exists, prefix commands with `devenv shell --`.
 - Before implementation, use `superpowers:using-git-worktrees` in the execution session and create a worktree under `.worktrees/`.
 - There is a pre-existing unstaged change in `crates/right-db/src/connection.rs` in the original workspace. Do not revert or include it unless the execution worktree also contains it and the task requires it.

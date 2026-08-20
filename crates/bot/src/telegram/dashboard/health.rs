@@ -1,11 +1,11 @@
 use std::time::Duration;
 
+use crate::sandbox::{Sandbox, exec_argv};
 use right_agent::doctor::{CheckStatus, DoctorCheck};
 use right_dashboard::api_types::{
     DoctorCheckResponse, DoctorResponse, SandboxDiskStats, SandboxMemoryStats, SandboxProcess,
     SandboxStatsResponse,
 };
-use right_openshell::sandbox_exec::SandboxExec;
 
 const SANDBOX_PROCESS_LIMIT: usize = 50;
 const SANDBOX_COMMAND_LIMIT_CHARS: usize = 160;
@@ -53,13 +53,13 @@ pub(super) fn doctor_response_from_checks(agent: &str, checks: Vec<DoctorCheck>)
 
 pub(super) async fn sandbox_stats_response(
     agent: &str,
-    sandbox_exec: Option<&SandboxExec>,
+    sandbox: Option<&Sandbox>,
 ) -> SandboxStatsResponse {
-    let Some(sandbox_exec) = sandbox_exec else {
-        return unavailable_sandbox_stats(agent, "agent is configured without a sandbox");
+    let Some(sandbox) = sandbox else {
+        return unavailable_sandbox_stats(agent, "the agent's sandbox is unavailable");
     };
 
-    match read_sandbox_stats(agent, sandbox_exec).await {
+    match read_sandbox_stats(agent, sandbox).await {
         Ok(response) => response,
         Err(error) => unavailable_sandbox_stats(agent, &format!("{error:#}")),
     }
@@ -83,7 +83,7 @@ fn doctor_status(status: &CheckStatus) -> &'static str {
 
 async fn read_sandbox_stats(
     agent: &str,
-    sandbox_exec: &SandboxExec,
+    sandbox: &Sandbox,
 ) -> miette::Result<SandboxStatsResponse> {
     let limit = SANDBOX_PROCESS_LIMIT.to_string();
     let command = [
@@ -94,16 +94,16 @@ async fn read_sandbox_stats(
         limit.as_str(),
     ];
     let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
-    let (stdout, exit_code) = match tokio::time::timeout(timeout, sandbox_exec.exec(&command)).await
-    {
-        Ok(result) => result?,
-        Err(_) => {
-            return Err(miette::miette!(
-                "sandbox probe timed out after {}s",
-                super::DASHBOARD_SANDBOX_TIMEOUT_SECS
-            ));
-        }
-    };
+    let (stdout, exit_code) =
+        match tokio::time::timeout(timeout, exec_argv(sandbox, &command)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(miette::miette!(
+                    "sandbox probe timed out after {}s",
+                    super::DASHBOARD_SANDBOX_TIMEOUT_SECS
+                ));
+            }
+        };
     if exit_code != 0 {
         return Err(miette::miette!(
             "sandbox stats probe exited with code {exit_code}"

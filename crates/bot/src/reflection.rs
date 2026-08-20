@@ -6,10 +6,9 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use right_agent::usage::insert::{insert_reflection_cron, insert_reflection_worker};
 
@@ -75,8 +74,9 @@ pub(crate) struct ReflectionContext {
     pub(crate) limits: ReflectionLimits,
     pub(crate) agent_name: String,
     pub(crate) agent_dir: PathBuf,
-    pub(crate) ssh_config_path: Option<PathBuf>,
-    pub(crate) resolved_sandbox: Option<String>,
+    /// `None` when the sandbox backend is degraded; the reflection then
+    /// refuses rather than resuming the session on the host.
+    pub(crate) sandbox: Option<crate::sandbox::Sandbox>,
     pub(crate) parent_source: ParentSource,
     pub(crate) model: Option<String>,
     /// Hot-reloadable debug flag. Forwarded to ClaudeInvocation.debug_flag.
@@ -309,9 +309,8 @@ async fn run_notice_resume(
     let schema_path = ctx.agent_dir.join(".claude").join(mode.schema_filename());
     let reply_schema = std::fs::read_to_string(&schema_path)?;
 
-    // 2. MCP config path (reuse worker's helper).
-    let mcp_path =
-        crate::cc::invocation::mcp_config_path(ctx.ssh_config_path.as_deref(), &ctx.agent_dir);
+    // 2. Aggregator config — one fixed guest path.
+    let mcp_path = crate::sandbox::SANDBOX_MCP_JSON_PATH.to_owned();
 
     // 3. ClaudeInvocation — resume, stream-json, tight caps, no Agent tool.
     let invocation = ClaudeInvocation {
@@ -339,93 +338,39 @@ async fn run_notice_resume(
     let claude_args = invocation.into_args();
 
     // 4. System-prompt assembly (match worker's pattern; no MCP refresh, no memory).
-    let (sandbox_mode, home_dir) = if ctx.ssh_config_path.is_some() {
-        (
-            right_agent::agent::types::SandboxMode::Openshell,
-            "/sandbox".to_owned(),
-        )
-    } else {
-        (
-            right_agent::agent::types::SandboxMode::None,
-            ctx.agent_dir.to_string_lossy().into_owned(),
-        )
-    };
-    let base_prompt =
-        right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
+    let base_prompt = right_codegen::generate_system_prompt(&ctx.agent_name, "/sandbox");
 
-    crate::cc::invocation::guard_no_sandboxed_host_exec(
-        ctx.resolved_sandbox.as_deref(),
-        ctx.ssh_config_path.as_deref(),
+    let sandbox =
+        crate::cc::invocation::guard_no_sandboxed_host_exec(&ctx.agent_name, ctx.sandbox.as_ref())
+            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
+
+    let prompt_path = format!("/tmp/right-reflection-prompt-{}.md", ctx.session_uuid);
+    let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
+        &base_prompt,
+        mode.prompt_mode(),
+        "/sandbox",
+        &prompt_path,
+        "/sandbox",
+        &claude_args,
+        None, // no MCP instructions refresh
+        None, // no memory section
+        None,
+        None,
+        Some(notice_token),
+    );
+
+    let mut child = crate::cc::invocation::build_claude_script_command(
+        assembly_script,
+        &ctx.agent_dir,
+        sandbox,
     )
+    .await
+    .stdin_piped()
+    .stdout(crate::cc::sandbox_process::Capture::Pipe)
+    .stderr(crate::cc::sandbox_process::Capture::Null)
+    .spawn()
+    .await
     .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
-
-    let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
-        let sandbox_name = ctx.resolved_sandbox.as_deref().ok_or_else(|| {
-            ReflectionError::Spawn("ssh_config_path set but resolved_sandbox is None".into())
-        })?;
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sandbox_name);
-        let prompt_path = format!("/tmp/right-reflection-prompt-{}.md", ctx.session_uuid);
-        let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            mode.prompt_mode(),
-            "/sandbox",
-            &prompt_path,
-            "/sandbox",
-            &claude_args,
-            None, // no MCP instructions refresh
-            None, // no memory section
-            None,
-            None,
-            Some(notice_token),
-        );
-        if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir).await {
-            let escaped = token.replace('\'', "'\\''");
-            assembly_script =
-                format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
-        }
-        let mut c = tokio::process::Command::new("ssh");
-        c.arg("-F").arg(ssh_config);
-        c.arg(&ssh_host);
-        c.arg("--");
-        c.arg(assembly_script);
-        c
-    } else {
-        let agent_dir_str = ctx.agent_dir.to_string_lossy();
-        let prompt_path = ctx.agent_dir.join(".claude").join(format!(
-            "composite-reflection-prompt-{}.md",
-            ctx.session_uuid
-        ));
-        let prompt_path_str = prompt_path.to_string_lossy();
-        let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            mode.prompt_mode(),
-            &agent_dir_str,
-            &prompt_path_str,
-            &agent_dir_str,
-            &claude_args,
-            None,
-            None,
-            None,
-            None,
-            Some(notice_token),
-        );
-        let mut c = tokio::process::Command::new("bash");
-        c.arg("-c");
-        c.arg(&assembly_script);
-        c.env("HOME", &ctx.agent_dir);
-        c.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir).await {
-            c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
-        }
-        c.current_dir(&ctx.agent_dir);
-        c
-    };
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::null());
-
-    let mut child = right_process::ProcessGroupChild::spawn(cmd)
-        .map_err(|e| ReflectionError::Spawn(format!("{:#}", e)))?;
 
     // Pipe the prompt, then drop stdin to signal EOF.
     if let Some(mut stdin) = child.stdin() {
@@ -453,8 +398,8 @@ async fn run_notice_resume(
         .is_err();
 
     // Kill the child regardless of outcome; collect exit code best-effort.
-    let _ = child.kill().await;
-    let exit = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
+    child.kill().await;
+    let exit = child.wait().await.unwrap_or(-1);
 
     if timed_out {
         tracing::warn!(
