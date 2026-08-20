@@ -13,100 +13,76 @@ const TOKEN_INSTRUCTION: &str = "\
 To authenticate this agent, run on your machine:\n\n\
 <pre>claude setup-token</pre>\n\n\
 Then send me the token it prints.";
+const MIN_SETUP_TOKEN_LENGTH: usize = 80;
+const INVALID_TOKEN_MESSAGE: &str = "That does not look like a Claude setup token. Run `claude setup-token` and paste the full token.";
 
 /// Events emitted during the token request flow.
 #[derive(Debug)]
 pub(crate) enum LoginEvent {
+    /// The submitted token is being saved. Acknowledged after delivery.
+    Saving(oneshot::Sender<()>),
     /// Login completed — token saved.
     Done,
     /// Login failed.
     Error(String),
 }
 
-/// Request an auth token from the user via Telegram and save it.
+/// Locally validate and save a token already submitted through Telegram.
 ///
-/// Communicates via channels:
-/// - `event_tx`: sends `LoginEvent`s to the orchestrator
-/// - `token_rx`: receives the token string from the Telegram handler
+/// Communicates saving progress and the final result to the owning request
+/// task through `event_tx`. The caller owns this future for the entire save so
+/// dropping the request cancels it before cleanup.
 ///
 /// `agent_dir` is the agent directory (data.db lives inside it).
-pub(crate) async fn request_token(
+pub(crate) async fn validate_submitted_token(
     agent_dir: &Path,
     agent_name: &str,
     event_tx: mpsc::Sender<LoginEvent>,
-    token_rx: oneshot::Receiver<String>,
+    token: String,
 ) {
-    // Delete stale token if present
-    match open_db_and_delete_stale(agent_dir).await {
-        Ok(()) => {}
-        Err(e) => {
-            let _ = event_tx
-                .send(LoginEvent::Error(format!("DB error: {e}")))
-                .await;
-            return;
-        }
-    }
-
-    // Wait for token from Telegram
-    tracing::info!(
-        agent = agent_name,
-        "login: waiting for setup-token from user"
-    );
-    let token = match token_rx.await {
-        Ok(t) => t.trim().to_string(),
-        Err(_) => {
-            let _ = event_tx
-                .send(LoginEvent::Error("token channel closed (timeout?)".into()))
-                .await;
-            return;
-        }
-    };
-
-    if token.is_empty() {
-        let _ = event_tx
-            .send(LoginEvent::Error("received empty token".into()))
-            .await;
+    tracing::info!(agent = agent_name, "login: saving submitted setup-token");
+    let (validation_sent_tx, validation_sent_rx) = oneshot::channel();
+    if event_tx
+        .send(LoginEvent::Saving(validation_sent_tx))
+        .await
+        .is_err()
+    {
         return;
     }
-
-    tracing::info!(
-        agent = agent_name,
-        token_len = token.len(),
-        "login: received token, saving"
-    );
-
-    // Save token
-    match save_token(agent_dir, &token).await {
+    if validation_sent_rx.await.is_err() {
+        return;
+    }
+    match finish_token_request(agent_dir, &token).await {
         Ok(()) => {
             let _ = event_tx.send(LoginEvent::Done).await;
         }
-        Err(e) => {
-            let _ = event_tx
-                .send(LoginEvent::Error(format!("failed to save token: {e}")))
-                .await;
+        Err(error) => {
+            let _ = event_tx.send(LoginEvent::Error(error)).await;
         }
     }
 }
 
-/// Open DB and delete any existing auth token (it's stale if we're here).
-async fn open_db_and_delete_stale(agent_dir: &Path) -> Result<(), String> {
-    let conn = right_db::open_connection(agent_dir, false)
-        .await
-        .map_err(|e| format!("open db: {e}"))?;
-    right_mcp::credentials::delete_auth_token(&conn)
-        .await
-        .map_err(|e| format!("delete stale token: {e}"))?;
-    Ok(())
+fn is_plausible_setup_token(token: &str) -> bool {
+    token.len() >= MIN_SETUP_TOKEN_LENGTH
+        && token.is_ascii()
+        && token.bytes().all(|byte| !byte.is_ascii_whitespace())
 }
 
-/// Save token to DB.
+async fn finish_token_request(agent_dir: &Path, token: &str) -> Result<(), String> {
+    if !is_plausible_setup_token(token) {
+        return Err(INVALID_TOKEN_MESSAGE.to_owned());
+    }
+    save_token(agent_dir, token).await
+}
+
+/// Save a token after local syntax validation.
 async fn save_token(agent_dir: &Path, token: &str) -> Result<(), String> {
     let conn = right_db::open_connection(agent_dir, false)
         .await
-        .map_err(|e| format!("open db: {e}"))?;
+        .map_err(|e| format!("open db: {e:#}"))?;
     right_mcp::credentials::save_auth_token(&conn, token)
         .await
-        .map_err(|e| format!("save token: {e}"))?;
+        .map_err(|e| format!("save token: {e:#}"))?;
     Ok(())
 }
 
@@ -128,9 +104,11 @@ pub(crate) fn auth_instruction_message() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoginEvent, auth_instruction_message, load_auth_token, request_token};
+    use super::{
+        INVALID_TOKEN_MESSAGE, auth_instruction_message, finish_token_request,
+        is_plausible_setup_token, load_auth_token,
+    };
     use tempfile::tempdir;
-    use tokio::sync::{mpsc, oneshot};
 
     async fn init_db(dir: &std::path::Path) {
         right_db::open_connection(dir, true).await.unwrap();
@@ -157,95 +135,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn plausible_setup_token_accepts_long_opaque_value() {
+        assert!(is_plausible_setup_token(&"a".repeat(108)));
+    }
+
+    #[test]
+    fn plausible_setup_token_rejects_short_ordinary_text() {
+        assert!(!is_plausible_setup_token("restart authentication"));
+    }
+
+    #[test]
+    fn plausible_setup_token_rejects_internal_whitespace() {
+        let candidate = format!("{} {}", "a".repeat(53), "b".repeat(54));
+
+        assert_eq!(candidate.len(), 108);
+        assert!(!is_plausible_setup_token(&candidate));
+    }
+
     #[tokio::test]
-    async fn request_token_saves_and_signals_done() {
+    async fn locally_valid_token_is_saved() {
         let dir = tempdir().unwrap();
         init_db(dir.path()).await;
+        let token = "a".repeat(108);
 
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (token_tx, token_rx) = oneshot::channel();
+        finish_token_request(dir.path(), &token).await.unwrap();
 
-        let agent_dir = dir.path().to_path_buf();
-        let task = tokio::spawn(async move {
-            request_token(&agent_dir, "test-agent", event_tx, token_rx).await;
-        });
-
-        token_tx.send("my-new-token".to_string()).unwrap();
-        task.await.unwrap();
-
-        let event = event_rx.recv().await.unwrap();
-        assert!(matches!(event, LoginEvent::Done));
         assert_eq!(
             load_auth_token(dir.path()).await.as_deref(),
-            Some("my-new-token")
+            Some(token.as_str())
         );
     }
 
     #[tokio::test]
-    async fn request_token_rejects_empty_token() {
+    async fn malformed_token_is_not_saved_or_diagnosed() {
         let dir = tempdir().unwrap();
         init_db(dir.path()).await;
+        let token = "secret-invalid\ntoken";
 
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (token_tx, token_rx) = oneshot::channel();
+        let error = finish_token_request(dir.path(), token)
+            .await
+            .expect_err("malformed candidate must be rejected");
 
-        let agent_dir = dir.path().to_path_buf();
-        let task = tokio::spawn(async move {
-            request_token(&agent_dir, "test-agent", event_tx, token_rx).await;
-        });
-
-        token_tx.send(String::new()).unwrap();
-        task.await.unwrap();
-
-        let event = event_rx.recv().await.unwrap();
-        assert!(matches!(event, LoginEvent::Error(_)));
+        assert_eq!(error, INVALID_TOKEN_MESSAGE);
+        assert!(!error.contains(token));
+        assert!(load_auth_token(dir.path()).await.is_none());
     }
 
     #[tokio::test]
-    async fn request_token_deletes_stale_before_waiting() {
+    async fn malformed_replacement_preserves_existing_token() {
         let dir = tempdir().unwrap();
         init_db(dir.path()).await;
+        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
+        right_mcp::credentials::save_auth_token(&conn, "existing-token")
+            .await
+            .unwrap();
+        drop(conn);
 
-        // Pre-seed a stale token
-        {
-            let conn = right_db::open_connection(dir.path(), false).await.unwrap();
-            right_mcp::credentials::save_auth_token(&conn, "stale-token")
-                .await
-                .unwrap();
-        }
+        finish_token_request(dir.path(), "restart authentication")
+            .await
+            .expect_err("malformed candidate must be rejected");
+
         assert_eq!(
             load_auth_token(dir.path()).await.as_deref(),
-            Some("stale-token")
-        );
-
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (token_tx, token_rx) = oneshot::channel::<String>();
-
-        let agent_dir = dir.path().to_path_buf();
-        // Use a barrier to confirm stale deletion happened before we send the new token.
-        // Since request_token deletes stale synchronously before awaiting token_rx,
-        // we can verify by completing the task and checking the final DB state.
-        let task = tokio::spawn(async move {
-            request_token(&agent_dir, "test-agent", event_tx, token_rx).await;
-        });
-
-        // Yield once so the task can run its synchronous delete
-        tokio::task::yield_now().await;
-
-        // Stale token should now be gone
-        assert!(
-            load_auth_token(dir.path()).await.is_none(),
-            "stale token should be deleted before request_token awaits the new token"
-        );
-
-        token_tx.send("fresh-token".to_string()).unwrap();
-        task.await.unwrap();
-
-        let event = event_rx.recv().await.unwrap();
-        assert!(matches!(event, LoginEvent::Done));
-        assert_eq!(
-            load_auth_token(dir.path()).await.as_deref(),
-            Some("fresh-token")
+            Some("existing-token")
         );
     }
 

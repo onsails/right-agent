@@ -637,6 +637,14 @@ pub(crate) async fn build_claude_script_command(
     agent_dir: &Path,
     sandbox: &crate::sandbox::Sandbox,
 ) -> crate::cc::sandbox_process::SandboxCommand {
+    // `claude` installs into /sandbox/.local/bin, which reaches PATH through
+    // /sandbox/.right/env.sh. Under the old SSH transport a login shell
+    // sourced that via .bashrc; a direct guest exec gets no login shell, so
+    // the script has to source it itself or `claude` is simply not found.
+    let script = format!(
+        "if [ -r {env} ]; then . {env}; fi\n{script}",
+        env = crate::sandbox::GUEST_ENV_SCRIPT,
+    );
     let command = crate::cc::sandbox_process::SandboxCommand::shell(sandbox, script);
     match crate::login::load_auth_token(agent_dir).await {
         Some(token) => command.env("CLAUDE_CODE_OAUTH_TOKEN", token),

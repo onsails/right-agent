@@ -153,9 +153,8 @@ pub(crate) struct InternalState {
     token_map_path: PathBuf,
     pub(crate) agents_dir: PathBuf,
     /// Right's provider credential store — the single authority for provider
-    /// records and credentials (stage 3; replaces the OpenShell provider
-    /// gateway in these handlers). Never exposes a credential value on a read
-    /// path.
+    /// records and credentials, replacing the retired OpenShell provider
+    /// gateway. Never exposes a credential value on a read path.
     pub(crate) providers: std::sync::Arc<right_providers::ProviderStore>,
     // Per-agent provider-mutation serialization lives in the store
     // (`ProviderStore::agent_lock`), which is the single lock owner — there is
@@ -190,14 +189,17 @@ impl InternalState {
 }
 
 /// Open (creating if absent) the provider credential store at
-/// `<home>/providers.db`. FATAL on error: the store is the single authority
-/// for provider state, so serving the internal API without it would answer
-/// `/provider-list` with lies. FAIL FAST per AGENTS.rust.md §2.
-pub(crate) async fn open_provider_store(home: &std::path::Path) -> right_providers::ProviderStore {
-    match right_providers::ProviderStore::open(home).await {
-        Ok(store) => store,
-        Err(e) => panic!("cannot open providers.db under {}: {e:#}", home.display()),
-    }
+/// `<home>/providers.db`. The store is the single authority for provider
+/// state, so serving the internal API without it would answer
+/// `/provider-list` with lies — the error propagates instead of degrading.
+/// FAIL FAST per AGENTS.rust.md §2.
+pub(crate) async fn open_provider_store(
+    home: &std::path::Path,
+) -> miette::Result<std::sync::Arc<right_providers::ProviderStore>> {
+    let store = right_providers::ProviderStore::open(home)
+        .await
+        .map_err(|e| miette::miette!("cannot open providers.db under {}: {e:#}", home.display()))?;
+    Ok(std::sync::Arc::new(store))
 }
 
 pub(crate) fn internal_router(
@@ -207,7 +209,7 @@ pub(crate) fn internal_router(
     token_map: AgentTokenMap,
     token_map_path: PathBuf,
     agents_dir: PathBuf,
-    providers: right_providers::ProviderStore,
+    providers: std::sync::Arc<right_providers::ProviderStore>,
 ) -> Router {
     let state = InternalState {
         dispatcher,
@@ -216,7 +218,7 @@ pub(crate) fn internal_router(
         token_map,
         token_map_path,
         agents_dir,
-        providers: std::sync::Arc::new(providers),
+        providers,
     };
     Router::new()
         .route("/mcp-add", post(handle_mcp_add))
@@ -1122,15 +1124,13 @@ async fn handle_reload(State(state): State<InternalState>) -> axum::response::Re
             continue;
         }
 
-        // Every agent is sandboxed, so the mTLS dir is available whenever the
-        // gateway preflight succeeds.
-        let mtls_dir = match right_openshell::openshell::preflight_check() {
-            right_openshell::openshell::OpenShellStatus::Ready(dir) => Some(dir),
-            _ => None,
-        };
-
-        // Create backend registry
-        let right = crate::right_backend::RightBackend::new(state.agents_dir.clone(), mtls_dir);
+        // The reload path shares the running server's store: it is the single
+        // authority for provider records, so a second handle would be a second
+        // truth.
+        let right = crate::right_backend::RightBackend::new(
+            state.agents_dir.clone(),
+            Some(state.providers.clone()),
+        );
         let registry = crate::aggregator::BackendRegistry {
             right,
             proxies: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -1261,7 +1261,7 @@ mod tests {
             token_map,
             token_map_path,
             tmp.join("agents"),
-            open_provider_store(tmp).await,
+            open_provider_store(tmp).await.unwrap(),
         );
         (router, dispatcher)
     }
@@ -2367,7 +2367,7 @@ mod tests {
             token_map,
             token_map_path,
             tmp.path().join("agents"),
-            open_provider_store(tmp.path()).await,
+            open_provider_store(tmp.path()).await.unwrap(),
         );
 
         let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;
@@ -2413,7 +2413,7 @@ mod tests {
             token_map.clone(),
             token_map_path,
             agents_dir.clone(),
-            open_provider_store(tmp.path()).await,
+            open_provider_store(tmp.path()).await.unwrap(),
         );
 
         let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;
@@ -2471,7 +2471,7 @@ mod tests {
             token_map.clone(),
             token_map_path,
             agents_dir.clone(),
-            open_provider_store(tmp.path()).await,
+            open_provider_store(tmp.path()).await.unwrap(),
         );
 
         let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;

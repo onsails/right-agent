@@ -56,10 +56,6 @@ pub(crate) const PROMPT_LABELS: &[&str] = &[
     "curator circuit: consecutive failures before the circuit opens:",
     "curator circuit: cooldown hours while open:",
     "curator mode (apply | report_only):",
-    // sandbox mode — label + options (shared with init.rs)
-    "sandbox mode:",
-    "openshell — isolated container (recommended)",
-    "none — direct host access (computer-use, chrome)",
     // network policy — label + options
     "network policy:",
     "restrictive — anthropic/claude domains only (recommended)",

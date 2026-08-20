@@ -45,23 +45,25 @@ per-message flow, sandbox migration, `right agent backup`,
 
 See: `docs/architecture/lifecycle.md` (Voice transcription).
 
-### OpenShell Sandbox Architecture
+### Agent Sandbox Architecture
 
 Sandboxes are **persistent** — never deleted automatically. They live as
-long as the agent lives and survive bot restarts.
+long as the agent lives, run detached, and survive bot restarts.
 
-Policy hot-reload via `openshell policy set --wait` covers the network
-section only. Filesystem/landlock changes require sandbox recreation (see
-`Upgrade & Migration Model` below).
+Egress policy, secret *structure*, and resources are create-time only —
+the SDK cannot change them on a running microVM, so a change to any of
+them needs a sandbox recreate. Only secret *values* hot-apply.
 
-Live OpenShell coverage is CI-explicit: tests that create real sandboxes
-or rely on OpenShell CLI file transfer use `#[ignore = "ci-openshell: ..."]`
-with a `ci_openshell_` test-name prefix and are called by the
-workspace-wide ignored-test filter in `.github/workflows/tests.yml`. Mock
-gRPC and pure policy tests remain in the default workspace test path.
+Live-microVM coverage is CI-explicit: tests that boot a real sandbox use
+`#[ignore = "ci-msb: ..."]` with a `ci_msb_` test-name prefix (enforced by
+`crates/right/tests/ci_ignored_contract.rs`) and run in the opt-in
+`sandbox` job in `.github/workflows/tests.yml`, which needs a runner
+exposing `/dev/kvm`. Everything that does not need a live VM stays in the
+default workspace test path.
 
-See: `docs/architecture/sandbox.md` for staging-dir layout, platform-store
-deployment, TLS-MITM, and the bot-startup sandbox sequence.
+See: `docs/architecture/sandbox.md` for the bring-up sequence, staging-dir
+layout, platform-store deployment, egress/secret model, and graceful
+degrade.
 
 ### Login Flow (setup-token)
 
@@ -273,9 +275,10 @@ into `AgentSettings.model` (an `Arc<ArcSwap<...>>`) and
 `AgentSettings.debug` (an `Arc<AtomicBool>`) without restarting. A
 `sandbox.providers`-only change (Stage B of the diff) is classified
 `ProvidersReload`: it applies model/debug in-memory and signals an async
-`sandbox_supervisor::hot_reconcile_providers` (ensure generic provider
-profiles, gateway attach/detach reconcile, and OpenShell policy reload for
-provider-profile composition) instead of restarting. The Telegram `/model`
+`sandbox_supervisor::hot_reconcile_providers`, which rotates each declared
+provider's credential value into the live sandbox and reports any provider
+that has no binding there (secret structure is create-time, so that one
+needs a recreate) instead of restarting. The Telegram `/model`
 and `/debug` commands exploit the hot-reload path — in-flight CC subprocesses
 keep their old flags; the next invocation in any chat picks up the new value.
 Adding more hot-reloadable fields requires extending the two-stage diff in
@@ -343,21 +346,22 @@ column-level definitions.
 ### Providers
 
 Provider credential management is owned by `right_providers::ProviderStore`
-(`~/.right/providers.db`, SQLite mode 0600 — microsandbox migration stage 3).
-No credential value ever crosses a store read API: `ProviderRecord` carries
-no credential field and `source_ref_binding` is the only reader. Per-agent
-provider definitions live in `agent.yaml::sandbox::providers: [...]`;
-ownership is a `providers.db` column (`owner_agent` + `provider_borrows`),
-never the `agent.yaml` `shared_from` field (legacy migration input only —
-stage 4 deletes it; the internal API writers never emit it).
+(`~/.right/providers.db`, SQLite mode 0600). No credential value ever
+crosses a store read API: `ProviderRecord` carries no credential field and
+`source_ref_binding` is the only reader. Per-agent provider definitions live
+in `agent.yaml::sandbox::providers: [...]`; ownership is a `providers.db`
+column (`owner_agent` + `provider_borrows`), never the `agent.yaml`
+`shared_from` field (legacy migration input only; the internal API writers
+never emit it).
 
 Provider health is the tri-state `ready` / `needs-value` / `error`. The
 OpenShell-era composition machinery (`ensure_v2_enabled`,
-`wait_for_provider_composed*`, effective-policy reads) is deleted; the
-internal provider API (`internal_api_providers.rs`) MUST NOT call
-`right_openshell`. Rotation and config-update fail fast on a record whose
-built-in slug no longer resolves (`unknown_builtin_slug`, HTTP 500); the
-list view marks such a row `error` instead of aborting.
+`wait_for_provider_composed*`, effective-policy reads) is deleted along
+with the gateway itself; the internal provider API
+(`internal_api_providers.rs`) talks only to the store. Rotation and
+config-update fail fast on a record whose built-in slug no longer resolves
+(`unknown_builtin_slug`, HTTP 500); the list view marks such a row `error`
+instead of aborting.
 
 Cross-agent SHARING (`provider_share`/`_unshare`) attaches a borrowed
 reference pointing at the true owner (actor trusted in **both**); no secret
@@ -574,18 +578,23 @@ Rules:
 
 ## Security Model
 
-- **Sandbox isolation**: OpenShell (k3s containers) — filesystem +
-  network + TLS policies per agent.
-- **TLS MITM**: OpenShell proxy terminates and re-signs TLS with
-  per-sandbox CA for L7 inspection.
-- **Credential isolation**: Host credentials never uploaded to sandbox.
-  Each sandbox authenticates independently via OAuth login flow.
-- **Network policy**: Scoped wildcard domain allowlists
-  (`*.anthropic.com`, `*.claude.com`, `*.claude.ai`) or hostless public
-  `allowed_ips` endpoint allowlists + `binaries: "**"`. TLS termination
-  is automatic (OpenShell v0.0.30+).
+- **Sandbox isolation**: microsandbox microVM — hardware-isolated guest
+  with its own kernel, per-agent network egress policy.
+- **TLS interception**: a bypass deny-list (ADR-0003). Declaring any
+  provider secret enables interception on the intercepted ports for every
+  destination *except* `right_sandbox::TLS_BYPASS_HOSTS`, which always
+  carries the Anthropic hosts — so Claude's own path is never intercepted
+  and the guest needs no CA configuration.
+- **Credential isolation**: Host credentials are never uploaded to the
+  sandbox. Each sandbox authenticates independently via the OAuth login
+  flow, and provider credentials reach it as source-ref bindings whose
+  value is substituted on the wire, never written into the guest.
+- **Network policy**: `permissive` (open egress) or `restrictive` (a
+  domain-suffix allow list: `anthropic.com`, `claude.com`, `claude.ai`,
+  `storage.googleapis.com`, plus the always-open host destination group).
+  Egress is create-time only — changing it needs a sandbox recreate.
 - **`--dangerously-skip-permissions`**: Always on for all CC invocations.
-  OpenShell policy is the security layer, not CC's permission system.
+  The microVM boundary is the security layer, not CC's permission system.
 - **Prompt-injection defense**: `ironclaw_safety::Sanitizer` runs on
   memory writes (Hindsight retain path) and `wrap_external_content`
   frames the `## Long-Term Memory` section as untrusted data on read. Phase-2 wrap
@@ -600,17 +609,16 @@ Rules:
   tools. Only the user can manage servers via the Telegram dashboard MCP
   view routed through the internal Unix socket API. Prevents sandbox
   escape via data exfiltration to attacker-controlled MCP endpoints.
-- **Sandboxed CC fails closed**: a sandboxed agent (`resolved_sandbox` set) runs Claude Code only inside its sandbox — every CC-command-construction site MUST call `guard_no_sandboxed_host_exec` (`crates/bot/src/cc/invocation.rs`), which refuses to build a host command when the sandbox connection is absent. On backend outage the worker replies with a diagnosis and skips CC; `SandboxSupervisor` (the sole writer of `SandboxRuntimeHandle` health) retries with backoff — no host fallback ever occurs. The supervisor MUST verify reported sandbox failures by reading the real sandbox phase over gRPC (`sandbox_phase_status`), not by gateway reachability alone.
+- **Sandboxed CC fails closed**: a sandboxed agent runs Claude Code only inside its microVM — every CC-command-construction site MUST call `guard_no_sandboxed_host_exec` (`crates/bot/src/cc/invocation.rs`), which refuses to build a host command when the sandbox handle is absent. On backend outage the worker replies with a diagnosis and skips CC; `SandboxSupervisor` (the sole writer of `SandboxRuntimeHandle` health) retries with backoff — no host fallback ever occurs. The supervisor MUST verify reported sandbox failures by reading the real sandbox phase through the SDK, not by runtime reachability alone.
 - **OAuth CSRF**: Token matching in callback server.
-- **Provider credential isolation**: Provider credential values and
-  gateway placeholder values (`openshell:resolve:env:v…_<NAME>`) are
-  never logged on the host. Use `secrecy::SecretString` for in-memory
-  transport; do not pass credential fields to tracing macros.
-  Placeholder substitution is keyed by env-var name on any TLS-terminated
-  endpoint, NOT scoped to the owning provider's host — do not rely on
-  provider-profile endpoints to confine a credential (OpenShell
-  limitation; raw `tls: skip` hosts never substitute, so credentials
-  can't reach the open internet). See `docs/architecture/providers.md` and
+- **Provider credential isolation**: Provider credential values and the
+  guest-visible placeholder values (`$MSB_<NAME>`) are never logged on the
+  host. Use `secrecy::SecretString` for in-memory transport; do not pass
+  credential fields to tracing macros. Substitution is keyed by env-var
+  name on any intercepted endpoint, NOT scoped to the owning provider's
+  host — do not rely on a provider's declared hosts to confine a
+  credential. Bypassed (non-intercepted) hosts never substitute, so
+  credentials cannot reach them. See `docs/architecture/providers.md` and
   onsails/right-agent#92.
 
 ## Brand-conformant CLI output
@@ -649,92 +657,61 @@ offered provider-type list server-side (`HIDDEN_FROM_DASHBOARD` in
 `internal_api_providers.rs`), so the UI shows one flat list. Technical precision
 lives in the backend; the UI optimizes for user clarity.
 
-## OpenShell Integration Conventions
+## Agent Sandbox Conventions
 
-- **Use gRPC for everything except file transfer and `policy set --wait`**:
-  every provider control-plane operation (Create/Get/Update/Delete/List/
-  Attach/Detach/ListAttached/GetSandboxProviderEnvironment) goes through
-  tonic-generated client stubs from the vendored `openshell.v1` proto.
-  CLI remains only for: SSH+tar-backed file upload/download, and
-  `openshell policy set --wait` (the policy hot-apply path). Adding a
-  new provider operation by CLI is a review-blocking defect.
-- **gRPC for**: sandbox create/get/delete, readiness polling, in-sandbox
-  command execution, policy status, SSH session management, provider
-  CRUD + sandbox attach/detach, Health (version preflight).
-- **Readiness polling diagnostics**: `wait_for_ready` must preserve the
-  last `GetSandbox` phase/status in timeout errors and treat
-  `SANDBOX_PHASE_ERROR` as terminal. Do not collapse OpenShell status
-  into a bare boolean in wait loops.
-- **Sandbox create stdio**: `openshell sandbox create` stdout/stderr
-  must be inherited or drained concurrently; never leave them piped and
-  unread.
-- **SSH remote argv must be quoted centrally**: For remote argv, call
-  `right_openshell::openshell::quote_ssh_remote_args(...)` and pass
-  exactly one argument after the SSH host or `--`. For authored shell
-  scripts, pass exactly one complete script string. Never use
-  `Command::args(...)` or `Vec::join(" ")` for remote argv after the SSH
-  host.
-- **CLI for**: file upload/download (SSH+tar under the hood), policy
-  apply (`openshell policy set`).
-- **Vendored proto compatibility is load-bearing**: OpenShell `v0.0.105`
-  is the minimum supported version (CLI and gateway).
-  `crates/right-openshell/proto/UPSTREAM.md` records the pinned tag and
-  fetch date. To bump: run `scripts/vendor-openshell-proto.sh <tag>` and
-  `cargo check -p right-openshell` to regenerate stubs.
-  `right_openshell::preflight::openshell_preflight` enforces this at
-  bot startup; both CLI (`openshell --version`) and gateway (Health
-  RPC) must report `>= MIN_OPENSHELL_VERSION`.
-  `resolve_sandbox_id` must read `metadata.id`;
-  `ci_openshell_policy_validates_against_openshell` is the live
-  regression gate.
-- **Sandbox names MUST be ≤19 chars** (upstream routable-name limit).
-  Generate them via `right_openshell::openshell::fit_sandbox_name`.
-- **NEVER use the CLI for in-sandbox command execution**: `openshell
-  sandbox exec` CLI has unreliable argument parsing. Always use gRPC
-  `exec_in_sandbox`.
-- **Known CLI bug**: Directory uploads may silently drop small files.
-  Always verify critical files after directory upload, and re-upload
-  individually if missing.
-- **All Provider operations** (Create/Get/Update/Delete/ListProviders,
-  sandbox attach/detach, GetSandboxProviderEnvironment,
-  ensure_v2_enabled) MUST go through `right_openshell::providers`. Direct
-  gRPC or `openshell provider` CLI invocations from other crates are a
+- **One SDK boundary**: `crates/right-sandbox` is the only crate that may
+  depend on the microsandbox SDK, and no raw SDK type appears in its
+  public API. A direct `microsandbox::` use anywhere else is a
   review-blocking defect.
-- **All ProviderProfile operations** (Get/Lint/Import/Delete) MUST go
-  through `right_openshell::managed_profiles`; generic provider endpoints
-  are authored profiles, not hand-edited policy stanzas.
+- **One spec builder**: every writer that creates an agent's sandbox —
+  the bot's supervisor and the `right` CLI — MUST go through
+  `right_sandbox::agent_sandbox_spec`. Egress and secret structure are
+  create-time only, so two builders drifting would silently produce
+  sandboxes with different network reach, failing only at turn time.
+- **One name resolver**: every lifecycle path (bring-up, destroy,
+  rebootstrap, migrate) MUST resolve through
+  `right_sandbox::resolve_sandbox_name`. Two call sites disagreeing about
+  an agent's sandbox name is how a destroy orphans a microVM.
+- **Readiness polling diagnostics**: `wait_ready` must preserve the last
+  observed phase in timeout errors and treat a terminal phase as an
+  immediate error. Do not collapse the phase into a bare boolean in wait
+  loops.
+- **Runtime install is implicit**: `ensure_runtime_installed` runs at bot
+  startup and installs the SDK's own runtime; there is no PATH dependency
+  and no operator install step. `diagnose_host` is the hypervisor
+  preflight, and a hypervisor-less host degrades with a diagnosis rather
+  than crashing.
+- **SDK version**: `right_sandbox::PINNED_SDK_VERSION` records the exact
+  SDK this crate is built against. The SDK pins its own `msb` runtime and
+  `libkrunfw`, so Right maintains no separate version floor. Bumping it
+  requires the `ci_msb_` contract suite to pass first.
+- **Exec takes argv, never a shell string**: build an `ExecRequest` with
+  a program and arguments. Guest stdin above the protocol frame cap MUST
+  go through `ChunkedStdin`; a single oversized write tears the exec
+  session down.
+- **Provider secrets are source refs**: a `SecretBinding` names the
+  guest-visible env var (holding a placeholder), the host env var the
+  value is read from, and the hosts allowed to receive it. A credential
+  value never enters a spec, the sandbox's durable config, or the guest.
+- **Create-time vs hot-appliable**: egress, secret structure, and
+  resources are fixed at create. Only secret *values* rotate on a live
+  sandbox, via `SandboxHandle::rotate_secret`. A declared provider with no
+  binding on the live sandbox MUST be reported as needing a recreate, not
+  silently skipped.
 
-## OpenShell Policy Gotchas
+## Sandbox Gotchas
 
-- **Do not emit deprecated `tls:` modes** (OpenShell v0.0.30+). The
-  proxy auto-detects TLS via ClientHello peek and terminates for L7
-  endpoints. Writing `tls: terminate` or `tls: passthrough` triggers a
-  per-request `WARN` and the field is slated for removal. Omit the field
-  for auto-detect; use `tls: skip` only to explicitly disable
-  termination (raw tunnel).
-- `binaries: path: "**"` not `"/sandbox/**"`. Claude lives at
-  `/usr/local/bin/claude`; provider profiles missing `binaries` do not
-  match sandbox commands and can block CONNECT before substitution.
-- `protocol: rest` and `access: full` are required only for endpoints
-  that intentionally use L7 HTTP policy on terminated plaintext.
-- Permissive public internet endpoints are hostless public `allowed_ips`
-  raw tunnels (`tls: skip`, no `protocol`/`access`) on ports 80/443. Do
-  not add L7 REST policy there: OpenShell rejects encoded `/` (`%2F`)
-  request-targets used by scoped npm package metadata.
-- Scoped wildcard domains (`*.anthropic.com`) work.
-- OpenShell v0.0.37+ rejects TLD/global host wildcards. Permissive
-  public internet policy must use hostless public `allowed_ips`
-  endpoints.
-- CC actively manages `.claude.json` — strips unknown project trust
+- **Egress entries are domain suffixes, not globs**: `anthropic.com`
+  already covers `*.anthropic.com`. Writing `*.anthropic.com` is wrong.
+- **TLS interception is a deny-list, not an allow-list**: declaring any
+  secret intercepts every destination on the intercepted ports except
+  `TLS_BYPASS_HOSTS`. Adding a host to that list removes interception
+  from it — treat the list as security-relevant inventory (ADR-0003).
+- **Substitution is keyed by env-var name**, not by the owning provider's
+  hosts, so a declared provider's hosts do not confine its credential.
+- CC actively manages `.claude.json` — it strips unknown project trust
   entries on startup. Use `--dangerously-skip-permissions` instead of
   relying on trust entries.
-- `HTTPS_PROXY=http://10.200.0.1:3128` is set automatically inside
-  sandbox. All HTTP/HTTPS goes through the proxy.
-- **Host service access from sandbox** (`host.openshell.internal`):
-  requires exact sandbox-resolved `allowed_ips` per policy endpoint.
-  Every resolved private/internal IP must be allowed. Do not hardcode
-  host gateway IPs and do not permanently allow broad private/ULA ranges
-  for Right MCP.
 - **Host MCP bind address**: the host-side Right MCP aggregator binds
   `127.0.0.1`, not `0.0.0.0`. The guest reaches it through the
   `host.microsandbox.internal` alias, which resolves to a host loopback
@@ -745,13 +722,9 @@ lives in the backend; the UI optimizes for user clarity.
   from `/sandbox/.bashrc` and before sandboxed `claude -p`). npm uses
   `NPM_CONFIG_PREFIX=/sandbox/.local` + `NPM_CONFIG_CACHE=/sandbox/.npm`.
   Do not document or generate `~/bin`.
-- **NixOS users**: must add `networking.firewall.trustedInterfaces = [
-  "docker0" "br-+" ];` — OpenShell runs k3s on a custom Docker bridge,
-  and without this the firewall drops k3s-pod-to-host traffic.
-- **Filesystem policy changes require sandbox recreation**: `openshell
-  policy set --wait` hot-reloads network policies but does NOT apply
-  filesystem policy changes to running sandboxes. Landlock rules are set
-  at sandbox creation time.
+- **Every network change needs a recreate**: there is no policy hot-apply.
+  Egress is applied by the SDK at create, so an `agent.yaml`
+  `network_policy` change takes effect only on a recreated sandbox.
 
 ## Directory Layout & Logging
 

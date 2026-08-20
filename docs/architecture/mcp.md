@@ -270,16 +270,13 @@ line; they are disposable runtime state, not persisted across restarts.
 The Aggregator replaces HttpMemoryServer as the MCP endpoint. One shared process
 serves all agents on TCP :8100/mcp with per-agent Bearer token authentication.
 
-In OpenShell mode, sandboxed agents reach the host-side aggregator through
-`http://host.openshell.internal:8100/mcp` in `/sandbox/mcp.json`. Credentials,
-OAuth state, and external MCP sessions stay on the host. The sandbox policy is
-generated in two phases: bootstrap policy before sandbox creation omits guessed
-Right MCP `allowed_ips`; after the sandbox is READY, Right resolves
-`host.openshell.internal` from inside that sandbox and hot-applies exact IPv4
-`/32` and IPv6 `/128` entries. This repeats on bot startup so restored agents
-self-heal when moved to a different host. OpenShell `forward` and service
-exposure are not used for this path because they expose sandbox services
-outward, while Right MCP needs sandbox-to-host access.
+Sandboxed agents reach the host-side aggregator through
+`http://host.microsandbox.internal:8100/mcp` in `/sandbox/mcp.json`.
+Credentials, OAuth state, and external MCP sessions stay on the host. The
+alias resolves to a host loopback address from inside the guest, and the host
+destination group is always open on top of the agent's egress allow list, so
+no per-sandbox IP resolution or policy hot-apply is involved — a restored
+agent works unchanged on a different host.
 
 ## Agent-Facing MCP Health
 
@@ -290,8 +287,8 @@ Claude Code's `system/init` stream-json event, which lists the MCP servers
 visible to that process.
 
 The bot runs a periodic Haiku health probe using the same strict MCP config
-path as real turns (`/sandbox/mcp.json` in OpenShell mode, host `mcp.json` in
-no-sandbox mode). If `system/init` reports the built-in `right` server as
+path as real turns (`/sandbox/mcp.json`). If `system/init` reports the
+built-in `right` server as
 `needs-auth` or omits it, the bot removes Claude Code's stale
 `.claude/mcp-needs-auth-cache.json`, redeploys platform files, and probes once
 more. The repair never recreates sandboxes, rewrites external MCP credentials,
@@ -448,9 +445,8 @@ records append-only `skill_learning_events`, updates mutable
 `skill_lifecycle` rows on successful finishes, verifies successful finishes by
 checking `.claude/skills/<skill_name>/SKILL.md`, and sends learning messages
 only for `Foreground` invocations. `ProbeWriter` and `Curator` invocations
-record lifecycle/events without Telegram learning-message delivery. In
-OpenShell mode that existence check runs inside the sandbox; in `sandbox: none`
-mode it checks the host agent directory. The receipt text is authored by the
+record lifecycle/events without Telegram learning-message delivery. That
+existence check runs inside the sandbox. The receipt text is authored by the
 LLM and passed as the `message` argument to
 `mcp__right__skill_learning_finish`.
 

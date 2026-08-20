@@ -6,7 +6,7 @@ This is a Rust project. Follow conventions in AGENTS.rust.md.
 
 **Right Agent**
 
-Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw and Hermes in category. Every choice is made for you, security is the default, and we polish what ships before adding more. Built on Claude Code running inside NVIDIA OpenShell sandboxes, orchestrated by process-compose. Drop-in compatible with the OpenClaw/ClawHub ecosystem at the file level (same conventions, same skill format, same registry) — but with security-first enforcement instead of "grant all, pray it works."
+Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw and Hermes in category. Every choice is made for you, security is the default, and we polish what ships before adding more. Built on Claude Code running inside microsandbox microVMs, orchestrated by process-compose. Drop-in compatible with the OpenClaw/ClawHub ecosystem at the file level (same conventions, same skill format, same registry) — but with security-first enforcement instead of "grant all, pray it works."
 
 **Core Value:** One Telegram bot per agent — every chat its own Claude Code session over a shared, chat-tagged memory. Every agent in its own sandbox, every credential outside it. The box is closed; you just use it.
 

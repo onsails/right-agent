@@ -100,7 +100,7 @@ async fn rebootstrap_unavailable_sandbox_preserves_host_sessions_and_answers() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
         agent_dir.join("agent.yaml"),
-        "sandbox:\n  mode: openshell\n  name: missing-sandbox\n  policy_file: policy.yaml\n",
+        "sandbox:\n  name: missing-sandbox\n  policy_file: policy.yaml\n",
     )
     .unwrap();
     std::fs::write(agent_dir.join("policy.yaml"), "version: 1\n").unwrap();
@@ -152,7 +152,6 @@ async fn rebootstrap_unavailable_sandbox_preserves_host_sessions_and_answers() {
     Command::cargo_bin("right")
         .unwrap()
         .env("PATH", "")
-        .env("OPENSHELL_MTLS_DIR", home.path().join("missing-mtls"))
         .args([
             "--home",
             home.path().to_str().unwrap(),

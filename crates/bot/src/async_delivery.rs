@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -368,11 +369,38 @@ const TELEGRAM_SEND_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::f
 const DELIVERY_INTERRUPTED_BY_SHUTDOWN: &str = "delivery interrupted by shutdown";
 const DELIVERY_SEND_OUTCOME_UNKNOWN_AFTER_SHUTDOWN: &str =
     "delivery send outcome unknown after shutdown";
+const DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const DELIVERY_TIMEOUT_ERROR: &str = "delivery CC subprocess timed out after 120s";
 
 #[derive(Debug, Clone, Copy)]
 struct DeliveryShutdownControl<'a> {
     token: Option<&'a tokio_util::sync::CancellationToken>,
     deadline: Option<tokio::time::Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeliveryDeadlineControl<'a> {
+    shutdown: DeliveryShutdownControl<'a>,
+    deadline_error: &'static str,
+}
+
+fn delivery_subprocess_control<'a>(
+    shutdown: DeliveryShutdownControl<'a>,
+    delivery_deadline: tokio::time::Instant,
+) -> DeliveryDeadlineControl<'a> {
+    match shutdown.deadline {
+        Some(caller_deadline) if caller_deadline <= delivery_deadline => DeliveryDeadlineControl {
+            shutdown,
+            deadline_error: DELIVERY_INTERRUPTED_BY_SHUTDOWN,
+        },
+        _ => DeliveryDeadlineControl {
+            shutdown: DeliveryShutdownControl {
+                token: shutdown.token,
+                deadline: Some(delivery_deadline),
+            },
+            deadline_error: DELIVERY_TIMEOUT_ERROR,
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -757,24 +785,38 @@ pub(crate) async fn run_delivery_loop(
     }
 }
 
-async fn run_or_delivery_shutdown<T>(
-    control: DeliveryShutdownControl<'_>,
-    future: impl std::future::Future<Output = T>,
+async fn run_or_delivery_deadline<T>(
+    control: DeliveryDeadlineControl<'_>,
+    future: impl Future<Output = T>,
 ) -> Result<T, String> {
     tokio::select! {
         biased;
         _ = async {
-            if let Some(token) = control.token {
+            if let Some(token) = control.shutdown.token {
                 token.cancelled().await;
             }
-        }, if control.token.is_some() => Err(DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()),
+        }, if control.shutdown.token.is_some() => Err(DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()),
         _ = async {
-            if let Some(deadline) = control.deadline {
+            if let Some(deadline) = control.shutdown.deadline {
                 tokio::time::sleep_until(deadline).await;
             }
-        }, if control.deadline.is_some() => Err(DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()),
+        }, if control.shutdown.deadline.is_some() => Err(control.deadline_error.to_owned()),
         result = future => Ok(result),
     }
+}
+
+async fn run_or_delivery_shutdown<T>(
+    control: DeliveryShutdownControl<'_>,
+    future: impl Future<Output = T>,
+) -> Result<T, String> {
+    run_or_delivery_deadline(
+        DeliveryDeadlineControl {
+            shutdown: control,
+            deadline_error: DELIVERY_INTERRUPTED_BY_SHUTDOWN,
+        },
+        future,
+    )
+    .await
 }
 
 fn is_delivery_shutdown_interruption(error: &str) -> bool {
@@ -1067,7 +1109,7 @@ async fn deliver_through_session(
         &base_prompt,
         crate::cc::prompt::PromptMode::Normal,
         "/sandbox",
-        "/tmp/right-system-prompt.md",
+        &crate::cc::prompt::sandbox_prompt_file_path("system-prompt"),
         "/sandbox",
         &claude_args,
         mcp_instructions.as_deref(),
@@ -1087,20 +1129,22 @@ async fn deliver_through_session(
             .await
             .map_err(|e| format!("spawn failed: {e:#}"))?;
 
+    let delivery =
+        delivery_subprocess_control(shutdown, tokio::time::Instant::now() + DELIVERY_TIMEOUT);
     if let Some(mut stdin) = child.stdin() {
-        run_or_delivery_shutdown(shutdown, stdin.write_all(yaml_input.as_bytes()))
+        run_or_delivery_deadline(delivery, stdin.write_all(yaml_input.as_bytes()))
             .await?
             .map_err(|e| format!("stdin write: {e:#}"))?;
+        run_or_delivery_deadline(delivery, stdin.close())
+            .await?
+            .map_err(|e| format!("stdin close: {e:#}"))?;
     }
 
-    const DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-    let output = run_or_delivery_shutdown(
-        shutdown,
-        tokio::time::timeout(DELIVERY_TIMEOUT, child.wait_with_output()),
-    )
-    .await?
-    .map_err(|_| "delivery CC subprocess timed out after 120s".to_string())?
-    .map_err(|e| format!("wait_with_output: {e:#}"))?;
+    // Any deadline error returns from this function and drops `child`; the
+    // SandboxChild drop contract kills the still-running guest process.
+    let output = run_or_delivery_deadline(delivery, child.wait_with_output())
+        .await?
+        .map_err(|e| format!("wait_with_output: {e:#}"))?;
 
     if !output.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1280,6 +1324,50 @@ mod tests {
     async fn delivery_mode_shutdown_flush_skips_idle_gate() {
         assert!(should_wait_for_idle(DeliveryMode::Normal, 10));
         assert!(!should_wait_for_idle(DeliveryMode::ShutdownFlush, 10));
+    }
+
+    #[test]
+    fn subprocess_deadline_merges_with_caller_control_and_preserves_diagnostic() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let now = tokio::time::Instant::now();
+        let internal_deadline = now + DELIVERY_TIMEOUT;
+        let caller_deadline = now + std::time::Duration::from_secs(10);
+        let caller_control = DeliveryShutdownControl {
+            token: Some(&token),
+            deadline: Some(caller_deadline),
+        };
+
+        let caller_bounded = delivery_subprocess_control(caller_control, internal_deadline);
+        assert_eq!(caller_bounded.shutdown.deadline, Some(caller_deadline));
+        assert!(std::ptr::eq(caller_bounded.shutdown.token.unwrap(), &token));
+        assert_eq!(
+            caller_bounded.deadline_error,
+            DELIVERY_INTERRUPTED_BY_SHUTDOWN
+        );
+
+        let delivery_bounded = delivery_subprocess_control(
+            DeliveryShutdownControl {
+                token: Some(&token),
+                deadline: None,
+            },
+            internal_deadline,
+        );
+        assert_eq!(delivery_bounded.shutdown.deadline, Some(internal_deadline));
+        assert!(std::ptr::eq(
+            delivery_bounded.shutdown.token.unwrap(),
+            &token
+        ));
+        assert_eq!(delivery_bounded.deadline_error, DELIVERY_TIMEOUT_ERROR);
+
+        let later_caller = delivery_subprocess_control(
+            DeliveryShutdownControl {
+                token: None,
+                deadline: Some(internal_deadline + std::time::Duration::from_secs(1)),
+            },
+            internal_deadline,
+        );
+        assert_eq!(later_caller.shutdown.deadline, Some(internal_deadline));
+        assert_eq!(later_caller.deadline_error, DELIVERY_TIMEOUT_ERROR);
     }
 
     #[tokio::test]

@@ -724,7 +724,7 @@ mod handler_tests {
             token_map,
             token_map_path,
             agents_dir,
-            providers,
+            Arc::new(providers),
         )
     }
 

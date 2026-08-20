@@ -1,14 +1,5 @@
 use super::*;
 
-fn entry(n: &str) -> right_agent_config::ProviderEntry {
-    right_agent_config::ProviderEntry {
-        name: n.to_string(),
-        type_: right_agent_config::ProviderType::BuiltIn("right-fal".into()),
-        label: None,
-        generic: None,
-    }
-}
-
 /// A sandbox name no real sandbox can share.
 ///
 /// `destroy_agent` deletes the sandbox named in `agent.yaml`, and the
@@ -24,44 +15,12 @@ fn unique_sandbox_name(scope: &str) -> String {
     format!("right-destroy-test-{scope}-{}-{nanos}", std::process::id())
 }
 
-#[test]
-fn refcount_keeps_record_when_another_agent_references_it() {
-    let agents = vec![
-        ("riskoff".to_string(), vec![entry("fal-a1b2c3")]),
-        ("right".to_string(), vec![entry("fal-a1b2c3")]),
-    ];
-    let plan = plan_destroy_provider_cascade("riskoff", &agents, true);
-    assert!(plan.detach.contains(&"fal-a1b2c3".to_string()));
-    assert!(
-        !plan.delete.contains(&"fal-a1b2c3".to_string()),
-        "still referenced by right"
-    );
-}
-
-#[test]
-fn refcount_deletes_record_when_last_reference() {
-    let agents = vec![("riskoff".to_string(), vec![entry("fal-a1b2c3")])];
-    let plan = plan_destroy_provider_cascade("riskoff", &agents, true);
-    assert!(plan.delete.contains(&"fal-a1b2c3".to_string()));
-}
-
-#[test]
-fn refcount_fails_closed_when_siblings_incomplete() {
-    // When sibling enumeration was incomplete (all_complete=false), the
-    // cascade must NOT delete gateway records — only detach.
-    // This prevents deleting a record still referenced by an unread agent.
-    let agents = vec![("riskoff".to_string(), vec![entry("fal-a1b2c3")])];
-    let plan = plan_destroy_provider_cascade("riskoff", &agents, false);
-    assert!(
-        plan.detach.contains(&"fal-a1b2c3".to_string()),
-        "detach must still be populated"
-    );
-    assert!(
-        plan.delete.is_empty(),
-        "delete must be empty when siblings incomplete"
-    );
-}
-
+// The refcount-plan tests are gone with the planner itself: destroy no longer
+// computes a detach/delete plan from every sibling's `agent.yaml`. The store
+// owns the refcount — `ProviderStore::remove` re-homes an owned record to a
+// surviving borrower, and `unshare` drops a borrowed reference — and those
+// semantics are covered in `right_providers::store_tests`.
+//
 // The `set_provider_shared_from` / `rehome_owner_in_agent_yaml` tests are gone
 // with the functions themselves: provider ownership lives in providers.db
 // (`right_providers::ProviderStore`), so destroy no longer rewrites

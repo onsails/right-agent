@@ -193,6 +193,19 @@ const PROMPT_SECTIONS: &[PromptSection] = &[
     },
 ];
 
+/// A per-invocation, guest-writable prompt-file path inside the sandbox.
+///
+/// `/tmp` is sticky (mode 1777), so the unprivileged `GUEST_USER` can always
+/// create a new file there but can never overwrite a file owned by another
+/// uid. A deterministic name (the old `right-system-prompt-{session_uuid}.md`
+/// scheme) lets a root-owned leftover from the pre-`GUEST_USER` migration era
+/// block the write: dash emits `cannot create ...: Permission denied` and
+/// `claude` launches against a stale prompt. A fresh UUID per invocation
+/// guarantees the file is newly created by the caller, never a collision.
+pub(crate) fn sandbox_prompt_file_path(tag: &str) -> String {
+    format!("/tmp/right-{tag}-{}.md", uuid::Uuid::new_v4())
+}
+
 /// Generate a shell script that assembles a composite system prompt and runs `claude -p`.
 ///
 /// Parameterized by `root_path` — the directory containing agent .md files:
@@ -337,8 +350,13 @@ fi"#
         None => String::new(),
     };
 
+    // `trap` removes the per-invocation prompt file on normal exit so a
+    // persistent microVM doesn't accumulate `/tmp/right-*-<uuid>.md` files.
+    // EXIT traps do not fire on SIGKILL (the guest timeout path); a leaked
+    // file there is an acceptable temp-file leftover in guest `/tmp`.
+    let prompt_cleanup = format!("trap \"rm -f {quoted_prompt_file}\" EXIT");
     format!(
-        "{sandbox_env_prelude}\n{{ printf '{escaped_base}'\n{file_sections}\n{notice_token_section}\n{chat_context_section}\n{mcp_section}\n{focus_section_sh}\n{memory_section}\n}} > {quoted_prompt_file}\ncd {quoted_workdir} && {claude_cmd}"
+        "{sandbox_env_prelude}\n{prompt_cleanup}\n{{ printf '{escaped_base}'\n{file_sections}\n{notice_token_section}\n{chat_context_section}\n{mcp_section}\n{focus_section_sh}\n{memory_section}\n}} > {quoted_prompt_file}\ncd {quoted_workdir} && {claude_cmd}"
     )
 }
 

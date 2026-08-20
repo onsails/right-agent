@@ -343,16 +343,30 @@ attachments:
     }
 
     #[test]
-    fn sandbox_config_accepts_retired_mode_and_policy_keys() {
+    fn sandbox_config_accepts_retired_policy_file_key() {
         let yaml = r#"
 sandbox:
-  mode: openshell
   policy_file: policy.yaml
   name: right-alpha
 "#;
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         let sandbox = config.sandbox.unwrap();
         assert_eq!(sandbox.name.as_deref(), Some("right-alpha"));
+    }
+
+    #[test]
+    fn sandbox_config_rejects_mode_openshell() {
+        let yaml = r#"
+sandbox:
+  mode: openshell
+  policy_file: policy.yaml
+  name: right-alpha
+"#;
+        let error = serde_saphyr::from_str::<AgentConfig>(yaml).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("right agent migrate-sandbox"),
+            "an unmigrated agent must be told how to migrate: {error:#}"
+        );
     }
 
     #[test]
@@ -402,10 +416,9 @@ sandbox:
     }
 
     #[test]
-    fn agent_config_without_sandbox_defaults_mode_openshell() {
+    fn agent_config_without_sandbox_section_parses() {
         let yaml = "{}";
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
-        // sandbox is None — effective mode should be openshell (tested via helper)
         assert!(config.sandbox.is_none());
     }
 
@@ -413,7 +426,6 @@ sandbox:
     fn sandbox_config_with_name() {
         let yaml = r#"
 sandbox:
-  mode: openshell
   policy_file: policy.yaml
   name: "rightclaw-brain-20260415-1430"
 "#;
@@ -426,7 +438,6 @@ sandbox:
     fn sandbox_config_without_name_is_none() {
         let yaml = r#"
 sandbox:
-  mode: openshell
   policy_file: policy.yaml
 "#;
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();

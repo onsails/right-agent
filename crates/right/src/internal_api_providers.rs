@@ -3,8 +3,8 @@
 //! Stage 3: provider records and credentials live in the Right-owned
 //! `right_providers::ProviderStore` (`~/.right/providers.db`). The handlers
 //! below keep the internal UDS wire contract (routes, JSON shapes, error
-//! codes) compatible with the OpenShell-gateway era, but no handler in this
-//! module talks to `right_openshell`: composition confirmation,
+//! codes) compatible with the retired OpenShell-gateway era, but nothing here
+//! calls out to a gateway: composition confirmation,
 //! `wait_for_provider_composed*`, and `ensure_v2_enabled` are gone by design
 //! (see `docs/superpowers/specs/2026-08-19-microsandbox-migration-design.md`,
 //! decisions "Providers" / "Provider status").

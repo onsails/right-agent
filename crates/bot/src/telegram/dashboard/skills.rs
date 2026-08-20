@@ -20,13 +20,12 @@ const SANDBOX_SKILLS_PATH: &str = "/sandbox/.claude/skills";
 /// unreachable sandbox is an error, never a host mirror served as truth (the
 /// learned `rightx-*` packages exist only in the guest).
 const SANDBOX_UNREACHABLE_DETAIL: &str = "sandbox_unreachable: no sandbox handle";
-// These two scripts MUST stay single-line: OpenShell's gRPC `ExecSandbox`
-// rejects any command argument containing a real newline/CR byte, and each is
-// passed as one `sh -c <script>` arg. Rust's `\`-line-continuation strips the
-// trailing newline AND the next line's leading whitespace, so the source
+// These two scripts are kept single-line: each is passed as one
+// `sh -c <script>` argv entry, and the `;`-joined form keeps the guest
+// command line readable in exec traces. Rust's `\`-line-continuation strips
+// the trailing newline AND the next line's leading whitespace, so the source
 // indentation is cosmetic — the space before each `\` is the statement
-// separator. Do not reflow into a raw multi-line string. `script_constants_tests`
-// guards this; `printf '%s\\n'` is a literal backslash+n for printf, not 0x0A.
+// separator. `printf '%s\\n'` is a literal backslash+n for printf, not 0x0A.
 const SANDBOX_LIST_SKILLS_SCRIPT: &str = "cd \"$1\" 2>/dev/null || exit 0; \
      limit=\"$2\"; \
      count=0; \
@@ -454,29 +453,7 @@ async fn spend_by_skill(
     Ok(right_dashboard::read_model::learning::skill_spend_by_skill(&conn).await?)
 }
 
-#[cfg(test)]
-mod script_constants_tests {
-    use super::{SANDBOX_LIST_SKILLS_SCRIPT, SANDBOX_READ_SKILL_SCRIPT};
-
-    /// OpenShell's gRPC `ExecSandbox` rejects any command argument that
-    /// contains a real newline or carriage-return byte. These scripts are
-    /// passed as a single `sh -c <script>` argument, so they MUST stay
-    /// single-line. The only `\n` they may carry is the two-char escaped
-    /// `\n` handed to `printf` (a backslash followed by `n`), never a real
-    /// 0x0A byte. This fast guard fails without needing a live sandbox, so a
-    /// reintroduced multi-line script is caught in the normal test suite.
-    #[test]
-    fn dashboard_skill_scripts_have_no_real_newline_bytes() {
-        for (name, script) in [
-            ("SANDBOX_LIST_SKILLS_SCRIPT", SANDBOX_LIST_SKILLS_SCRIPT),
-            ("SANDBOX_READ_SKILL_SCRIPT", SANDBOX_READ_SKILL_SCRIPT),
-        ] {
-            assert!(
-                !script.contains('\n') && !script.contains('\r'),
-                "{name} contains a real newline/CR byte; OpenShell ExecSandbox \
-                 rejects command arguments with newlines — keep it single-line \
-                 (`;`-joined statements; use \\\\n for printf)"
-            );
-        }
-    }
-}
+// The former `script_constants_tests` module asserted these scripts carried no
+// real newline byte, because OpenShell's gRPC `ExecSandbox` rejected such
+// arguments. Microsandbox passes argv through verbatim, so that constraint no
+// longer exists and the guard asserted nothing about behavior.

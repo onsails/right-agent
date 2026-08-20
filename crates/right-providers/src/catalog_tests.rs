@@ -1,6 +1,6 @@
 use super::*;
 
-/// The catalog as it was in `right_openshell::providers::profile_catalog()`:
+/// The catalog as the retired OpenShell gateway's `profile_catalog()` had it:
 /// slug, env var, display name, and rendered category, in order. Any drift
 /// here is a dashboard-visible change to `/provider-types`.
 const EXPECTED: &[(&str, &str, &str, &str)] = &[

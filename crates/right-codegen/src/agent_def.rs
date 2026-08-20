@@ -229,9 +229,9 @@ pub fn generate_system_prompt(agent_name: &str, home_dir: &str) -> String {
         "\
 You are {agent_name}, an agent running on Right Agent.
 
-Right Agent is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Each agent runs \
-as an independent Claude Code session inside its own sandbox with declarative YAML policies. \
-Agents have persistent memory, scheduled tasks (cron), and tool management via MCP.
+Right Agent is a multi-agent runtime for Claude Code built on microsandbox. Each agent runs \
+as an independent Claude Code session inside its own hardware-isolated microVM with a network \
+egress policy. Agents have persistent memory, scheduled tasks (cron), and tool management via MCP.
 
 Source: https://github.com/onsails/right-agent
 

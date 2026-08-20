@@ -15,7 +15,12 @@ const UPGRADE_INTERVAL: Duration = Duration::from_secs(8 * 3600);
 
 /// Timeout for the in-guest `claude upgrade` (2 minutes).
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(120);
-const CLAUDE_UPGRADE_SCRIPT: &str = r#"output="$(claude upgrade 2>&1)"
+// `bash -lc` reads the *invoking user's* login profile, and guest execs run as
+// root, whose HOME is not /sandbox — so /sandbox/.bashrc never runs and the
+// agent's own /sandbox/.local/bin stays off PATH. Source the env script
+// explicitly, exactly as the turn and keepalive paths do.
+const CLAUDE_UPGRADE_SCRIPT: &str = r#"if [ -r /sandbox/.right/env.sh ]; then . /sandbox/.right/env.sh; fi
+output="$(claude upgrade 2>&1)"
 status=$?
 printf '%s\n' "$output"
 if [ "$status" -eq 1 ]; then

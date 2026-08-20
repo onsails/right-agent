@@ -16,9 +16,6 @@ if [ -z "$PROMPT" ]; then
   exit 1
 fi
 
-# TODO: wrap in openshell when available
-# openshell sandbox create --policy "$SCRIPT_DIR/policies/default.yaml" -- \
-
 exec claude \
   --append-system-prompt "$PROMPT" \
   --dangerously-skip-permissions \

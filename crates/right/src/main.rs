@@ -8,6 +8,7 @@ pub(crate) mod internal_api;
 pub(crate) mod internal_api_providers;
 pub(crate) mod learning;
 mod memory_server;
+pub(crate) mod migrate_sandbox;
 pub(crate) mod progress;
 mod restore;
 pub(crate) mod right_backend;
@@ -34,17 +35,12 @@ pub(crate) const MAIN_PROMPT_LABELS: &[&str] = &[
     "memory bank id:",
     // resolve_claude_setup_token
     "claude setup token:",
-    // prompt_dependencies: missing-binary install confirms
-    "install openshell now?",
-    "start openshell gateway now?",
     // cmd_agent_destroy
     "create backup before destroying?",
     // cmd_agent_destroy: dynamic confirm — agent_name varies, prefix is the static portion
     "permanently destroy agent '",
     // cmd_agent_rebootstrap: dynamic confirm — agent_name varies, prefix is the static portion
     "rebootstrap agent '",
-    // cmd_agent_config: sandbox migration confirm
-    "migrate sandbox now? (backup old, create new, restore data)",
 ];
 
 #[cfg(test)]
@@ -117,6 +113,24 @@ mod cli_parse_tests {
             };
 
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    /// The config parser refuses to start an unmigrated agent and names this
+    /// command verbatim, so the command must exist under exactly that name.
+    #[test]
+    fn migrate_sandbox_is_spelled_the_way_the_config_error_promises() {
+        let cli = Cli::try_parse_from(["right", "agent", "migrate-sandbox", "finance"])
+            .expect("`right agent migrate-sandbox <agent>` must parse");
+        match cli.command {
+            Commands::Agent {
+                command: AgentCommands::MigrateSandbox { name },
+            } => assert_eq!(name, "finance"),
+            _ => panic!("migrate-sandbox did not parse into its own subcommand"),
+        }
+        assert!(
+            right_agent_config::OPENSHELL_UNMIGRATED.contains("right agent migrate-sandbox"),
+            "the rejection message must point at the command that fixes it"
+        );
     }
 
     #[test]
@@ -576,6 +590,15 @@ pub enum AgentCommands {
         #[command(subcommand)]
         command: AgentProvidersCommands,
     },
+    /// Move an agent out of its OpenShell sandbox into a microsandbox VM.
+    /// The old sandbox is deleted only after the restore is verified; any
+    /// earlier failure leaves the agent exactly as it was, so a failed
+    /// migration can simply be re-run.
+    #[command(name = "migrate-sandbox")]
+    MigrateSandbox {
+        /// Agent name
+        name: String,
+    },
 }
 
 /// Skill lifecycle subcommands.
@@ -588,13 +611,13 @@ pub enum AgentSkillCommands {
 /// Provider management subcommands. Same surface the dashboard exposes
 /// via internal-socket REST; this is a non-interactive entry point for
 /// automation. All actions go through the internal API so existing
-/// validation, locking, and gateway-side rollback are reused.
+/// validation, locking, and store-side rollback are reused.
 #[derive(Subcommand)]
 pub enum AgentProvidersCommands {
-    /// Add a provider to an agent. Generic providers route to an
-    /// authored OpenShell profile (hosts + env-var). Built-in
-    /// providers (e.g. `anthropic`, `github`) reuse OpenShell's
-    /// catalog profile. The credential value is taken from
+    /// Add a provider to an agent. Generic providers carry their own
+    /// spec (hosts + env-var). Built-in providers (e.g. `anthropic`,
+    /// `github`) reuse the built-in catalog entry. The credential
+    /// value is taken from
     /// `RIGHT_PROVIDER_CREDENTIAL` env if not given via
     /// `--credential` — passing secrets on argv leaks them to
     /// `ps`, shell history, and journald.
@@ -603,7 +626,7 @@ pub enum AgentProvidersCommands {
         agent: String,
         /// Provider type slug. `generic` requires at least one `--upstream-host`
         /// and `--env-var`; built-in types (e.g. `anthropic`,
-        /// `github`) pull these from OpenShell's profile catalog.
+        /// `github`) pull these from the built-in provider catalog.
         #[arg(long, default_value = "generic")]
         type_: String,
         /// Optional label, used in the resulting provider name
@@ -1381,6 +1404,9 @@ async fn main() -> miette::Result<()> {
             }
             AgentCommands::Skill { command } => cmd_agent_skill(&home, command).await,
             AgentCommands::Providers { command } => cmd_agent_providers(&home, command).await,
+            AgentCommands::MigrateSandbox { name } => {
+                migrate_sandbox::cmd_agent_migrate_sandbox(&home, &name).await
+            }
         },
         Commands::Memory { command } => match command {
             MemoryCommands::List {
@@ -1418,6 +1444,10 @@ async fn main() -> miette::Result<()> {
             let token_entries: std::collections::HashMap<String, String> =
                 serde_json::from_str(&token_map_content)
                     .map_err(|e| miette::miette!("failed to parse token map: {e:#}"))?;
+
+            // One store handle for the whole server: the per-agent backends
+            // and the internal API must answer from the same authority.
+            let providers = internal_api::open_provider_store(&home).await?;
 
             let token_map = {
                 let mut map = std::collections::HashMap::new();
@@ -1466,13 +1496,8 @@ async fn main() -> miette::Result<()> {
                 let agent_config = right_agent::agent::discovery::parse_agent_config(&agent_dir)
                     .ok()
                     .flatten();
-                // Every agent is sandboxed, so the mTLS dir is available
-                // whenever the gateway preflight succeeds.
-                let mtls_dir = match right_openshell::openshell::preflight_check() {
-                    right_openshell::openshell::OpenShellStatus::Ready(dir) => Some(dir),
-                    _ => None,
-                };
-                let right = right_backend::RightBackend::new(agents_dir.clone(), mtls_dir);
+                let right =
+                    right_backend::RightBackend::new(agents_dir.clone(), Some(providers.clone()));
 
                 // Load existing MCP servers from SQLite and create ProxyBackends.
                 // Collect OAuth entries for refresh scheduling.
@@ -1815,6 +1840,7 @@ async fn main() -> miette::Result<()> {
                 dispatcher,
                 agents_dir,
                 home,
+                providers,
                 refresh_senders,
                 reconnect_managers,
                 allowed_hosts,
@@ -2083,20 +2109,6 @@ async fn cmd_init(
                         .fix("https://docs.anthropic.com/en/docs/claude-code"),
                 );
             }
-        }
-
-        // openshell (warn)
-        match which::which("openshell") {
-            Ok(_) => block.push(
-                right_ui::status(right_ui::Glyph::Ok)
-                    .noun("openshell")
-                    .verb("in PATH"),
-            ),
-            Err(_) => block.push(
-                right_ui::status(right_ui::Glyph::Warn)
-                    .noun("openshell")
-                    .verb("not in PATH (optional, sandbox mode)"),
-            ),
         }
 
         // cloudflared (warn)
@@ -3009,123 +3021,14 @@ fn cmd_list(home: &Path) -> miette::Result<()> {
     Ok(())
 }
 
-fn generic_provider_profiles(
-    configs: &[(String, right_agent_config::AgentConfig)],
-) -> miette::Result<Vec<right_openshell::managed_profiles::ManagedProfile>> {
-    let mut providers = Vec::new();
-
-    for (agent_name, config) in configs {
-        for entry in config
-            .sandbox
-            .iter()
-            .flat_map(|sandbox| sandbox.providers.iter())
-        {
-            match &entry.type_ {
-                right_agent_config::ProviderType::Generic => {
-                    let generic = entry.generic.as_ref().ok_or_else(|| {
-                        miette::miette!(
-                            "agent {agent_name} generic provider {} is missing generic config",
-                            entry.name
-                        )
-                    })?;
-                    providers.push(
-                        right_openshell::managed_profiles::GenericProviderProfileInput {
-                            name: &entry.name,
-                            upstream_hosts: &generic.upstream_hosts,
-                            upstream_path_prefix: generic.upstream_path_prefix.as_deref(),
-                            env_var: &generic.env_var,
-                        },
-                    );
-                }
-                right_agent_config::ProviderType::BuiltIn(_) => {}
-            }
-        }
-    }
-
-    Ok(right_openshell::managed_profiles::generic_provider_profiles(providers))
-}
-
-/// Map each managed-profile id to the sandbox attachments that reference it,
-/// derived from loaded agent configs. Generic providers map by
-/// `generic_provider_profile_id(name)`; built-in providers map by their gateway
-/// profile id, which is the slug verbatim (matches `provider_gateway_type` in
-/// `internal_api_providers.rs` — Right-managed built-ins already carry their
-/// `right-*` id, e.g. `right-github`/`right-fal`; non-managed slugs like
-/// `github`/`anthropic` produce ids absent from `managed_profiles()` and are
-/// harmlessly skipped by the heal loop).
-fn managed_profile_attachments(
-    configs: &[(String, right_agent_config::AgentConfig)],
-) -> std::collections::HashMap<String, Vec<right_openshell::providers::ProfileAttachment>> {
-    let mut map: std::collections::HashMap<
-        String,
-        Vec<right_openshell::providers::ProfileAttachment>,
-    > = std::collections::HashMap::new();
-    for (agent_name, cfg) in configs {
-        let Some(sandbox) = cfg.sandbox.as_ref() else {
-            continue;
-        };
-        // Match the creation convention (`right-<agent>`, fitted, when no explicit
-        // name) and the supervisor's resolved name — a bare `<agent>` fallback
-        // would target a non-existent sandbox, so the heal's delete would hit the
-        // real sandbox's still-referenced profile and re-trigger the abort.
-        let sandbox_name =
-            right_openshell::openshell::resolve_sandbox_name(agent_name, sandbox.name.as_deref());
-        for entry in cfg.providers() {
-            let profile_id = match &entry.type_ {
-                right_agent_config::ProviderType::Generic => {
-                    right_openshell::managed_profiles::generic_provider_profile_id(&entry.name)
-                }
-                right_agent_config::ProviderType::BuiltIn(slug) => slug.clone(),
-            };
-            map.entry(profile_id).or_default().push(
-                right_openshell::providers::ProfileAttachment {
-                    sandbox_name: sandbox_name.clone(),
-                    provider_name: entry.name.clone(),
-                },
-            );
-        }
-    }
-    map
-}
-
-/// Heal every profile `ensure_profiles` reported as `DriftedSkipped`, using the
-/// detach-dance primitive against all known referencing attachments. Generic and
-/// Right-managed built-in (`right-github`/`right-fal`) profiles are both healed:
-/// the attachment map resolves built-in ids identically to gateway attach.
-async fn heal_drifted_managed_profiles(
-    client: &mut right_openshell::managed_profiles::OpenShellGrpcClient,
-    configs: &[(String, right_agent_config::AgentConfig)],
-    outcomes: &[right_openshell::managed_profiles::EnsureOutcome],
-) -> miette::Result<()> {
-    use right_openshell::managed_profiles::EnsureOutcome;
-    let attachments = managed_profile_attachments(configs);
-    let all_profiles = {
-        let mut p = right_openshell::managed_profiles::managed_profiles();
-        p.extend(generic_provider_profiles(configs)?);
-        p
-    };
-    for outcome in outcomes {
-        let EnsureOutcome::DriftedSkipped(id) = outcome else {
-            continue;
-        };
-        let Some(mp) = all_profiles.iter().find(|m| m.id() == *id) else {
-            continue;
-        };
-        let desired = right_openshell::managed_profiles::desired_profile_for(client, mp)
-            .await
-            .map_err(|e| miette::miette!("author desired profile {id} for heal: {e:#}"))?;
-        let atts = attachments.get(id).cloned().unwrap_or_default();
-        right_openshell::providers::update_referenced_profile(client, &atts, desired)
-            .await
-            .map_err(|e| miette::miette!("heal drifted managed profile {id}: {e:#}"))?;
-        tracing::info!(profile = %id, "up: healed drifted managed profile");
-    }
-    Ok(())
-}
-
 struct UpAgentDiscovery {
     agents: Vec<right_agent::agent::AgentDef>,
     issues: Vec<String>,
+    /// Agents whose config is well-formed but still points at an OpenShell
+    /// sandbox. Kept apart from `issues` because this is a transitional state
+    /// with a known fix, not a broken config: it must not stop the agents that
+    /// *can* run from starting.
+    unmigrated: Vec<String>,
 }
 
 fn discover_up_agents(
@@ -3164,6 +3067,7 @@ fn discover_up_agents(
 
     let mut agents = Vec::new();
     let mut issues = Vec::new();
+    let mut unmigrated = Vec::new();
     for path in paths {
         let name = path
             .file_name()
@@ -3171,10 +3075,36 @@ fn discover_up_agents(
             .unwrap_or("<invalid>");
         match right_agent::agent::discover_single_agent(&path) {
             Ok(agent) => agents.push(agent),
-            Err(error) => issues.push(format!("{name}: configuration failed: {error:#}")),
+            Err(error) => {
+                // The strict parser rejects `sandbox.mode: openshell`, which is
+                // exactly how an unmigrated agent is kept from starting. Read
+                // the raw yaml to tell that expected state apart from a config
+                // that is actually malformed.
+                if is_unmigrated_agent(&path) {
+                    unmigrated.push(name.to_owned());
+                } else {
+                    issues.push(format!("{name}: configuration failed: {error:#}"));
+                }
+            }
         }
     }
-    Ok(UpAgentDiscovery { agents, issues })
+    Ok(UpAgentDiscovery {
+        agents,
+        issues,
+        unmigrated,
+    })
+}
+
+/// Whether `agent.yaml` is a well-formed config that simply has not been
+/// migrated yet.
+fn is_unmigrated_agent(agent_dir: &Path) -> bool {
+    let Ok(yaml) = std::fs::read_to_string(agent_dir.join("agent.yaml")) else {
+        return false;
+    };
+    matches!(
+        crate::migrate_sandbox::migration_source(&yaml),
+        Ok(crate::migrate_sandbox::MigrationSource::OpenShell { .. })
+    )
 }
 
 fn readiness_error(issues: &[String]) -> miette::Report {
@@ -3372,10 +3302,27 @@ async fn cmd_up(
     // checks of other selected agents.
     let agents_dir = right_config::agents_dir(home);
     let discovery = discover_up_agents(&agents_dir, agents_filter.as_deref())?;
-    if discovery.agents.is_empty() && discovery.issues.is_empty() {
+    if discovery.agents.is_empty() && discovery.issues.is_empty() && discovery.unmigrated.is_empty()
+    {
         return Err(miette::miette!(
             "no agents found. Run `right agent init <name>` to create one."
         ));
+    }
+    // An unmigrated agent cannot start, but it must not hold back the ones
+    // that can: say plainly which are sitting out and how to bring them over.
+    if !discovery.unmigrated.is_empty() {
+        for name in &discovery.unmigrated {
+            eprintln!(
+                "Agent `{name}` still lives in an OpenShell sandbox and is not being started. \
+                 Move it over with: right agent migrate-sandbox {name}"
+            );
+        }
+        if discovery.agents.is_empty() {
+            return Err(miette::miette!(
+                help = "Run `right agent migrate-sandbox <name>` for each, then rerun `right up`",
+                "every selected agent still lives in an OpenShell sandbox"
+            ));
+        }
     }
     let mut agents = discovery.agents;
 
@@ -3404,67 +3351,6 @@ async fn cmd_up(
         "up: readiness"
     );
     t_phase = std::time::Instant::now();
-
-    let any_sandboxed = !agents.is_empty();
-
-    // Provision RightClaw-owned provider profiles (right-*) to the gateway,
-    // once per gateway, before bots start. Only when there is an agent to
-    // start — zero agents means no managed profiles are needed, and we must not
-    // let provisioning gate `right up` for a host with no agents at all.
-    // FAIL FAST on error.
-    if any_sandboxed {
-        use right_openshell::openshell::{OpenShellStatus, connect_grpc, preflight_check};
-        // The preflight above already ensured the gateway is Ready (or returned
-        // an error). Re-check and FAIL FAST on anything else rather than silently
-        // skipping: a non-Ready gateway here means sandboxed agents would start
-        // without their right-* profiles, which must surface — not be swallowed.
-        let mtls_dir = match preflight_check() {
-            OpenShellStatus::Ready(dir) => dir,
-            other => return Err(openshell_status_error(other)),
-        };
-        let mut client = connect_grpc(&mtls_dir)
-            .await
-            .map_err(|e| miette::miette!("provision profiles: connect gateway: {e:#}"))?;
-
-        // Enable the gateway-global `providers_v2_enabled` setting before any
-        // sandbox or provider work. Fresh Linux gateways default it to false,
-        // which silently breaks generic-provider credential substitution
-        // (the proxy denies CONNECT because the terminated endpoint is never
-        // composed). FATAL when any agent declares providers (the feature is
-        // load-bearing for them); WARNING-only otherwise so a gateway that
-        // does not yet support the setting cannot gate `right up`.
-        let any_providers = agents.iter().any(|a| {
-            a.config
-                .as_ref()
-                .and_then(|c| c.sandbox.as_ref())
-                .map(|s| !s.providers.is_empty())
-                .unwrap_or(false)
-        });
-        match right_openshell::providers::ensure_v2_enabled(&mut client).await {
-            Ok(()) => tracing::info!("up: providers_v2_enabled"),
-            Err(e) if any_providers => {
-                return Err(miette::miette!("enable providers_v2_enabled failed: {e:#}"));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = format!("{e:#}"),
-                    "up: enable providers_v2_enabled failed (no agent declares providers — continuing)"
-                );
-            }
-        }
-
-        let mut profiles = right_openshell::managed_profiles::managed_profiles();
-        let loaded_agent_configs: Vec<(String, right_agent_config::AgentConfig)> = agents
-            .iter()
-            .filter_map(|a| a.config.as_ref().map(|cfg| (a.name.clone(), cfg.clone())))
-            .collect();
-        profiles.extend(generic_provider_profiles(&loaded_agent_configs)?);
-        let outcomes = right_openshell::managed_profiles::ensure_profiles(&mut client, &profiles)
-            .await
-            .map_err(|e| miette::miette!("provision managed profiles failed: {e:#}"))?;
-        tracing::info!(?outcomes, "up: managed_profiles_provisioned");
-        heal_drifted_managed_profiles(&mut client, &loaded_agent_configs, &outcomes).await?;
-    }
 
     // Download any whisper models needed by STT-enabled agents.
     {
@@ -3592,28 +3478,6 @@ async fn cmd_up(
     }
 
     Ok(())
-}
-
-/// Convert an `OpenShellStatus` into a user-facing miette error.
-fn openshell_status_error(status: right_openshell::openshell::OpenShellStatus) -> miette::Report {
-    match status {
-        right_openshell::openshell::OpenShellStatus::Ready(_) => unreachable!(),
-        right_openshell::openshell::OpenShellStatus::NotInstalled => miette::miette!(
-            help = "Install from https://github.com/NVIDIA/OpenShell — every agent runs sandboxed",
-            "OpenShell is not installed"
-        ),
-        right_openshell::openshell::OpenShellStatus::NoGateway(_) => miette::miette!(
-            help = "Run `systemctl --user restart openshell-gateway`\n  \
-                    (the unit ships with the OpenShell installer)",
-            "OpenShell gateway is not running"
-        ),
-        right_openshell::openshell::OpenShellStatus::BrokenGateway(mtls_dir) => miette::miette!(
-            help = "Run `systemctl --user restart openshell-gateway` to regenerate the mTLS certs",
-            "OpenShell gateway exists but mTLS certificates are missing at {}\n\n  \
-             The gateway may be in a broken state.",
-            mtls_dir.display()
-        ),
-    }
 }
 
 /// Fail fast if a required port is already occupied by a stale process.
@@ -4732,8 +4596,7 @@ async fn cmd_agent_destroy(
             .as_ref()
             .and_then(|c| c.sandbox.as_ref())
             .and_then(|s| s.name.as_deref());
-        let sb_name =
-            right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+        let sb_name = right_sandbox::resolve_sandbox_name(agent_name, explicit_sandbox_name);
         println!("  Sandbox: {sb_name}");
         let db_path = agent_dir.join("data.db");
         if db_path.exists()
@@ -5197,16 +5060,13 @@ mod tests {
         AgentReadinessBackend, ConfigCommands, MemoryCommands, RestoreCleanupPlan,
         cleanup_failed_restore_agent_dir, cleanup_failed_restore_with,
         copy_agent_backup_config_files, copy_agent_restore_config_files,
-        copy_database_snapshot_for_restore, discover_up_agents, generic_provider_profiles,
-        managed_profile_attachments, non_interactive_readiness_result, remove_database_sidecars,
-        resolve_agent_db, restore_recap, restored_mcp_auth_method, run_up_preflight,
-        truncate_content, validate_agent_readiness_with, validate_configured_tunnel_with,
-        write_managed_settings,
+        copy_database_snapshot_for_restore, discover_up_agents, non_interactive_readiness_result,
+        remove_database_sidecars, resolve_agent_db, restore_recap, restored_mcp_auth_method,
+        run_up_preflight, truncate_content, validate_agent_readiness_with,
+        validate_configured_tunnel_with, write_managed_settings,
     };
 
-    use right_agent_config::{
-        AgentConfig, GenericProvider, ProviderEntry, ProviderType, SandboxConfig,
-    };
+    use right_agent_config::{AgentConfig, SandboxConfig};
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
@@ -5350,6 +5210,48 @@ mod tests {
         assert_eq!(downstream_calls.get(), 0);
     }
 
+    /// An agent still on OpenShell cannot start, but it is a transitional
+    /// state with a known fix — not a broken config. It must be reported
+    /// separately so it never blocks the agents that are already migrated,
+    /// which is what made `right up` refuse the whole host after one agent
+    /// was migrated.
+    #[test]
+    fn an_unmigrated_agent_does_not_block_the_migrated_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(agents_dir.join("migrated")).unwrap();
+        std::fs::create_dir_all(agents_dir.join("stillopenshell")).unwrap();
+        std::fs::create_dir_all(agents_dir.join("broken")).unwrap();
+        std::fs::write(
+            agents_dir.join("migrated/agent.yaml"),
+            "telegram_token: \"123:test\"\nsandbox:\n  name: migrated\n",
+        )
+        .unwrap();
+        std::fs::write(
+            agents_dir.join("stillopenshell/agent.yaml"),
+            "telegram_token: \"123:test\"\nsandbox:\n  mode: openshell\n  name: right-old\n",
+        )
+        .unwrap();
+        std::fs::write(agents_dir.join("broken/agent.yaml"), "sandbox: [").unwrap();
+
+        let discovery = discover_up_agents(&agents_dir, None).unwrap();
+
+        let started: Vec<&str> = discovery.agents.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            started,
+            ["migrated"],
+            "a migrated agent must still start when a sibling is unmigrated"
+        );
+        assert_eq!(discovery.unmigrated, ["stillopenshell"]);
+        assert_eq!(
+            discovery.issues.len(),
+            1,
+            "only the genuinely malformed config is an issue: {:?}",
+            discovery.issues
+        );
+        assert!(discovery.issues[0].starts_with("broken:"));
+    }
+
     #[tokio::test]
     async fn readiness_failure_prevents_downstream_up_work() {
         let downstream_calls = std::cell::Cell::new(0_u8);
@@ -5382,29 +5284,6 @@ mod tests {
             issues.is_empty(),
             "an interactively repaired agent leaves no issue behind: {issues:?}"
         );
-    }
-
-    fn config_with_provider(provider: ProviderEntry) -> AgentConfig {
-        AgentConfig {
-            sandbox: Some(SandboxConfig {
-                name: None,
-                providers: vec![provider],
-            }),
-            ..AgentConfig::default()
-        }
-    }
-
-    fn generic_provider(name: &str) -> ProviderEntry {
-        ProviderEntry {
-            name: name.to_string(),
-            type_: ProviderType::Generic,
-            label: None,
-            generic: Some(GenericProvider {
-                env_var: "MY_API_KEY".to_string(),
-                upstream_hosts: vec!["api.acme.com".to_string()],
-                upstream_path_prefix: None,
-            }),
-        }
     }
 
     #[test]
@@ -5520,104 +5399,6 @@ mod tests {
         };
 
         validate_configured_tunnel_with(&config, Path::new("definitely-absent")).unwrap();
-    }
-
-    #[test]
-    fn generic_provider_profiles_authors_one_per_generic_entry() {
-        let config = config_with_provider(generic_provider("right-acme"));
-
-        let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)]).unwrap();
-
-        assert_eq!(profiles.len(), 1);
-        assert_eq!(
-            profiles[0].id(),
-            right_openshell::managed_profiles::generic_provider_profile_id("right-acme")
-        );
-    }
-
-    #[test]
-    fn managed_profile_attachments_resolves_unnamed_sandbox_to_creation_convention() {
-        // sandbox.name = None must resolve to `right-<agent>` (the creation
-        // convention) — a bare `<agent>` would target a non-existent sandbox, so
-        // the heal's delete would hit the real sandbox's still-referenced profile.
-        let config = config_with_provider(generic_provider("right-acme"));
-        let map = managed_profile_attachments(&[("agent-a".to_string(), config)]);
-        let id = right_openshell::managed_profiles::generic_provider_profile_id("right-acme");
-        let atts = map.get(&id).expect("attachment for the generic profile");
-        assert_eq!(atts.len(), 1);
-        assert_eq!(atts[0].sandbox_name, "right-agent-a");
-        assert_eq!(atts[0].provider_name, "right-acme");
-    }
-
-    #[test]
-    fn generic_provider_profiles_dedupes_duplicate_provider_names() {
-        let configs = [
-            (
-                "agent-a".to_string(),
-                config_with_provider(generic_provider("right-acme")),
-            ),
-            (
-                "agent-b".to_string(),
-                config_with_provider(generic_provider("right-acme")),
-            ),
-        ];
-
-        let profiles = generic_provider_profiles(&configs).unwrap();
-
-        assert_eq!(profiles.len(), 1);
-        assert_eq!(
-            profiles[0].id(),
-            right_openshell::managed_profiles::generic_provider_profile_id("right-acme")
-        );
-    }
-
-    #[test]
-    fn generic_provider_profiles_skips_built_in_provider() {
-        let config = config_with_provider(ProviderEntry {
-            name: "right-anthropic".to_string(),
-            type_: ProviderType::BuiltIn("anthropic".to_string()),
-            label: None,
-            generic: None,
-        });
-
-        let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)]).unwrap();
-
-        assert!(profiles.is_empty());
-    }
-
-    #[test]
-    fn generic_provider_profiles_errors_on_missing_generic_config() {
-        let config = config_with_provider(ProviderEntry {
-            name: "right-bad".to_string(),
-            type_: ProviderType::Generic,
-            label: None,
-            generic: None,
-        });
-
-        let err = generic_provider_profiles(&[("agent-a".to_string(), config)])
-            .expect_err("generic provider entries must require generic config");
-        let message = format!("{err:#}");
-
-        assert!(message.contains("agent-a"), "error was: {message}");
-        assert!(message.contains("right-bad"), "error was: {message}");
-    }
-
-    #[test]
-    fn generic_provider_profiles_collects_every_agent_provider() {
-        // Every agent is sandboxed, so no config is skipped: a declared
-        // generic provider always yields a managed profile.
-        let config = AgentConfig {
-            sandbox: Some(SandboxConfig {
-                name: None,
-                providers: vec![generic_provider("right-acme")],
-            }),
-            ..AgentConfig::default()
-        };
-
-        let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)])
-            .expect("generic provider must produce a managed profile");
-
-        assert_eq!(profiles.len(), 1);
     }
 
     #[test]

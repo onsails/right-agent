@@ -227,9 +227,20 @@ const SANDBOXLESS_REMOVED: &str = "`sandbox.mode: none` is no longer supported �
 Run `right agent migrate-sandbox <agent>` to move this agent's host files into a sandbox, \
 then delete the `mode:` line from agent.yaml.";
 
-/// Provider type slug. Built-in slugs are validated against the OpenShell
-/// profile catalog at API boundaries; `claude` is rejected by Right (see
-/// `crates/right/src/internal_api.rs`).
+/// Rejection message for an agent that still lives in an OpenShell sandbox.
+/// Emitted verbatim when an agent.yaml still carries `sandbox: mode: openshell`
+/// — the marker every pre-microsandbox `right agent init` wrote and only
+/// `right agent migrate-sandbox` removes. Starting such an agent would attach
+/// it to an *empty* microsandbox VM while its real home still sits in the
+/// OpenShell sandbox, so it must fail before anything runs. Public so the CLI
+/// can assert the command it advertises actually exists.
+pub const OPENSHELL_UNMIGRATED: &str = "`sandbox.mode: openshell` means this agent's files still live in an OpenShell sandbox, which Right no longer runs. \
+Run `right agent migrate-sandbox <agent>` to move them into a microsandbox VM — it rewrites this agent.yaml for you. \
+Until then the agent cannot start: attaching it to a fresh sandbox would hand it an empty home.";
+
+/// Provider type slug. Built-in slugs are validated against
+/// `right_providers::catalog` at API boundaries; `claude` is reserved for the
+/// in-sandbox Claude Code login flow and is rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 pub enum ProviderType {
@@ -258,8 +269,8 @@ impl serde::Serialize for ProviderType {
     }
 }
 
-/// Generic-only fields. Multi-host; the agent writes the auth header itself,
-/// so no header/scheme field exists (inert for OpenShell static-cred injection).
+/// Generic-only fields. Multi-host; the agent writes the auth header itself
+/// around the injected placeholder, so no header/scheme field exists.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "GenericProviderRaw")]
 pub struct GenericProvider {
@@ -342,10 +353,12 @@ pub struct SandboxConfig {
 }
 
 /// Wire shape of `sandbox:`. It still carries the two retired keys so an
-/// agent.yaml written before the microsandbox migration keeps loading: `mode`
-/// is accepted and ignored (except `none`, which is rejected outright — see
-/// [`SANDBOXLESS_REMOVED`]) and `policy_file` is inert now that OpenShell
-/// policy files are gone. Both keys are dropped one release from now.
+/// agent.yaml written before the microsandbox migration keeps *loading* far
+/// enough to be diagnosed: every `mode:` value is now rejected — `none` as
+/// removed sandboxless mode ([`SANDBOXLESS_REMOVED`]), `openshell` as an
+/// unmigrated agent ([`OPENSHELL_UNMIGRATED`]) — and `policy_file` is inert
+/// now that OpenShell policy files are gone. Both keys are dropped one release
+/// from now.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SandboxConfigRaw {
@@ -364,8 +377,9 @@ impl TryFrom<SandboxConfigRaw> for SandboxConfig {
 
     fn try_from(raw: SandboxConfigRaw) -> Result<Self, Self::Error> {
         match raw.mode.as_deref() {
-            None | Some("openshell") => {}
+            None => {}
             Some("none") => return Err(SANDBOXLESS_REMOVED.to_owned()),
+            Some("openshell") => return Err(OPENSHELL_UNMIGRATED.to_owned()),
             Some(other) => {
                 return Err(format!(
                     "invalid sandbox mode: '{other}'. The `mode:` key is retired; delete it."
@@ -773,8 +787,8 @@ impl Default for AgentConfig {
 
 impl AgentConfig {
     /// Declared `sandbox.providers`, or an empty slice when the `sandbox`
-    /// section is absent. This is the agent-local source for gateway provider
-    /// attach reconciliation; provider endpoints are composed by OpenShell.
+    /// section is absent. This is the agent-local list of provider names the
+    /// store resolves into the sandbox's secret bindings.
     pub fn providers(&self) -> &[ProviderEntry] {
         self.sandbox
             .as_ref()
@@ -857,12 +871,21 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_mode_openshell_is_accepted_and_ignored() {
-        let config: AgentConfig =
-            serde_saphyr::from_str("sandbox:\n  mode: openshell\n  name: right-alpha\n").unwrap();
+    fn sandbox_mode_openshell_is_rejected_as_unmigrated() {
+        let error = serde_saphyr::from_str::<AgentConfig>(
+            "sandbox:\n  mode: openshell\n  name: right-alpha\n",
+        )
+        .unwrap_err();
 
-        let sandbox = config.sandbox.expect("sandbox section");
-        assert_eq!(sandbox.name.as_deref(), Some("right-alpha"));
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("still live in an OpenShell sandbox"),
+            "unexpected error: {rendered}"
+        );
+        assert!(
+            rendered.contains("right agent migrate-sandbox"),
+            "error must name the migration command: {rendered}"
+        );
     }
 
     #[test]
@@ -974,7 +997,7 @@ prefilter_enabled: false
 
     #[test]
     fn sandbox_providers_parses_built_in_entry() {
-        let yaml = "sandbox:\n  mode: openshell\n  providers:\n    - name: foo-anthropic\n      type: anthropic\n";
+        let yaml = "sandbox:\n  providers:\n    - name: foo-anthropic\n      type: anthropic\n";
         let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         let sandbox = cfg.sandbox.unwrap();
         assert_eq!(sandbox.providers.len(), 1);
@@ -987,7 +1010,7 @@ prefilter_enabled: false
 
     #[test]
     fn sandbox_providers_parses_generic_entry() {
-        let yaml = "sandbox:\n  mode: openshell\n  providers:\n    - name: foo-acme\n      type: generic\n      label: acme\n      generic:\n        env_var: ACME_TOKEN\n        header_name: X-Acme-Token\n        upstream_host: api.acme.com\n        upstream_path_prefix: /v1\n";
+        let yaml = "sandbox:\n  providers:\n    - name: foo-acme\n      type: generic\n      label: acme\n      generic:\n        env_var: ACME_TOKEN\n        header_name: X-Acme-Token\n        upstream_host: api.acme.com\n        upstream_path_prefix: /v1\n";
         let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         let entry = &cfg.sandbox.unwrap().providers[0];
         assert_eq!(entry.type_, ProviderType::Generic);
@@ -1060,7 +1083,7 @@ prefilter_enabled: false
 
     #[test]
     fn sandbox_providers_defaults_to_empty() {
-        let yaml = "sandbox: { mode: openshell }";
+        let yaml = "sandbox: { name: right-alpha }";
         let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert!(cfg.sandbox.unwrap().providers.is_empty());
     }

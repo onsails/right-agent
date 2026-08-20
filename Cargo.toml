@@ -18,7 +18,6 @@ members = [
     "crates/right-ui",
     "crates/right-hostpath",
     "crates/right-process",
-    "crates/right-openshell",
     "crates/right-sandbox",
     "crates/right-platform-store",
     "crates/right-providers",
@@ -79,10 +78,6 @@ base64 = "0.22"
 subtle = "2.6"
 axum = "0.8"
 shlex = "2.0"
-tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "codegen", "router"] }
-tonic-prost = "0.14"
-prost = "0.14"
-prost-types = "0.14"
 inquire = "0.9"
 insta = { version = "1.41", features = ["yaml"] }
 notify = "8.0"

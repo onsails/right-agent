@@ -125,13 +125,23 @@ async fn create_rejects_a_reserved_type_and_a_bare_generic_slug() -> Result<()> 
     Ok(())
 }
 
+/// `Credential::absent()` is how the migration seeds a provider it can define
+/// but not fill in, so it must land in exactly the awaiting-credential state
+/// the dashboard renders and the bot's bring-up skips.
 #[tokio::test]
 async fn a_credential_less_record_reports_needs_value() -> Result<()> {
     let (_home, store) = store().await?;
     let created = store
-        .create(builtin("riskoff", "fal-a1b2c3"), cred(""))
+        .create(builtin("riskoff", "fal-a1b2c3"), Credential::absent())
         .await?;
     assert_eq!(created.status, ProviderStatus::NeedsValue);
+    assert!(
+        store
+            .source_ref_binding("riskoff", "fal-a1b2c3")
+            .await
+            .is_err(),
+        "a record awaiting its credential must never produce a binding"
+    );
 
     store
         .rotate("riskoff", "fal-a1b2c3", cred("real-value"))

@@ -810,7 +810,7 @@ async fn execute_job(
         &base_prompt,
         crate::cc::prompt::PromptMode::Cron,
         "/sandbox",
-        "/tmp/right-system-prompt.md",
+        &crate::cc::prompt::sandbox_prompt_file_path("system-prompt"),
         "/sandbox",
         &claude_args,
         mcp_instructions.as_deref(),

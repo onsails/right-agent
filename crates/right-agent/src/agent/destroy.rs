@@ -137,98 +137,6 @@ async fn back_up_sandbox(
     Ok(SandboxBackup::Archived)
 }
 
-/// What the destroy cascade must do to provider records when `deleting` is removed.
-#[derive(Debug, Default, PartialEq)]
-struct DestroyProviderPlan {
-    /// Records to detach from the deleting agent's sandbox (all of its own entries).
-    detach: Vec<String>,
-    /// Records to delete from the gateway (no surviving agent references them).
-    delete: Vec<String>,
-}
-
-/// Decide the provider cascade for destroying `deleting`. `agents` is the full
-/// set of (agent_name, its sandbox.providers) including the agent being deleted.
-/// Pure — no gateway/fs.
-fn plan_destroy_provider_cascade(
-    deleting: &str,
-    agents: &[(String, Vec<right_agent_config::ProviderEntry>)],
-    all_complete: bool,
-) -> DestroyProviderPlan {
-    let mut plan = DestroyProviderPlan::default();
-    let Some((_, deleting_providers)) = agents.iter().find(|(a, _)| a == deleting) else {
-        return plan;
-    };
-    for entry in deleting_providers {
-        plan.detach.push(entry.name.clone());
-        if !all_complete {
-            // Sibling enumeration was incomplete — skip the delete to avoid
-            // removing a gateway record still referenced by an unread agent.
-            continue;
-        }
-        // Delete only when no surviving agent still references this record by
-        // name. Ownership itself lives in providers.db, so a survivor keeping
-        // the record alive needs no agent.yaml edit here.
-        let referenced_elsewhere = agents
-            .iter()
-            .filter(|(a, _)| a != deleting)
-            .any(|(_, ps)| ps.iter().any(|p| p.name == entry.name));
-        if !referenced_elsewhere {
-            plan.delete.push(entry.name.clone());
-        }
-    }
-    plan
-}
-
-/// Enumerate every agent directory under `agents_dir` and load its declared
-/// `sandbox.providers`. Tolerant like `build_peers`: a sibling whose directory
-/// or `agent.yaml` can't be read (or has no providers) contributes an empty list
-/// and is never fatal. Returns `(agent_name, providers)` pairs including the
-/// agent being deleted.
-fn load_agents_with_providers(
-    agents_dir: &Path,
-) -> (Vec<(String, Vec<right_agent_config::ProviderEntry>)>, bool) {
-    let entries = match std::fs::read_dir(agents_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(
-                dir = %agents_dir.display(),
-                error = %format!("{e:#}"),
-                "could not read agents dir for provider refcount; treating as empty"
-            );
-            return (Vec::new(), false);
-        }
-    };
-    let mut agents = Vec::new();
-    let mut all_complete = true;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(String::from) else {
-            continue;
-        };
-        if !path.join("agent.yaml").exists() {
-            continue;
-        }
-        let providers = match crate::agent::parse_agent_config(&path) {
-            Ok(Some(cfg)) => cfg.sandbox.map(|s| s.providers).unwrap_or_default(),
-            Ok(None) => Vec::new(),
-            Err(e) => {
-                tracing::warn!(
-                    agent = %name,
-                    error = %format!("{e:#}"),
-                    "skipping sibling with unreadable agent.yaml during provider refcount"
-                );
-                all_complete = false;
-                Vec::new()
-            }
-        };
-        agents.push((name, providers));
-    }
-    (agents, all_complete)
-}
-
 /// Destroy an agent: stop process, optionally backup, delete sandbox, remove directory, reload PC.
 ///
 /// Non-fatal steps (stop, sandbox delete, PC reload) warn and continue.
@@ -321,7 +229,7 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         result.backup_path = Some(backup_path);
     }
 
-    let sandbox_name_for_cascade = {
+    {
         let explicit_sandbox_name = config
             .as_ref()
             .and_then(|c| c.sandbox.as_ref())
@@ -345,90 +253,49 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
                 "failed to delete Agent Sandbox; continuing destroy"
             ),
         }
-        sb_name
-    };
+    }
 
-    // Cascade-clean provider records on the gateway (best-effort).
-    // Deleting the sandbox above removes its attachments with it, but that
-    // delete can fail (logged, non-fatal) and leave the sandbox — and
-    // therefore the attachments — alive, at which point the gateway rejects
-    // `DeleteProvider` with FailedPrecondition. To stay self-healing per
-    // AGENTS.md, we explicitly detach each of THIS agent's records first
-    // (NotFound = already detached, treat as success), mirroring
-    // `handle_provider_remove`.
+    // Cascade-clean the agent's provider records from the credential store.
     //
-    // A single gateway record may be referenced by several agents, so
-    // `plan_destroy_provider_cascade` REFCOUNTS references and deletes a record
-    // ONLY when no surviving agent references it. Ownership itself lives in
-    // providers.db, not in agent.yaml. The whole block is best-effort: every
-    // failure logs and continues so the agent-directory removal below still runs.
-    if let Some(sandbox) = config.as_ref().and_then(|c| c.sandbox.as_ref())
-        && !sandbox.providers.is_empty()
-    {
-        // Enumerate every sibling agent (including the one being deleted) and its
-        // declared `sandbox.providers`. Tolerant like `build_peers`: a sibling
-        // whose agent.yaml can't be read is skipped, not fatal.
-        let (mut agents, all_complete) = load_agents_with_providers(&agents_dir);
-
-        // The deleting agent's own providers are authoritative from the in-memory
-        // config; never depend on disk enumeration for them (a read_dir blip must
-        // not skip detach/delete of this agent's records).
-        let own_providers = config
-            .as_ref()
-            .and_then(|c| c.sandbox.as_ref())
-            .map(|s| s.providers.clone())
-            .unwrap_or_default();
-        match agents.iter_mut().find(|(a, _)| a == &options.agent_name) {
-            Some((_, ps)) => *ps = own_providers,
-            None => agents.push((options.agent_name.clone(), own_providers)),
-        }
-
-        let plan = plan_destroy_provider_cascade(&options.agent_name, &agents, all_complete);
-
-        let mtls_dir = right_openshell::openshell::default_mtls_dir();
-        match right_openshell::openshell::connect_grpc(&mtls_dir).await {
-            Ok(mut client) => {
-                // Detach all of THIS agent's records from its sandbox.
-                for name in &plan.detach {
-                    match right_openshell::providers::detach_from_sandbox(
-                        &mut client,
-                        &sandbox_name_for_cascade,
-                        name,
-                    )
-                    .await
-                    {
-                        Ok(()) => {}
-                        Err(right_openshell::providers::ProviderError::NotFound(_)) => {
-                            // Already detached — expected when delete_sandbox succeeded.
-                        }
-                        Err(e) => tracing::warn!(
-                            name = %name,
-                            sandbox = %sandbox_name_for_cascade,
-                            error = %format!("{e:#}"),
-                            "failed to detach provider during destroy; continuing"
-                        ),
-                    }
+    // The store is the authority: a record the destroyed agent owned would
+    // otherwise outlive every agent that could rotate it. `remove` re-homes an
+    // owned record to a surviving borrower rather than deleting a credential
+    // someone still declares, and a borrowed reference is only unshared — so
+    // no other agent loses access. Best-effort: every failure logs and
+    // continues so the agent-directory removal below still runs.
+    match right_providers::ProviderStore::open(home).await {
+        Ok(store) => {
+            let held = match store.list(&options.agent_name).await {
+                Ok(held) => held,
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %options.agent_name,
+                        error = %format!("{e:#}"),
+                        "could not list provider records during destroy; continuing"
+                    );
+                    Vec::new()
                 }
-                // Delete ONLY records no surviving agent references.
-                for name in &plan.delete {
-                    match right_openshell::providers::delete_provider(&mut client, name).await {
-                        Ok(()) => {}
-                        Err(right_openshell::providers::ProviderError::NotFound(_)) => {
-                            // Already gone — nothing to clean up.
-                        }
-                        Err(e) => tracing::warn!(
-                            name = %name,
-                            error = %format!("{e:#}"),
-                            "failed to delete provider during destroy; continuing"
-                        ),
-                    }
+            };
+            for record in held {
+                let outcome = if record.is_borrowed() {
+                    store.unshare(&options.agent_name, &record.name).await
+                } else {
+                    store.remove(&options.agent_name, &record.name).await
+                };
+                if let Err(e) = outcome {
+                    tracing::warn!(
+                        agent = %options.agent_name,
+                        provider = %record.name,
+                        error = %format!("{e:#}"),
+                        "failed to clean up provider record during destroy; continuing"
+                    );
                 }
             }
-            Err(e) => tracing::warn!(
-                error = %format!("{e:#}"),
-                "could not connect to openshell gateway for provider cleanup; continuing destroy"
-            ),
         }
+        Err(e) => tracing::warn!(
+            error = %format!("{e:#}"),
+            "could not open the provider store for destroy cleanup; continuing"
+        ),
     }
 
     std::fs::remove_dir_all(&agent_dir).map_err(|e| {

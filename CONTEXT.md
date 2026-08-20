@@ -12,7 +12,7 @@ The isolated execution environment of one Agent: a persistent, named microVM. Ev
 
 ## Sandbox Backend
 
-The runtime that creates and runs Agent Sandboxes. OpenShell is the legacy backend; microsandbox is the current backend. Selected at the platform level, not per Agent.
+The runtime that creates and runs Agent Sandboxes. microsandbox is the only backend; OpenShell was the retired predecessor, reachable now only through `right agent migrate-sandbox`.
 
 ## Egress Mode
 

@@ -83,6 +83,17 @@ impl InitAuthProbe {
     }
 }
 
+/// Local status of the stored Claude setup token for a runtime turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeAuthStatus {
+    /// A syntactically valid setup token is stored for the agent.
+    Valid,
+    /// No setup token is stored for the agent.
+    Missing,
+    /// A stored token is empty or contains a line break.
+    Invalid,
+}
+
 fn init_auth_probe_invocation(model: Option<String>) -> crate::cc::invocation::ClaudeInvocation {
     crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: None,
@@ -172,7 +183,12 @@ fn init_auth_probe_succeeded(stdout: &[u8]) -> bool {
 /// argv, both of which are readable by anything that can list guest processes
 /// — so the script only has to confirm it is present.
 fn init_auth_probe_script(args: &[String]) -> String {
-    let mut script = String::from("unset");
+    // Same reason as the turn path: a direct guest exec has no login shell, so
+    // /sandbox/.local/bin is off PATH and `claude` resolves to nothing.
+    let mut script = format!(
+        "if [ -r {env} ]; then . {env}; fi\nunset",
+        env = crate::sandbox::GUEST_ENV_SCRIPT,
+    );
     for name in COMPETING_AUTH_ENV {
         script.push(' ');
         script.push_str(name);
@@ -216,20 +232,41 @@ fn init_auth_verdict(output: crate::cc::sandbox_process::SandboxOutput) -> anyho
     Ok(output.stdout)
 }
 
-async fn run_init_auth_command(
+#[derive(Debug)]
+enum AuthCommandOutcome {
+    Completed(crate::cc::sandbox_process::SandboxOutput),
+    TimedOut,
+}
+
+async fn run_auth_command(
     command: crate::cc::sandbox_process::SandboxCommand,
     timeout: Duration,
-) -> anyhow::Result<Vec<u8>> {
-    let child = command
-        .spawn()
-        .await
-        .context("failed to start Claude authentication validation")?;
-    match crate::cc::invocation::wait_with_output_or_kill(child, timeout)
-        .await
-        .context("Claude authentication validation process failed")?
-    {
-        crate::cc::invocation::ChildOutput::Completed(output) => init_auth_verdict(output),
-        crate::cc::invocation::ChildOutput::TimedOut => {
+) -> anyhow::Result<AuthCommandOutcome> {
+    let outcome = tokio::time::timeout(timeout, async {
+        let child = command
+            .spawn()
+            .await
+            .context("failed to start Claude authentication validation")?;
+        crate::cc::invocation::wait_with_output_or_kill(child, timeout)
+            .await
+            .context("Claude authentication validation process failed")
+    })
+    .await;
+
+    match outcome {
+        Ok(Ok(crate::cc::invocation::ChildOutput::Completed(output))) => {
+            Ok(AuthCommandOutcome::Completed(output))
+        }
+        Ok(Ok(crate::cc::invocation::ChildOutput::TimedOut)) | Err(_) => {
+            Ok(AuthCommandOutcome::TimedOut)
+        }
+        Ok(Err(error)) => Err(error),
+    }
+}
+fn init_auth_outcome(outcome: anyhow::Result<AuthCommandOutcome>) -> anyhow::Result<Vec<u8>> {
+    match outcome? {
+        AuthCommandOutcome::Completed(output) => init_auth_verdict(output),
+        AuthCommandOutcome::TimedOut => {
             anyhow::bail!("Claude authentication validation timed out")
         }
     }
@@ -273,8 +310,29 @@ pub async fn validate_init_auth(probe: InitAuthProbe) -> anyhow::Result<()> {
     let token = resolve_init_auth_token(&probe.agent_dir, probe.candidate_token).await?;
     let args = init_auth_probe_invocation(probe.model).into_args();
     let command = build_init_auth_command(&args, &probe.sandbox, &token);
-    run_init_auth_command(command, INIT_AUTH_PROBE_TIMEOUT).await?;
+    let outcome = run_auth_command(command, INIT_AUTH_PROBE_TIMEOUT).await;
+    init_auth_outcome(outcome)?;
     Ok(())
+}
+
+/// Inspect the stored runtime credential without contacting Claude.
+///
+/// The foreground turn is the runtime API validator. This pre-session check is
+/// deliberately limited to a read-only database load and local syntax checks.
+pub(crate) async fn runtime_auth_status(agent_dir: &Path) -> anyhow::Result<RuntimeAuthStatus> {
+    let connection = right_db::open_connection_readonly(agent_dir)
+        .await
+        .context("open agent database for runtime Claude authentication status")?;
+    let token = right_mcp::credentials::get_auth_token(&connection)
+        .await
+        .context("load runtime Claude authentication credential")?;
+    Ok(match token.as_deref() {
+        None => RuntimeAuthStatus::Missing,
+        Some(token) if token.is_empty() || token.contains(['\r', '\n']) => {
+            RuntimeAuthStatus::Invalid
+        }
+        Some(_) => RuntimeAuthStatus::Valid,
+    })
 }
 
 const REPAIR_NOTICE: &str = "Right MCP stale needs-auth cache was repaired. Use current MCP tool availability, not previous disconnected status.";
@@ -740,7 +798,14 @@ mod tests {
         // The token is not an input to the script: it can only reach the guest
         // through `SandboxCommand::env`, which is not readable from the guest
         // process table the way argv and the script text are.
-        assert!(script.starts_with("unset ANTHROPIC_API_KEY"));
+        // The env script is sourced first so `claude` is on PATH at all; the
+        // competing-credential unset still happens before anything runs.
+        assert!(script.contains(crate::sandbox::GUEST_ENV_SCRIPT));
+        assert!(script.contains("unset ANTHROPIC_API_KEY"));
+        assert!(
+            script.find(crate::sandbox::GUEST_ENV_SCRIPT) < script.find("exec \"$CLAUDE_BIN\""),
+            "PATH must be set up before the binary is resolved: {script}"
+        );
         for name in COMPETING_AUTH_ENV {
             assert!(script.contains(name), "script must unset {name}");
         }
@@ -783,6 +848,45 @@ mod tests {
         // No `system/init` with `apiKeySource: none` means the token was not
         // what authenticated the call.
         assert!(init_auth_verdict(output).is_err());
+    }
+
+    #[test]
+    fn init_auth_timeout_remains_an_error() {
+        let error = init_auth_outcome(Ok(AuthCommandOutcome::TimedOut))
+            .expect_err("init validation must fail fast on timeout");
+
+        assert_eq!(
+            error.to_string(),
+            "Claude authentication validation timed out"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_auth_status_is_local_presence_and_syntax_check() {
+        let temp_dir = tempfile::tempdir().expect("create temporary directory");
+        let connection = right_db::open_connection(temp_dir.path(), true)
+            .await
+            .expect("initialize database");
+
+        assert_eq!(
+            runtime_auth_status(temp_dir.path()).await.unwrap(),
+            RuntimeAuthStatus::Missing
+        );
+
+        for (token, expected) in [
+            ("", RuntimeAuthStatus::Invalid),
+            ("bad\rcredential", RuntimeAuthStatus::Invalid),
+            ("bad\ncredential", RuntimeAuthStatus::Invalid),
+            ("stored-token", RuntimeAuthStatus::Valid),
+        ] {
+            right_mcp::credentials::save_auth_token(&connection, token)
+                .await
+                .unwrap();
+            assert_eq!(
+                runtime_auth_status(temp_dir.path()).await.unwrap(),
+                expected
+            );
+        }
     }
 
     #[tokio::test]

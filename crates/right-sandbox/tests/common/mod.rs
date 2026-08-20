@@ -85,9 +85,8 @@ pub struct FileLock {
 
 /// Take an exclusive advisory lock on `$TMPDIR/<key>.lock`, blocking until free.
 ///
-/// Mirrors `right_openshell::openshell::acquire_test_name_lock`: the lock is
-/// held across worktrees and test binaries, and the kernel releases it if the
-/// holder dies.
+/// The lock is held across worktrees and test binaries, and the kernel
+/// releases it if the holder dies.
 pub fn acquire_file_lock(key: &str) -> FileLock {
     let path = std::env::temp_dir().join(format!("{key}.lock"));
     let file = std::fs::OpenOptions::new()

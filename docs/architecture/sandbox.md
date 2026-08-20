@@ -1,173 +1,224 @@
-# OpenShell sandbox
+# Agent Sandbox
 
 > **Status:** descriptive doc. Re-read and update when modifying this
 > subsystem (see `AGENTS.md` → "Architecture docs split"). Code is
 > authoritative; this file may have drifted.
 
-## OpenShell Sandbox Architecture
+An Agent Sandbox is a microsandbox microVM: hardware-isolated, booted from a
+stock OCI image, driven entirely through the microsandbox SDK. There is no
+SSH, no gateway daemon, and no host execution path. `crates/right-sandbox` is
+the only crate that depends on the SDK; nothing in its public API exposes a
+raw SDK type.
 
-Sandboxes are **persistent** — never deleted automatically. They live as long as the agent lives and survive bot restarts.
+## Migrating out of OpenShell
+
+`right agent migrate-sandbox <agent>` moves an agent whose `agent.yaml` still
+carries `sandbox.mode: openshell` into a microsandbox VM. The order is the
+safety property, so it is worth stating: archive the OpenShell home (kept under
+`~/.right/backups/<agent>/migrate-<stamp>/`), create the new sandbox from the
+same spec builder the bot uses, extract with `--no-same-owner`, hand every
+top-level entry except `.platform` to the guest user, **verify**, only then
+rewrite `agent.yaml`, and only then delete the OpenShell sandbox. Any failure
+before the verification deletes the new sandbox and leaves both the OpenShell
+sandbox and the original `agent.yaml` untouched, so the command can just be run
+again.
+
+The old sandbox's deletion is the one step that may fail without failing the
+command: by then `agent.yaml` is rewritten and the restore is verified, so the
+migration is durable. The recap warns and prints the manual
+`openshell sandbox delete <name>` to run, and only claims the sandbox was
+deleted when deletion was confirmed.
+
+Provider credentials do not come along: OpenShell redacted them on read, so the
+migration reports the provider names the old sandbox had attached and the
+operator re-adds them from the dashboard's `/providers` flow. Writing
+credential-less provider records instead would be worse than useless — the bot
+hard-fails startup on a provider it cannot bind, which would take the dashboard
+down with it.
+
+Everything that still touches OpenShell lives in
+`crates/right/src/migrate_sandbox/legacy_openshell.rs`, a frozen CLI-only
+reader owned by this command and deleted once the migration window closes. The
+`right-openshell` crate, its vendored protos, and its gRPC/mTLS transport are
+gone.
+
+Code: `crates/right/src/migrate_sandbox.rs` (legacy read side, `agent.yaml`
+rewrite) and `right_agent::sandbox_migrate` (guest side: extract, ownership,
+verification).
+
+## Sandbox architecture
+
+Sandboxes are **persistent** — never deleted automatically. They live as long
+as the agent lives, run detached (they survive the bot process exiting), and
+dropping a handle does not stop them. Lifecycle is explicit: `stop`/`destroy`.
 
 ```
-Bot startup:
-  ├─ Resolve OpenShell gateway endpoint (OPENSHELL_GATEWAY_ENDPOINT or openshell status)
-  ├─ openshell_preflight (right_openshell::preflight::openshell_preflight)
-  │   ├─ Spawn `openshell --version` — fail with CliTooOld if < MIN_OPENSHELL_VERSION
-  │   └─ gRPC Health → fail with GatewayTooOld if reported version is too old
-  ├─ gRPC GetSandbox → sandbox phase
-  │   ├─ READY: resolve sandbox id + all sandbox-visible host IPs
-  │   ├─ ERROR / missing / non-ready: start degraded with a cause-specific diagnosis
-  │   └─ phase-query RPC error: start degraded with a gateway diagnosis
-  ├─ Regenerate policy with exact host IPs
-  │   ├─ host.openshell.internal resolved inside sandbox via getent ahosts
-  │   ├─ IPv4 entries become /32; IPv6 entries become /128
-  │   ├─ filesystem policy drift: write policy.yaml and fail startup with migration guidance
-  │   └─ no filesystem drift: write policy.yaml and hot-apply via openshell policy set --wait
-  ├─ generate_ssh_config (on every startup, host-side file)
+Bot startup (bring_up_sandbox, crates/bot/src/sandbox_supervisor.rs):
+  ├─ ensure_runtime_installed — the SDK installs its own runtime on first
+  │   use; no PATH dependency and no operator install step
+  ├─ diagnose_host — /dev/kvm and hypervisor preflight; a hypervisor-less
+  │   host degrades with a cause-specific SandboxDiagnosis, it does not crash
+  ├─ agent_sandbox_spec — image, resources, egress, secret bindings, workdir,
+  │   guest user (the one spec builder shared by the bot and the CLI)
+  ├─ SandboxHandle::create_or_attach — attach wins over create; a sandbox in
+  │   a non-running phase is started from its persisted config
+  ├─ wait_ready (DEFAULT_READY_TIMEOUT, 120s) — covers only the attach race
+  │   (Created/Starting); create/start already block until the guest agent
+  │   is serving
+  ├─ fs_mkdir /sandbox/inbox and /sandbox/outbox — recreated every bring-up
+  │   because a recreated sandbox starts from the stock image
   ├─ initial_sync (blocking — before the Telegram bot starts)
-  │   ├─ Deploy platform files to /sandbox/.platform/ (content-addressed + symlinks)
-  │   ├─ Remove obsolete legacy built-in skill links from /sandbox/.claude/skills/
-  │   └─ Download .claude.json, verify trust keys, fix if CC overwrote them
-  └─ Background sync (every 5 min, re-deploys /sandbox/.platform/, GC stale entries)
+  │   ├─ Deploy platform files to /sandbox/.platform/ (content-addressed +
+  │   │   symlinks)
+  │   ├─ Remove obsolete legacy built-in skill links from
+  │   │   /sandbox/.claude/skills/
+  │   └─ Write .claude.json, verify trust keys, fix if CC overwrote them
+  └─ reverse_sync_md — startup identity mirror (advisory: logged, not fatal)
 
-Sandbox creation (`right init`, `right agent init`):
-  ├─ prepare_staging_dir
-  ├─ generate bootstrap policy with unresolved host.openshell.internal
-  ├─ ensure_sandbox
-  │   ├─ spawn_sandbox
-  │   ├─ wait_for_ready
-  │   └─ wait_for_ssh
-  ├─ resolve host.openshell.internal inside sandbox
-  ├─ hot-apply exact Right MCP allowed_ips via openshell policy set --wait
-  └─ generate_ssh_config
+Create-time-only state (changing it needs a sandbox recreate):
+  ├─ egress policy — the SDK cannot change network policy on a running VM
+  ├─ secret *structure* — which bindings exist and their allowed hosts
+  └─ resources (cpus, memory, writable layer)
 
-Sandbox migration (`right agent config` filesystem-policy drift):
-  ├─ ssh_tar_download old sandbox backup
-  ├─ prepare_staging_dir
-  ├─ spawn_sandbox with bootstrap policy → wait_for_ready → wait_for_ssh
-  ├─ resolve host.openshell.internal inside new sandbox
-  ├─ hot-apply exact Right MCP allowed_ips via openshell policy set --wait
-  ├─ generate_ssh_config for new sandbox
-  ├─ ssh_tar_upload backup into new sandbox
-  └─ update agent.yaml, tear down old ControlMaster, delete old sandbox
+Hot-appliable state:
+  └─ secret *values* — hot_reconcile_providers rotates every declared
+      provider's value; a provider with no binding on the live sandbox is
+      reported as needing a recreate, never silently skipped
 
 Sandbox network:
-  ├─ HTTP CONNECT proxy at 10.200.0.1:3128 (set via HTTPS_PROXY env)
-  ├─ TLS MITM: L7 endpoints use TLS auto-detect (ClientHello peek) and
-  │   termination for credential injection (OpenShell v0.0.30+)
-  │   └─ Sandbox trusts CA via /etc/openshell-tls/ca-bundle.pem
-  ├─ Permissive public web uses hostless public allowed_ips raw tunnels
-  │   (`tls: skip`, no protocol/access) on 80/443 so scoped npm metadata
-  │   paths containing `%2F` are not rejected by L7 request-target parsing
-  └─ Policy controls which domains/IPs are allowed (wildcards supported for scoped public hosts)
+  ├─ Egress is a typed value applied at create: Permissive, or Restrictive
+  │   with a domain-suffix allow list (anthropic.com, claude.com, claude.ai,
+  │   storage.googleapis.com). Suffixes, not globs.
+  ├─ The host destination group is always open on top of the allow list —
+  │   that is how the guest reaches the MCP aggregator on the host.
+  └─ Guest → host loopback services resolve through
+      `host.microsandbox.internal`.
 
-Right MCP host access:
-  ├─ mcp.json points OpenShell agents at http://host.openshell.internal:<port>/mcp
-  ├─ First-create policy omits guessed Right MCP allowed_ips because the sandbox does not exist yet
-  ├─ After READY, Right resolves host.openshell.internal from inside that exact sandbox
-  ├─ Final policy includes every resolved IP as exact IPv4 /32 or IPv6 /128
-  └─ openshell forward/service are not used for Right MCP; they expose sandbox services outward
+Provider secrets (ADR-0003):
+  ├─ A SecretBinding carries references only: the guest-visible env var (which
+  │   holds a placeholder), the host env var the value is read from at
+  │   spawn/rotate time, and the hosts allowed to receive the real value.
+  ├─ The SDK persists the placeholder and the source reference — no secret
+  │   material at rest, and the guest never sees a credential.
+  └─ TLS interception is a **bypass deny-list**: adding any secret enables
+      interception for every destination on the intercepted ports except
+      TLS_BYPASS_HOSTS, which always carries the Anthropic hosts so Claude's
+      own path is never intercepted and needs no guest CA configuration.
 
-Staging dir (minimal bootstrap — platform files deployed via /sandbox/.platform/ during initial_sync):
-  ├─ .claude/settings.json    — CC behavioral flags
+Staging (minimal bootstrap — platform files deployed to /sandbox/.platform/
+during initial_sync):
+  ├─ .claude/settings.json     — CC behavioral flags
   ├─ .claude/reply-schema.json — structured output schema
   ├─ .claude.json              — trust + onboarding
   ├─ mcp.json                  — MCP server entries
   └─ TOOLS.md                  — agent-editable tool notes seeded for turn 1
   EXCLUDED: skills (deployed to /sandbox/.platform/), credentials, plugins
 
-Platform store (/sandbox/.platform/ inside sandbox):
-  ├─ Content-addressed files: settings.json.<hash>, reply-schema.json.<hash>, ...
-  ├─ Content-addressed skill dirs (one per `right_codegen::BUILTIN_SKILL_NAMES`):
-  │     skills/right-skills.<hash>/, skills/right-cron.<hash>/, skills/right-mcp.<hash>/,
-  │     skills/right-learn-skill.<hash>/, skills/right-memory.<hash>/,
-  │     skills/right-reflect.<hash>/
+Platform store (/sandbox/.platform/ inside the guest):
+  ├─ Content-addressed files: settings.json.<hash>, reply-schema.json.<hash>
+  ├─ Content-addressed skill dirs (one per `right_codegen::BUILTIN_SKILL_NAMES`)
   ├─ Symlinked from /sandbox/.claude/ → /sandbox/.platform/
-  ├─ Read-only (chmod a-w after deploy)
+  ├─ Read-only (chmod a-w after deploy) — which only means anything because
+  │   the agent runs as the unprivileged `sandbox` user, not root
   └─ GC removes stale entries after each sync cycle
 ```
 
-Sandbox names use the `right-{agent}` scheme when the candidate is at most 19
-characters. Longer candidates are passed through
-`right_openshell::openshell::fit_sandbox_name`: the first 14 characters are
-followed by `-` and the first four lowercase hexadecimal characters of the
-SHA-256 hash of the full candidate, keeping the result within OpenShell's
-19-character routable-name cap.
+Sandbox names come from `right_sandbox::resolve_sandbox_name`: the explicit
+`sandbox.name` in `agent.yaml` when set, otherwise `right-{agent}`. Both go
+through `fit_sandbox_name`, which maps any string into the SDK's name space
+(1..=128 bytes over `[A-Za-z0-9._-]`, alphanumeric first byte) by collapsing
+invalid characters and, when the result is too long, truncating to
+`{prefix}-{hash8}` where `hash8` is the first 8 hex chars of the SHA-256 of
+the full candidate. It is total: every output passes the SDK validator. Every
+lifecycle path — bot bring-up, `right agent destroy`, `right agent
+rebootstrap` — MUST resolve through this function; two call sites disagreeing
+about an agent's sandbox name is how a destroy orphans a microVM.
 
 Learned skill packages are agent-owned directories under
 `/sandbox/.claude/skills/rightx-*`. The learning MCP tools do not patch
 non-`rightx-*` skill directories and do not copy skill files from sandbox to
 host.
 
-The dashboard may run explicit, read-only OpenShell probes when the user opens
+The dashboard may run explicit, read-only guest probes when the user opens
 Mini App health, identity, or knowledge-skill views. These probes reuse the
-bot-owned `SandboxExec` handle, are bounded by short per-request timeouts, and
-read only the requested dashboard material: sandbox stats, identity files, or
-skill inventory/details. Overview rendering does not run these probes.
-
-Sandbox supervisors inject provider env-var placeholders at boot from the gateway's
-attached-providers list (see `docs/architecture/providers.md`). The gateway proxy
-substitutes the real credential on outbound HTTPS for TLS-terminated endpoints; raw
-tunnels (tls: skip) cannot substitute and Right refuses to attach generic providers
-against those hosts.
+bot-owned sandbox handle, are bounded by short per-request timeouts, and read
+only the requested dashboard material: sandbox stats, identity files, or skill
+inventory/details. Overview rendering does not run these probes.
 
 ### Graceful degrade
 
-When the OpenShell gateway is unreachable at bot startup, `bring_up_sandbox` (in
-`crates/bot/src/sandbox_supervisor.rs`) classifies the failure into a
-cause-specific `GatewayDiagnosis` (summary + ordered fixes) via
-`right_openshell::diagnosis::diagnose_gateway()`, which probes `openshell doctor
-check` and `openshell status`. Recoverable backend/sandbox availability failures —
-Docker down, gateway not started, broken certs, version too old, sandbox not found,
-OpenShell `Phase: Error`, a sandbox that exists but is still starting, or an
-inconclusive connect/phase-query failure — return `Ok(Err(diagnosis))` instead of
-crashing. Genuine non-self-healing config errors (e.g. filesystem-policy drift that
-requires sandbox migration) still propagate as hard failures.
+When the sandbox cannot be brought up, `bring_up_sandbox` (in
+`crates/bot/src/sandbox_supervisor.rs`) classifies the `SandboxError` into a
+cause-specific `SandboxDiagnosis` (summary + ordered fixes) and returns
+`Ok(Err(diagnosis))` instead of crashing. Recoverable availability failures —
+runtime install failure, no hypervisor, boot failure, a sandbox still
+starting, an unreachable guest agent — all take this path. Errors that say
+nothing about backend health (invalid spec, a guest command that failed) fall
+back to `Unreachable`. Genuine non-self-healing config errors still propagate
+as hard failures.
 
 On a degraded start, `lib.rs` logs the diagnosis at ERROR, constructs the
-`SandboxRuntimeHandle` with health `Unavailable`, and continues booting Telegram —
-so incoming messages are handled immediately rather than cycling through process-compose
-restarts.
+`SandboxRuntimeHandle` with health `Unavailable`, and continues booting
+Telegram — so incoming messages are handled immediately rather than cycling
+through process-compose restarts.
 
 The `SandboxSupervisor` task (spawned once per sandboxed agent, outlasting any
-single bring-up attempt) is the sole owner of sandbox lifecycle after startup:
+single bring-up attempt) is the sole writer of `SandboxRuntimeHandle` after
+startup:
 
-- **Recovery loop:** retries `bring_up_sandbox` with a fixed backoff schedule of
-  5 → 10 → 15 → 15 → 30 s (last value repeats). On success it calls
+- **Recovery loop:** retries `bring_up_sandbox` with a fixed backoff schedule
+  of 5 → 10 → 15 → 15 → 30 s (last value repeats). On success it calls
   `handle.set_ready(sandbox)`, spawns the background sync task, and sends a
-  "✅ Sandbox back online" notice to every chat that received an unavailability
-  message during the outage.
+  "✅ Sandbox back online" notice to every chat that received an
+  unavailability message during the outage.
 - **Monitor mode:** when `Ready`, the supervisor waits for a failure report or
   shutdown. Worker, keepalive, and periodic sync failures all call
   `SandboxRuntimeHandle::report_suspected_failure()`; the supervisor verifies
-  each coalesced wake by reading the real OpenShell sandbox phase via
-  `sandbox_phase_status`, degrades on `SANDBOX_PHASE_ERROR` with
-  `GatewayCause::SandboxError`, and ignores transient non-ready phases.
-- **Sync task ownership:** the supervisor seeds the startup sync task (when bring-up
-  succeeded) or skips it (degraded). On degrade-from-ready it aborts the sync task;
-  on recovery it re-spawns it.
+  each coalesced wake by reading the real sandbox phase, degrades on a
+  terminal phase, and ignores transient non-ready phases.
+- **Sync task ownership:** the supervisor seeds the startup sync task (when
+  bring-up succeeded) or skips it (degraded). On degrade-from-ready it aborts
+  the sync task; on recovery it re-spawns it.
 
-`SandboxError` recovery is intentionally diagnostic and retry-based: Right does
-not use Docker, podman, or container-runtime APIs, restart containers, or
-recreate sandboxes. The recovery loop keeps retrying `bring_up_sandbox` with
-backoff and resumes automatically once OpenShell or the operator restores the
-existing sandbox to Ready.
-
-The `ssh_config_path` for sandboxed agents is computed as a deterministic stable
-path (`<home>/run/ssh/<sandbox>.ssh-config`) on both the Ready and degraded
-branches. Bring-up always writes to this exact path, so a snapshot threaded into
-worker/cron/delivery tasks remains correct across degrade and recovery without any
-restart.
+Recovery publishes a *new* handle addressing a newly created VM, which is why
+consumers hold the `SandboxRuntimeHandle` and call `current_sandbox()` per
+unit of work (turn, cron job, delivery, dashboard request) rather than caching
+a `Sandbox` for the process lifetime.
 
 ### User-Local CLI Environment
 
-For OpenShell agents, Right Agent treats `/sandbox/.local/bin` as the canonical
-user-installed executable directory. Startup sync writes
-`/sandbox/.right/env.sh`, ensures `/sandbox/.bashrc` sources it, and the Claude
-invocation wrapper sources the same file with an inline fallback. This makes
-manually installed CLIs and `npm install -g` bins available both to `claude -p`
-turns and to `right agent ssh` shells.
+Right Agent treats `/sandbox/.local/bin` as the canonical user-installed
+executable directory. Startup sync writes `/sandbox/.right/env.sh`, ensures
+`/sandbox/.bashrc` sources it, and the Claude invocation wrapper sources the
+same file with an inline fallback. This makes manually installed CLIs and
+`npm install -g` bins available both to `claude -p` turns and to interactive
+guest shells.
+
+Guest process stdin is buffered through `SandboxStdin`, whose explicit async
+`close` drains every queued chunk through the SDK and awaits the SDK EOF frame.
+Turn, delivery, and reflection paths race the full write-plus-close operation
+against their transport deadline (and foreground stop cancellation) before
+reading stdout. Dropping `SandboxStdin` or cancelling `close` aborts the stdin
+forwarder, so it cannot remain detached in an SDK write/close; completed closes
+still propagate the forwarder's write/close error.
+
+Claude stream-json's top-level `result` event is the authoritative completion
+signal for session-bearing invocations. The microsandbox SDK can deliver that
+terminal stdout record without subsequently emitting `Exited` or closing the
+stream, so consumers finish processing the result, explicitly kill the guest
+exec handle, and use bounded wait/drop cleanup rather than waiting for EOF.
+The result's `is_error` value defines semantic success or failure even when
+transport cleanup reports no usable process exit code.
 
 The managed environment sets `NPM_CONFIG_PREFIX=/sandbox/.local` and
 `NPM_CONFIG_CACHE=/sandbox/.npm`. Agents should not use `sudo` or `~/bin` for
 sandbox tool installs.
+
+### Test coverage
+
+Live-microVM coverage is CI-explicit: tests that boot a real sandbox use
+`#[ignore = "ci-msb: ..."]` with a `ci_msb_` test-name prefix, enforced by
+`crates/right/tests/ci_ignored_contract.rs` and selected by the `sandbox` job
+in `.github/workflows/tests.yml`. That job is opt-in (repository variable
+`SANDBOX_RUNNER`) because it needs a runner exposing `/dev/kvm`. Everything
+that does not need a live VM stays in the default workspace test path.

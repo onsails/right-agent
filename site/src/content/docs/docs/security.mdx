@@ -3,18 +3,16 @@ title: Security model
 description: The sandbox, credential, and network model behind right agent.
 ---
 
-Right Agent enforces security at the infrastructure level. Every agent runs inside an isolated container with declarative policies — not through permission prompts or trust-based configuration.
+Right Agent enforces security at the infrastructure level. Every agent runs inside a hardware-isolated microVM with a declarative network policy — not through permission prompts or trust-based configuration.
 
 ## Sandbox Architecture
 
-Each agent runs inside its own [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox — a k3s container managed via gRPC. Sandboxes are persistent (survive bot restarts) and isolate:
+Each agent runs inside its own [microsandbox](https://github.com/microsandbox/microsandbox) microVM, driven through the microsandbox SDK. Sandboxes are persistent (they run detached and survive bot restarts) and isolate:
 
-- **Filesystem** — agents can only access paths explicitly allowed by policy
-- **Network** — all traffic routes through an HTTPS proxy (`10.200.0.1:3128`) with endpoint allowlists
+- **Kernel and filesystem** — the guest is a separate VM with its own kernel and its own disk; there is no shared filesystem with the host
+- **Network** — egress is a create-time policy: open (`permissive`) or a domain-suffix allowlist (`restrictive`)
 - **Credentials** — each sandbox has its own authentication state, independent of the host
-- **Processes** — agent processes are contained within the sandbox boundary
-
-Sandboxes are Docker containers. Back them up, snapshot them, migrate them — standard container operations apply.
+- **Processes** — agent processes cannot escape the VM boundary
 
 ## Credential Isolation
 
@@ -24,37 +22,31 @@ MCP OAuth tokens and HTTP header secrets are stored per-agent in the host-side S
 
 ### Provider Credentials
 
-Third-party API credentials (provider keys such as `GITHUB_TOKEN`) are held on the OpenShell gateway, never in the sandbox. The sandbox receives only an opaque placeholder env var (`openshell:resolve:env:v…_<NAME>`); the gateway proxy substitutes the real value into outbound requests **after** TLS-terminating the connection. Two consequences for the threat model:
+Third-party API credentials (provider keys such as `GITHUB_TOKEN`) are held in the host-side store `~/.right/providers.db` (mode 0600), never in the sandbox. The guest receives only an opaque placeholder env var (`$MSB_<NAME>`); the real value is substituted into outbound requests on the intercepted connection. Two consequences for the threat model:
 
-- **No exfiltration to the open internet.** Under `network_policy: permissive`, general internet traffic travels through raw `tls: skip` tunnels that the proxy never terminates or inspects, so it forwards the inert placeholder verbatim — the real credential is never substituted onto an arbitrary host. A compromised agent cannot read the credential (it only holds the placeholder) and cannot leak it to an attacker-controlled internet endpoint.
-- **Substitution is not host-scoped (known limitation).** The proxy resolves a placeholder by environment-variable name on *any* TLS-terminated endpoint — not only the owning provider's host. An agent with two or more credentialed providers attached could therefore route one provider's token to another provider's host. The exposure is bounded (only the operator can attach providers and MCP servers) and is a documented OpenShell limitation: credential confinement is not yet enforced at runtime, and endpoint-scoped injection is on OpenShell's roadmap. Tracked in [#92](https://github.com/onsails/right-agent/issues/92).
+- **No exfiltration to the open internet.** A compromised agent cannot read the credential — it only ever holds the placeholder. TLS interception is a bypass deny-list: Anthropic's hosts are never intercepted, and a request to any bypassed host is forwarded verbatim, so the inert placeholder is what reaches it.
+- **Substitution is not provider-scoped (known limitation).** A placeholder is resolved by environment-variable name on any intercepted destination in that binding's allowed-host set — not only the owning provider's host. An agent with two or more credentialed providers attached could therefore route one provider's token to another provider's host. The exposure is bounded (only the operator can attach providers and MCP servers). Tracked in [#92](https://github.com/onsails/right-agent/issues/92).
 
 ## Network Policy
 
-All sandbox network traffic goes through OpenShell's HTTPS proxy:
+An agent's network stance is declared once in `agent.yaml` and applied by the SDK when the microVM is created:
 
-- **Endpoint allowlists** — restrictive mode uses scoped DNS wildcards (e.g., `*.anthropic.com`, `*.claude.ai`); permissive mode uses hostless public `allowed_ips` ranges. OpenShell v0.0.37+ rejects TLD/global DNS wildcards.
-- **TLS termination** — restrictive/L7 endpoints terminate and re-sign TLS with a per-sandbox CA for inspection. OpenShell v0.0.30+ auto-detects TLS; generated L7 endpoints omit deprecated `tls` modes. Permissive public web endpoints use `tls: skip` raw tunnels to avoid L7 request-target rejection for normal public internet traffic such as scoped npm metadata.
-- **Policy hot-reload** — network rules can be updated without restarting the sandbox via `openshell policy set --wait`
+- **`permissive`** — open egress to the public internet.
+- **`restrictive`** — a domain-suffix allowlist (`anthropic.com`, `claude.com`, `claude.ai`, `storage.googleapis.com`). Suffixes cover subdomains, so `anthropic.com` also allows `api.anthropic.com`.
 
-## Declarative Policies
+In both modes the host destination group stays open, which is how the guest reaches the MCP aggregator on the host through `host.microsandbox.internal`.
 
-Each agent gets a generated policy file controlling:
-
-- **Filesystem rules** — read/write paths, binary execution paths
-- **Network rules** — allowed domains, allowed IPs, endpoint protocol/access settings
-- **Binary restrictions** — which executables the agent can run (`path: "**"` for full access, or locked down per-binary)
-
-Policies are regenerated on each `right up` from `agent.yaml` configuration and sandbox override settings.
+Egress is **create-time only** — the SDK cannot change network policy on a running microVM, so changing `network_policy` takes effect on the next sandbox recreate. There is no policy file and no hot-reload.
 
 ## Configuring Policies
 
-**Default behavior:** Out of the box with `network_policy: permissive`, agents can reach public HTTP/HTTPS endpoints through hostless `allowed_ips` ranges. All allowed traffic still goes through OpenShell's proxy; public web HTTPS uses raw `tls: skip` tunnels rather than L7 inspection. Permissive mode is not a DNS wildcard and does not include private/reserved IP ranges.
+**Default behavior:** Out of the box with `network_policy: permissive`, agents can reach the public internet.
 
 With `network_policy: restrictive`, only Anthropic and Claude domains are allowed:
-- `*.anthropic.com`, `anthropic.com`
-- `*.claude.com`, `claude.com`
-- `*.claude.ai`
+- `anthropic.com` (and subdomains)
+- `claude.com` (and subdomains)
+- `claude.ai` (and subdomains)
+- `storage.googleapis.com`
 
 **Setting during init:**
 
@@ -72,30 +64,9 @@ Edit `network_policy` in your agent's `agent.yaml`:
 network_policy: restrictive   # or: permissive
 ```
 
-Then run `right up` to regenerate and apply the policy.
+The change takes effect when the sandbox is next created — it cannot be applied to a running microVM.
 
-**Custom endpoint allowlists:**
-
-For fine-grained control beyond restrictive/permissive, edit the generated policy directly:
-
-```
-~/.right/agents/<name>/policy.yaml
-```
-
-Add endpoint entries under `network_policies` following OpenShell's format. For example, to allow an MCP server in restrictive mode:
-
-```yaml
-  notion_mcp:
-    endpoints:
-      - host: "mcp.notion.com"
-        port: 443
-        protocol: rest
-        access: full
-    binaries:
-      - path: "**"
-```
-
-> **Note:** `right up` regenerates policy files on every launch. Manual edits will be overwritten. Edit the policy after `right up` completes for each run.
+**Reaching an extra host in restrictive mode:** attach it as a provider. A provider declares the hosts its credential may reach, and those hosts become part of what the agent can talk to. There is no hand-edited policy file to add endpoints to.
 
 ## Prompt Injection Defense
 

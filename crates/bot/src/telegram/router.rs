@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use super::BotType;
 use super::handler::{
-    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, RightHome,
+    AgentDir, AgentSettings, IdleTimestamp, InternalApi, PendingAuthRequests, RightHome,
 };
 use super::mention::BotIdentity;
 use super::worker::{DebounceMsg, SessionKey};
@@ -29,7 +29,7 @@ pub(crate) struct HandlerCtx {
     pub(crate) worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     pub(crate) agent_dir: Arc<AgentDir>,
     pub(crate) home: Arc<RightHome>,
-    pub(crate) intercept_slots: Arc<InterceptSlots>,
+    pub(crate) pending_auth: PendingAuthRequests,
     pub(crate) internal_api: Arc<InternalApi>,
     pub(crate) settings: Arc<AgentSettings>,
     pub(crate) idle_ts: Arc<IdleTimestamp>,
@@ -259,7 +259,7 @@ pub(crate) mod test_support {
     use right_agent::agent::allowlist::{AllowlistHandle, AllowlistState};
 
     use super::super::handler::{
-        AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, RightHome,
+        AgentDir, AgentSettings, IdleTimestamp, InternalApi, PendingAuthState, RightHome,
     };
 
     /// Build a `HandlerCtx` with dummy dependencies for handler-free tests
@@ -321,10 +321,7 @@ pub(crate) mod test_support {
             worker_map: Arc::new(DashMap::new()),
             agent_dir: Arc::new(AgentDir(PathBuf::from("/tmp/router-test"))),
             home: Arc::new(RightHome(PathBuf::from("/tmp/router-test"))),
-            intercept_slots: Arc::new(InterceptSlots {
-                auth_code: Arc::new(tokio::sync::Mutex::new(None)),
-                auth_watcher: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            }),
+            pending_auth: Arc::new(tokio::sync::Mutex::new(PendingAuthState::default())),
             internal_api: Arc::new(InternalApi(Arc::new(
                 right_mcp::internal_client::InternalClient::new("/tmp/router-test.sock"),
             ))),

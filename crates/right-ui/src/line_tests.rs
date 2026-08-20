@@ -23,13 +23,13 @@ fn single_line_with_detail() {
 #[test]
 fn single_line_with_fix() {
     let s = status(Glyph::Err)
-        .noun("openshell")
-        .verb("gateway unreachable")
-        .fix("systemctl --user restart openshell-gateway")
+        .noun("sandbox")
+        .verb("runtime unreachable")
+        .fix("systemctl --user restart microsandbox")
         .render(Theme::Mono);
     assert_eq!(
         s,
-        "▐  ✗ openshell  gateway unreachable\n▐    fix: systemctl --user restart openshell-gateway"
+        "▐  ✗ sandbox  runtime unreachable\n▐    fix: systemctl --user restart microsandbox"
     );
 }
 

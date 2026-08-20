@@ -23,7 +23,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, ReadHalf, SimplexStream, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
 
-use right_sandbox::{ChunkedStdin, ExecEvent, ExecRequest, ExecStream, SandboxError, Stdin};
+use right_sandbox::{
+    ChunkedStdin, ExecEvent, ExecRequest, ExecStream, GUEST_USER, SandboxError, Stdin,
+};
 
 use crate::sandbox::{SANDBOX_HOME, Sandbox};
 
@@ -132,7 +134,13 @@ impl SandboxCommand {
             cmd: "/bin/sh".to_owned(),
             args: vec!["-c".to_owned(), self.script.clone()],
             cwd: Some(SANDBOX_HOME.to_owned()),
-            user: None,
+            // Claude Code refuses to run as root, so every guest command — not
+            // just the agent turns — executes as the unprivileged sandbox user
+            // provisioning creates. Stage 1 verified this override; the pilot
+            // surfaced that the turn builder never applied it, which is why
+            // every turn hung: claude printed "--dangerously-skip-permissions
+            // cannot be used with root/sudo privileges" and exited 0.
+            user: Some(GUEST_USER.to_owned()),
             env: self.env.clone(),
             stdin: if self.stdin { Stdin::Pipe } else { Stdin::Null },
             timeout: self.timeout,
@@ -210,7 +218,8 @@ impl SandboxChild {
     }
 
     /// The stdin writer, `Some` at most once and only for a command built with
-    /// [`SandboxCommand::stdin_piped`]. Dropping it sends EOF.
+    /// [`SandboxCommand::stdin_piped`]. Call [`SandboxStdin::close`] after the
+    /// final write to deliver and await guest EOF.
     pub(crate) fn stdin(&mut self) -> Option<SandboxStdin> {
         self.stdin.take()
     }
@@ -255,9 +264,11 @@ impl SandboxChild {
         let mut stderr = Vec::new();
         let mut stdout_reader = self.stdout.take();
         let mut stderr_reader = self.stderr.take();
-        // Drop the stdin writer first: a guest reading to EOF would otherwise
-        // never exit, exactly as with a leaked `ChildStdin`.
-        self.stdin = None;
+        // Explicitly await EOF delivery when the caller did not take stdin.
+        // A guest reading to EOF would otherwise never exit.
+        if let Some(stdin) = self.stdin.take() {
+            stdin.close().await?;
+        }
 
         let drain_stdout = async {
             match stdout_reader.as_mut() {
@@ -324,6 +335,22 @@ pub(crate) enum SandboxProcessError {
         stream: &'static str,
         #[source]
         source: std::io::Error,
+    },
+
+    /// Reading from or writing to the in-process stdin queue failed.
+    #[error("{operation} guest stdin failed: {source}")]
+    StdinPipe {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The stdin forwarder task panicked or the runtime shut down before it
+    /// reported whether guest EOF was delivered.
+    #[error("the guest stdin forwarder ended before reporting completion")]
+    StdinForwarderGone {
+        #[source]
+        source: tokio::task::JoinError,
     },
 
     /// The pump task ended without reporting an exit code — it panicked or
@@ -418,47 +445,117 @@ async fn write_stream(
 
 /// The write end of a guest process's stdin.
 ///
-/// Writes go out through [`ChunkedStdin`], so any payload size is safe.
-/// Dropping the writer sends EOF.
+/// Writes go out through [`ChunkedStdin`], so any payload size is safe. Call
+/// [`close`](Self::close) after the final write to await delivery of guest EOF.
+/// Dropping this handle, or cancelling `close`, aborts the forwarder so it can
+/// never remain detached in an SDK write or close.
 pub(crate) struct SandboxStdin {
     writer: WriteHalf<SimplexStream>,
+    forwarder: Option<tokio::task::JoinHandle<Result<(), SandboxProcessError>>>,
 }
 
 impl SandboxStdin {
     fn new(sink: ChunkedStdin) -> Self {
         let (reader, writer) = tokio::io::simplex(STREAM_BUFFER_BYTES);
-        tokio::spawn(forward_stdin(reader, sink));
-        Self { writer }
+        let forwarder = tokio::spawn(forward_stdin(reader, sink));
+        Self {
+            writer,
+            forwarder: Some(forwarder),
+        }
     }
 
-    /// Write all of `data` to the guest's stdin.
-    pub(crate) async fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
-        self.writer.write_all(data).await
+    /// Write all of `data` to the guest's stdin queue.
+    pub(crate) async fn write_all(&mut self, data: &[u8]) -> Result<(), SandboxProcessError> {
+        self.writer
+            .write_all(data)
+            .await
+            .map_err(|source| SandboxProcessError::StdinPipe {
+                operation: "queueing",
+                source,
+            })
+    }
+
+    /// Close the local writer, then await delivery of all queued bytes and EOF
+    /// to the guest. Cancelling this future aborts the delivery task.
+    pub(crate) async fn close(mut self) -> Result<(), SandboxProcessError> {
+        self.writer
+            .shutdown()
+            .await
+            .map_err(|source| SandboxProcessError::StdinPipe {
+                operation: "closing queue",
+                source,
+            })?;
+        let forwarder = self
+            .forwarder
+            .take()
+            .expect("sandbox stdin must own its forwarder until close");
+        let mut abort_guard = StdinForwarderAbortGuard::new(&forwarder);
+        let result = forwarder.await;
+        abort_guard.disarm();
+        result.map_err(|source| SandboxProcessError::StdinForwarderGone { source })??;
+        Ok(())
+    }
+}
+
+impl Drop for SandboxStdin {
+    fn drop(&mut self) {
+        if let Some(forwarder) = &self.forwarder {
+            forwarder.abort();
+        }
+    }
+}
+
+/// Keeps the forwarder cancellation-safe after its handle moves out of
+/// [`SandboxStdin`] and into the in-progress [`SandboxStdin::close`] future.
+struct StdinForwarderAbortGuard {
+    abort_handle: tokio::task::AbortHandle,
+    armed: bool,
+}
+
+impl StdinForwarderAbortGuard {
+    fn new(forwarder: &tokio::task::JoinHandle<Result<(), SandboxProcessError>>) -> Self {
+        Self {
+            abort_handle: forwarder.abort_handle(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StdinForwarderAbortGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.abort_handle.abort();
+        }
     }
 }
 
 /// Copy the caller's writes into the guest's stdin, chunking below the SDK's
 /// protocol frame cap, and close the guest's stdin on EOF.
-async fn forward_stdin(mut reader: ReadHalf<SimplexStream>, sink: ChunkedStdin) {
+async fn forward_stdin(
+    mut reader: ReadHalf<SimplexStream>,
+    sink: ChunkedStdin,
+) -> Result<(), SandboxProcessError> {
     let mut buffer = vec![0_u8; STDIN_READ_BYTES];
     loop {
-        match reader.read(&mut buffer).await {
-            Ok(0) => break,
-            Ok(n) => {
-                if let Err(e) = sink.write_all(&buffer[..n]).await {
-                    tracing::debug!("writing guest stdin failed: {e:#}");
-                    return;
-                }
-            }
-            Err(e) => {
-                tracing::debug!("reading queued guest stdin failed: {e:#}");
-                return;
-            }
+        let n =
+            reader
+                .read(&mut buffer)
+                .await
+                .map_err(|source| SandboxProcessError::StdinPipe {
+                    operation: "reading queued",
+                    source,
+                })?;
+        if n == 0 {
+            break;
         }
+        sink.write_all(&buffer[..n]).await?;
     }
-    if let Err(e) = sink.close().await {
-        tracing::debug!("closing guest stdin failed: {e:#}");
-    }
+    sink.close().await?;
+    Ok(())
 }
 /// Build the in-process pipe for one output stream. `Capture::Null` still gets
 /// a writer so the pump can drain the guest without blocking, but no reader.
@@ -474,5 +571,111 @@ fn pipe(
             (Some(reader), Some(writer))
         }
         Capture::Null => (None, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future;
+    use std::task::Poll;
+
+    use super::*;
+
+    struct ForwarderDropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for ForwarderDropSignal {
+        fn drop(&mut self) {
+            self.0
+                .take()
+                .expect("forwarder drop signal must be armed")
+                .send(())
+                .expect("forwarder drop receiver must remain alive");
+        }
+    }
+
+    fn blocked_stdin() -> (SandboxStdin, oneshot::Receiver<()>, oneshot::Receiver<()>) {
+        let (_reader, writer) = tokio::io::simplex(STREAM_BUFFER_BYTES);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
+        let forwarder = tokio::spawn(async move {
+            let _drop_signal = ForwarderDropSignal(Some(stopped_tx));
+            started_tx
+                .send(())
+                .expect("forwarder start receiver must remain alive");
+            future::pending::<Result<(), SandboxProcessError>>().await
+        });
+        (
+            SandboxStdin {
+                writer,
+                forwarder: Some(forwarder),
+            },
+            started_rx,
+            stopped_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn cancelling_stdin_close_aborts_forwarder() {
+        let (stdin, started_rx, stopped_rx) = blocked_stdin();
+        let mut close = Box::pin(stdin.close());
+        assert!(matches!(futures::poll!(close.as_mut()), Poll::Pending));
+        started_rx.await.unwrap();
+        assert!(matches!(futures::poll!(close.as_mut()), Poll::Pending));
+
+        drop(close);
+
+        stopped_rx.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_stdin_aborts_forwarder() {
+        let (stdin, started_rx, stopped_rx) = blocked_stdin();
+        started_rx.await.unwrap();
+
+        drop(stdin);
+
+        stopped_rx.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stdin_close_waits_for_eof_and_propagates_forwarder_failure() {
+        let (mut reader, writer) = tokio::io::simplex(STREAM_BUFFER_BYTES);
+        let (eof_tx, eof_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let forwarder = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).await.map_err(|source| {
+                SandboxProcessError::StdinPipe {
+                    operation: "reading test queue",
+                    source,
+                }
+            })?;
+            eof_tx
+                .send(bytes)
+                .map_err(|_| SandboxProcessError::PumpGone)?;
+            release_rx
+                .await
+                .map_err(|_| SandboxProcessError::PumpGone)?;
+            Err(SandboxProcessError::StdinPipe {
+                operation: "closing test sink",
+                source: std::io::Error::other("test forwarder failure"),
+            })
+        });
+        let mut stdin = SandboxStdin {
+            writer,
+            forwarder: Some(forwarder),
+        };
+
+        stdin.write_all(b"complete input").await.unwrap();
+        let close = tokio::spawn(stdin.close());
+        assert_eq!(eof_rx.await.unwrap(), b"complete input");
+        assert!(!close.is_finished());
+        release_tx.send(()).unwrap();
+
+        let error = close.await.unwrap().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "closing test sink guest stdin failed: test forwarder failure"
+        );
     }
 }
