@@ -20,6 +20,9 @@ use crate::cc::stream::{StreamEvent, parse_stream_event};
 /// stays under a few hundred tokens.
 const ACTIVITY_SNIPPET_LEN: usize = 80;
 
+/// Bound on transport cleanup after a terminal result or forced termination.
+const NOTICE_RESUME_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Classifies the failure we are reflecting on. Drives the human-readable
 /// reason text inserted into the SYSTEM_NOTICE prompt.
 #[derive(Debug, Clone)]
@@ -87,6 +90,8 @@ pub(crate) struct ReflectionContext {
 pub(crate) enum ReflectionError {
     #[error("reflection spawn failed: {0}")]
     Spawn(String),
+    #[error("reflection guest process failed: {0}")]
+    Process(#[from] crate::cc::sandbox_process::SandboxProcessError),
     #[error("reflection timed out after {0:?}")]
     Timeout(Duration),
     #[error("reflection CC exited with code {code}: {detail}")]
@@ -95,6 +100,42 @@ pub(crate) enum ReflectionError {
     Parse(String),
     #[error("reflection I/O failed: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Derive the semantic process exit from CC's terminal result.
+///
+/// A well-formed `is_error` is authoritative because the transport may not
+/// report an exit after the terminal result. Malformed or missing result data
+/// falls back to the transport exit, if one was observed.
+fn effective_notice_exit(result_line: Option<&str>, transport_exit: Option<i32>) -> i32 {
+    let result_is_error = result_line.and_then(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()?
+            .get("is_error")?
+            .as_bool()
+    });
+    match result_is_error {
+        Some(false) => 0,
+        Some(true) => 1,
+        None => transport_exit.unwrap_or(-1),
+    }
+}
+
+async fn kill_and_bounded_wait(
+    child: &mut crate::cc::sandbox_process::SandboxChild,
+) -> Option<i32> {
+    child.kill().await;
+    match tokio::time::timeout(NOTICE_RESUME_CLEANUP_TIMEOUT, child.wait()).await {
+        Ok(Ok(code)) => Some(code),
+        Ok(Err(error)) => {
+            tracing::debug!("notice-resume cleanup wait failed: {error:#}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("notice-resume cleanup wait timed out");
+            None
+        }
+    }
 }
 
 /// Render a human-readable reason text for the SYSTEM_NOTICE header.
@@ -344,7 +385,7 @@ async fn run_notice_resume(
         crate::cc::invocation::guard_no_sandboxed_host_exec(&ctx.agent_name, ctx.sandbox.as_ref())
             .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
 
-    let prompt_path = format!("/tmp/right-reflection-prompt-{}.md", ctx.session_uuid);
+    let prompt_path = crate::cc::prompt::sandbox_prompt_file_path("reflection-prompt");
     let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
         &base_prompt,
         mode.prompt_mode(),
@@ -372,42 +413,89 @@ async fn run_notice_resume(
     .await
     .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
 
-    // Pipe the prompt, then drop stdin to signal EOF.
+    // Pipe the prompt and guest EOF as one delivery operation. The SDK EOF
+    // acknowledgement is part of delivery and must not outlive the reflection
+    // process timeout.
     if let Some(mut stdin) = child.stdin() {
-        stdin.write_all(input.as_bytes()).await?;
-        // drop at end of scope
+        let delivery = async move {
+            stdin.write_all(input.as_bytes()).await?;
+            stdin.close().await
+        };
+        match tokio::time::timeout(ctx.limits.process_timeout, delivery).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                kill_and_bounded_wait(&mut child).await;
+                return Err(error.into());
+            }
+            Err(_) => {
+                kill_and_bounded_wait(&mut child).await;
+                tracing::warn!(
+                    duration_ms = ctx.limits.process_timeout.as_millis() as u64,
+                    "notice-resume stdin delivery timed out"
+                );
+                return Err(ReflectionError::Timeout(ctx.limits.process_timeout));
+            }
+        }
+    } else {
+        kill_and_bounded_wait(&mut child).await;
+        return Err(ReflectionError::Spawn("no stdin handle".into()));
     }
 
-    // Read stdout streaming; capture the last `result` event's raw JSON.
-    let stdout = child
-        .stdout()
-        .ok_or_else(|| ReflectionError::Spawn("no stdout handle".into()))?;
+    // Read stdout only until the first terminal result. The SDK can deliver
+    // that record without ever closing stdout or reporting process exit.
+    let stdout = match child.stdout() {
+        Some(stdout) => stdout,
+        None => {
+            kill_and_bounded_wait(&mut child).await;
+            return Err(ReflectionError::Spawn("no stdout handle".into()));
+        }
+    };
     let mut lines = BufReader::new(stdout).lines();
-
-    let mut last_result_line: Option<String> = None;
-    let read_fut = async {
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let StreamEvent::Result(raw) = parse_stream_event(&line) {
-                last_result_line = Some(raw);
+    let read_result = tokio::time::timeout(ctx.limits.process_timeout, async {
+        loop {
+            match lines.next_line().await? {
+                Some(line) => {
+                    if let StreamEvent::Result(raw) = parse_stream_event(&line) {
+                        return Ok::<Option<String>, std::io::Error>(Some(raw));
+                    }
+                }
+                None => return Ok(None),
             }
+        }
+    })
+    .await;
+
+    let last_result_line = match read_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            kill_and_bounded_wait(&mut child).await;
+            return Err(error.into());
+        }
+        Err(_) => {
+            kill_and_bounded_wait(&mut child).await;
+            tracing::warn!(
+                duration_ms = ctx.limits.process_timeout.as_millis() as u64,
+                "notice-resume timed out"
+            );
+            return Err(ReflectionError::Timeout(ctx.limits.process_timeout));
         }
     };
 
-    let timed_out = tokio::time::timeout(ctx.limits.process_timeout, read_fut)
-        .await
-        .is_err();
-
-    // Kill the child regardless of outcome; collect exit code best-effort.
-    child.kill().await;
-    let exit = child.wait().await.unwrap_or(-1);
-
-    if timed_out {
-        tracing::warn!(
-            duration_ms = ctx.limits.process_timeout.as_millis() as u64,
-            "notice-resume timed out"
-        );
-        return Err(ReflectionError::Timeout(ctx.limits.process_timeout));
-    }
+    // A result is terminal regardless of whether the SDK later reports EOF.
+    // Kill is cleanup, while `is_error` below remains the semantic exit.
+    let transport_exit = if last_result_line.is_some() {
+        kill_and_bounded_wait(&mut child).await
+    } else {
+        match tokio::time::timeout(NOTICE_RESUME_CLEANUP_TIMEOUT, child.wait()).await {
+            Ok(Ok(code)) => Some(code),
+            Ok(Err(error)) => {
+                tracing::debug!("notice-resume exit wait failed: {error:#}");
+                None
+            }
+            Err(_) => kill_and_bounded_wait(&mut child).await,
+        }
+    };
+    let exit = effective_notice_exit(last_result_line.as_deref(), transport_exit);
 
     if exit != 0 {
         let detail = match &last_result_line {
@@ -522,6 +610,26 @@ mod tests {
         assert!(format_ring_event(&StreamEvent::Text("   ".into())).is_none());
         assert!(format_ring_event(&StreamEvent::Other).is_none());
         assert!(format_ring_event(&StreamEvent::Result("{}".into())).is_none());
+    }
+
+    #[test]
+    fn terminal_result_semantics_override_unreliable_transport_exit() {
+        let success = r#"{"type":"result","is_error":false,"result":"ok"}"#;
+        let failure = r#"{"type":"result","is_error":true,"result":"failed"}"#;
+
+        assert_eq!(effective_notice_exit(Some(success), None), 0);
+        assert_eq!(effective_notice_exit(Some(success), Some(137)), 0);
+        assert_eq!(effective_notice_exit(Some(failure), Some(0)), 1);
+    }
+
+    #[test]
+    fn malformed_or_missing_terminal_semantics_fall_back_to_transport() {
+        assert_eq!(effective_notice_exit(Some("not json"), Some(7)), 7);
+        assert_eq!(
+            effective_notice_exit(Some(r#"{"type":"result"}"#), None),
+            -1
+        );
+        assert_eq!(effective_notice_exit(None, Some(9)), 9);
     }
 
     #[tokio::test]

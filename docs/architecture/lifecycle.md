@@ -166,11 +166,24 @@ Per message:
   │   → YAML.
   ├─ Fail-closed sandbox gate: sandboxed agent + `SandboxHealth::Unavailable` →
   │   send cause-specific HTML message to Telegram, record affected chat, skip CC.
-  │   Non-sandboxed agents pass through unconditionally.
-  ├─ Pipe input to claude -p via stdin (SSH or direct)
+  ├─ Before session preparation, read the stored setup token from data.db
+  │   through a read-only connection. Missing, empty, or CR/LF-containing
+  │   credentials atomically reserve the agent's single pending Telegram login
+  │   for that chat/thread and skip the batch; this local check makes no model,
+  │   sandbox, or API call. Other conversations receive an explicit pending
+  │   reminder, and credential-store failures surface separately.
+  │   A submitted token is rejected locally if it is too short, non-ASCII, or
+  │   contains any whitespace; valid opaque bytes are persisted unchanged. The
+  │   user sees `Saving token…`, then `Token saved. Send your message again.`
+  ├─ Pipe input to claude -p via stdin; this foreground turn is the only
+  │   runtime API validation of the stored token.
   │   ├─ First message: --session-id <uuid> (new session)
   │   ├─ Subsequent: --resume <root_session_id> (persistent session)
   │   └─ Sessions persist across messages — agent retains full CC context
+  ├─ If no assistant or result API progress arrives within 20 seconds after
+  │   stdin delivery, kill the foreground child, deactivate its active session,
+  │   and reuse the Telegram setup-token flow. `system/init` alone does not
+  │   disable this startup fallback.
   ├─ Observe Claude Code `system/init`; if `right` MCP reports a terminal
   │   unhealthy status, schedule cache repair asynchronously without
   │   interrupting or retrying the turn. `pending` is a deferred MCP state.
@@ -300,21 +313,29 @@ archived rows.
 
 ## Login Flow (setup-token)
 
-When `claude -p` returns 403/401 (auth error):
+Before `prepare_cc_invocation`, each foreground batch reads the stored Claude
+credential through a read-only database connection. This check makes no sandbox,
+model, or API call: absent tokens are `Missing`, empty or CR/LF-containing tokens
+are `Invalid`, and all other tokens are `Valid`. Missing or invalid credentials
+atomically start the existing Telegram setup-token request and skip session
+preparation; credential-store failures are reported separately. The foreground
+`claude -p` turn is the only runtime API validation; init validation remains the
+separate 60-second real probe.
 
 ```
-1. is_auth_error() detects auth failure in CC JSON output
-2. spawn_token_request() — tokio task:
-   ├─ Send "Claude needs authentication" notification to Telegram
-   ├─ Send setup-token instructions to Telegram
-   ├─ Delete stale token from auth_tokens table (if any)
-   ├─ Create oneshot channel, store sender in auth_code_tx intercept slot
-   ├─ Wait for token from Telegram (5-min timeout)
-   ├─ Telegram handler intercepts next message as token
-   ├─ Save token to auth_tokens table in data.db
-   └─ Send "Token saved" confirmation to Telegram
-3. On next claude -p: load token from auth_tokens, inject as
-   CLAUDE_CODE_OAUTH_TOKEN env var (sandbox: export in shell script,
-   no-sandbox: cmd.env())
-4. On error/timeout: notify user, reset auth_watcher_active flag
+1. Install auth_code_tx for the requesting (chat_id, thread_id)
+2. Send `claude setup-token` instructions; failed delivery clears the slot and active flag
+3. Wait up to five minutes for the matching Telegram conversation to submit its next text message
+4. After submission, send a plain “Saving token…” status and validate the candidate locally
+5. Reject candidates shorter than 80 bytes, non-ASCII candidates, or candidates containing whitespace; leave any existing `auth_tokens` value unchanged
+6. Persist any other candidate directly and send “Token saved. Send your message again.”
+7. The request owner awaits persistence through notification and only then clears auth_code_tx and auth_watcher_active
 ```
+
+The post-result `is_auth_error()` classification handles an explicitly rejected
+credential from the foreground turn. Because Claude can silently retry expired
+auth after emitting `system/init`, a second fallback kills a foreground
+invocation that produces no assistant or result API progress for 20 seconds
+after stdin delivery, deactivates that invocation's session, and starts or
+reminds the same race-free pending setup-token request. Assistant/result progress
+disables this short guard; the independent 600-second background timeout remains.

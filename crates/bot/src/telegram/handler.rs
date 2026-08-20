@@ -9,7 +9,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use dashmap::DashMap;
 use frankenstein::types::{
@@ -37,13 +36,95 @@ pub struct AgentDir(pub PathBuf);
 #[derive(Clone)]
 pub struct RightHome(pub PathBuf);
 
-/// Bundle of message-intercept slots to reduce dptree DI parameter count.
-/// Contains the auth code intercept slot plus the auth-watcher-active flag.
-#[derive(Clone)]
-pub struct InterceptSlots {
-    pub auth_code: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
-    pub auth_watcher: Arc<AtomicBool>,
+/// Telegram conversation that owns a pending setup-token request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AuthRequestScope {
+    pub(crate) chat_id: i64,
+    pub(crate) effective_thread_id: i64,
 }
+
+impl AuthRequestScope {
+    pub(crate) fn new(chat_id: i64, effective_thread_id: i64) -> Self {
+        Self {
+            chat_id,
+            effective_thread_id,
+        }
+    }
+}
+
+/// Result of atomically trying to reserve the single setup-token slot.
+pub(crate) enum AuthRequestStart {
+    Started {
+        request_id: u64,
+        receiver: tokio::sync::oneshot::Receiver<String>,
+    },
+    AlreadyPending {
+        owner: AuthRequestScope,
+    },
+}
+
+struct AuthCodeIntercept {
+    request_id: u64,
+    scope: AuthRequestScope,
+    sender: Option<tokio::sync::oneshot::Sender<String>>,
+}
+
+/// Single source of truth for the one pending setup-token request per agent.
+#[derive(Default)]
+pub(crate) struct PendingAuthState {
+    next_request_id: u64,
+    pending: Option<AuthCodeIntercept>,
+}
+
+impl PendingAuthState {
+    pub(crate) fn start_if_idle(&mut self, scope: AuthRequestScope) -> AuthRequestStart {
+        if let Some(pending) = &self.pending {
+            return AuthRequestStart::AlreadyPending {
+                owner: pending.scope,
+            };
+        }
+
+        self.next_request_id = self
+            .next_request_id
+            .checked_add(1)
+            .expect("pending auth request id overflow");
+        let request_id = self.next_request_id;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.pending = Some(AuthCodeIntercept {
+            request_id,
+            scope,
+            sender: Some(sender),
+        });
+        AuthRequestStart::Started {
+            request_id,
+            receiver,
+        }
+    }
+
+    pub(crate) fn take_sender_for_scope(
+        &mut self,
+        scope: AuthRequestScope,
+    ) -> Option<tokio::sync::oneshot::Sender<String>> {
+        self.pending
+            .as_mut()
+            .filter(|pending| pending.scope == scope)
+            .and_then(|pending| pending.sender.take())
+    }
+
+    pub(crate) fn cleanup_if_owned(&mut self, request_id: u64) -> bool {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.request_id == request_id)
+        {
+            self.pending.take();
+            return true;
+        }
+        false
+    }
+}
+
+pub(crate) type PendingAuthRequests = Arc<tokio::sync::Mutex<PendingAuthState>>;
 
 /// Newtype wrapper for the InternalClient used to communicate with the MCP aggregator.
 #[derive(Clone)]
@@ -199,21 +280,31 @@ pub(crate) async fn handle_message(
     });
 
     // Extract reply-to message ID
-    let reply_to_id = msg.reply_to_message.as_ref().map(|m| m.message_id);
+    let reply_to_id = msg
+        .reply_to_message
+        .as_ref()
+        .map(|message| message.message_id);
     let quoted_text = msg_ext::quote_text(msg);
 
-    // Intercept auth code: if login flow is waiting for a code, forward this message.
-    if let Some(ref text_val) = text {
-        let mut slot = ctx.intercept_slots.auth_code.lock().await;
-        if let Some(sender) = slot.take() {
-            tracing::info!("handle_message: forwarding message as auth code");
-            let _ = sender.send(text_val.clone());
+    // Resolve the conversation before checking the auth intercept: only the
+    // chat/thread that received setup instructions may submit its token.
+    let chat_id = msg.chat.id;
+    let eff_thread_id = effective_thread_id(msg);
+    if let Some(text_val) = &text {
+        let scope = AuthRequestScope::new(chat_id, eff_thread_id);
+        if let Some(sender) = ctx.pending_auth.lock().await.take_sender_for_scope(scope) {
+            tracing::info!(
+                chat_id,
+                eff_thread_id,
+                "handle_message: forwarding message as auth code"
+            );
+            sender
+                .send(text_val.clone())
+                .map_err(|_| other_err("setup-token receiver closed"))?;
             return Ok(());
         }
     }
 
-    let chat_id = msg.chat.id;
-    let eff_thread_id = effective_thread_id(msg);
     super::archive::archive_routed_dm_message(&ctx.agent_dir.0, msg, decision.address.clone());
 
     let key: SessionKey = (chat_id, eff_thread_id);
@@ -338,8 +429,7 @@ pub(crate) async fn handle_message(
                     // be dead on arrival and invite the next reader to trust
                     // a snapshot.
                     sandbox: None,
-                    auth_watcher_active: Arc::clone(&ctx.intercept_slots.auth_watcher),
-                    auth_code_tx: Arc::clone(&ctx.intercept_slots.auth_code),
+                    pending_auth: Arc::clone(&ctx.pending_auth),
                     show_thinking: settings.show_thinking,
                     model: settings.model.clone(),
                     stop_tokens: Arc::clone(&worker_ctl.stop_tokens),
@@ -1279,9 +1369,85 @@ pub(crate) async fn handle_bg_callback(ctx: &HandlerCtx, q: &CallbackQuery) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use frankenstein::types::Chat;
     use std::any::TypeId;
+
+    use frankenstein::types::Chat;
+
+    use super::*;
+
+    #[test]
+    fn pending_auth_start_if_idle_does_not_overwrite_sender() {
+        let mut state = PendingAuthState::default();
+        let first_scope = AuthRequestScope::new(1, 2);
+        let second_scope = AuthRequestScope::new(3, 4);
+        let first = state.start_if_idle(first_scope);
+        let first_request_id = match first {
+            AuthRequestStart::Started { request_id, .. } => request_id,
+            AuthRequestStart::AlreadyPending { .. } => panic!("first request must start"),
+        };
+
+        match state.start_if_idle(second_scope) {
+            AuthRequestStart::AlreadyPending { owner } => assert_eq!(owner, first_scope),
+            AuthRequestStart::Started { .. } => panic!("second request must not overwrite first"),
+        }
+        assert!(state.cleanup_if_owned(first_request_id));
+    }
+
+    #[tokio::test]
+    async fn pending_auth_token_sender_matches_only_owner_scope() {
+        let mut state = PendingAuthState::default();
+        let owner = AuthRequestScope::new(11, 22);
+        let other = AuthRequestScope::new(11, 23);
+        let receiver = match state.start_if_idle(owner) {
+            AuthRequestStart::Started { receiver, .. } => receiver,
+            AuthRequestStart::AlreadyPending { .. } => panic!("request must start"),
+        };
+
+        assert!(state.take_sender_for_scope(other).is_none());
+        match state.start_if_idle(other) {
+            AuthRequestStart::AlreadyPending {
+                owner: pending_owner,
+            } => {
+                assert_eq!(pending_owner, owner);
+            }
+            AuthRequestStart::Started { .. } => panic!("non-owner token attempt cleared request"),
+        }
+        let sender = state
+            .take_sender_for_scope(owner)
+            .expect("owner scope must take sender");
+        sender.send("opaque-token".to_owned()).unwrap();
+        assert_eq!(receiver.await.unwrap(), "opaque-token");
+        match state.start_if_idle(other) {
+            AuthRequestStart::AlreadyPending {
+                owner: pending_owner,
+            } => {
+                assert_eq!(pending_owner, owner);
+            }
+            AuthRequestStart::Started { .. } => panic!("token claim must await owner cleanup"),
+        }
+    }
+
+    #[test]
+    fn pending_auth_cleanup_rejects_stale_request_id() {
+        let mut state = PendingAuthState::default();
+        let first_id = match state.start_if_idle(AuthRequestScope::new(1, 0)) {
+            AuthRequestStart::Started { request_id, .. } => request_id,
+            AuthRequestStart::AlreadyPending { .. } => panic!("first request must start"),
+        };
+        assert!(state.cleanup_if_owned(first_id));
+
+        let second_scope = AuthRequestScope::new(2, 0);
+        let second_id = match state.start_if_idle(second_scope) {
+            AuthRequestStart::Started { request_id, .. } => request_id,
+            AuthRequestStart::AlreadyPending { .. } => panic!("second request must start"),
+        };
+        assert!(!state.cleanup_if_owned(first_id));
+        match state.start_if_idle(AuthRequestScope::new(3, 0)) {
+            AuthRequestStart::AlreadyPending { owner } => assert_eq!(owner, second_scope),
+            AuthRequestStart::Started { .. } => panic!("stale cleanup removed the newer request"),
+        }
+        assert!(state.cleanup_if_owned(second_id));
+    }
 
     fn make_private_chat() -> Chat {
         serde_json::from_value(serde_json::json!({

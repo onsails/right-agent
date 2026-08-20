@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::BotType;
 use super::handler::{
-    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, RightHome,
+    AgentDir, AgentSettings, IdleTimestamp, InternalApi, PendingAuthState, RightHome,
 };
 use super::mention::BotIdentity;
 use super::router::HandlerCtx;
@@ -130,13 +130,7 @@ pub(crate) async fn setup_telegram(
     let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> = Arc::new(DashMap::new());
     let agent_dir_arc: Arc<AgentDir> = Arc::new(AgentDir(agent_dir));
     let home_arc: Arc<RightHome> = Arc::new(RightHome(home));
-    let auth_watcher_arc: Arc<std::sync::atomic::AtomicBool> =
-        Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let auth_code_arc = Arc::new(tokio::sync::Mutex::new(None));
-    let intercept_slots_arc: Arc<InterceptSlots> = Arc::new(InterceptSlots {
-        auth_code: Arc::clone(&auth_code_arc),
-        auth_watcher: Arc::clone(&auth_watcher_arc),
-    });
+    let pending_auth = Arc::new(tokio::sync::Mutex::new(PendingAuthState::default()));
     let internal_api_arc: Arc<InternalApi> = Arc::new(InternalApi(internal_client));
     let worker_shutdown = CancellationToken::new();
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
@@ -186,7 +180,7 @@ pub(crate) async fn setup_telegram(
         worker_map,
         agent_dir: Arc::clone(&agent_dir_arc),
         home: home_arc,
-        intercept_slots: intercept_slots_arc,
+        pending_auth,
         internal_api: internal_api_arc,
         settings: settings_arc,
         idle_ts,

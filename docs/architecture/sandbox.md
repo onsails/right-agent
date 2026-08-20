@@ -194,6 +194,22 @@ same file with an inline fallback. This makes manually installed CLIs and
 `npm install -g` bins available both to `claude -p` turns and to interactive
 guest shells.
 
+Guest process stdin is buffered through `SandboxStdin`, whose explicit async
+`close` drains every queued chunk through the SDK and awaits the SDK EOF frame.
+Turn, delivery, and reflection paths race the full write-plus-close operation
+against their transport deadline (and foreground stop cancellation) before
+reading stdout. Dropping `SandboxStdin` or cancelling `close` aborts the stdin
+forwarder, so it cannot remain detached in an SDK write/close; completed closes
+still propagate the forwarder's write/close error.
+
+Claude stream-json's top-level `result` event is the authoritative completion
+signal for session-bearing invocations. The microsandbox SDK can deliver that
+terminal stdout record without subsequently emitting `Exited` or closing the
+stream, so consumers finish processing the result, explicitly kill the guest
+exec handle, and use bounded wait/drop cleanup rather than waiting for EOF.
+The result's `is_error` value defines semantic success or failure even when
+transport cleanup reports no usable process exit code.
+
 The managed environment sets `NPM_CONFIG_PREFIX=/sandbox/.local` and
 `NPM_CONFIG_CACHE=/sandbox/.npm`. Agents should not use `sudo` or `~/bin` for
 sandbox tool installs.

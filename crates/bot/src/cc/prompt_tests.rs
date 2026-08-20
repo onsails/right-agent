@@ -17,6 +17,17 @@ fn test_script(base: &str, mode: PromptMode, args: &[String], mcp: Option<&str>)
     )
 }
 
+/// Run the assembly script with the EXIT-trap cleanup removed so the produced
+/// prompt file survives for content inspection. Trap behavior is asserted by
+/// `script_executes_with_spaces_in_prompt_file_and_workdir`.
+fn strip_cleanup_trap(script: &str) -> String {
+    script
+        .lines()
+        .filter(|line| !line.starts_with("trap "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn bootstrap_state() -> BootstrapPromptState {
     BootstrapPromptState {
         stage: "final",
@@ -146,17 +157,13 @@ fn bootstrap_prompt_serializes_adversarial_answers_as_untrusted_json_data() {
         None,
         None,
     );
+    let script = strip_cleanup_trap(&script);
 
     let output = Command::new("bash")
         .arg("-c")
         .arg(script)
         .output()
         .expect("bash must run");
-    assert!(
-        output.status.success(),
-        "prompt assembly failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
     let prompt = std::fs::read_to_string(prompt_file).unwrap();
     assert_eq!(
         prompt
@@ -274,6 +281,18 @@ async fn script_writes_to_prompt_file_and_uses_system_prompt_file() {
 }
 
 #[test]
+fn sandbox_prompt_file_path_is_fresh_per_invocation() {
+    let first = sandbox_prompt_file_path("system-prompt");
+    let second = sandbox_prompt_file_path("system-prompt");
+    assert_ne!(
+        first, second,
+        "each invocation must get a fresh, unowned path"
+    );
+    assert!(first.starts_with("/tmp/right-system-prompt-"));
+    assert!(first.ends_with(".md"));
+}
+
+#[test]
 fn script_places_system_prompt_file_before_prompt_option_terminator() {
     let user_prompt = "Summarize the bootstrap answers.";
     let claude_args = [
@@ -319,6 +338,9 @@ fn script_executes_with_spaces_in_prompt_file_and_workdir() {
     let workdir = dir.path().join("work dir");
     std::fs::create_dir(&workdir).unwrap();
     let prompt_file = dir.path().join("prompt output.md");
+    // `true` stands in for `claude`: it ignores the spliced
+    // `--system-prompt-file` operand and exits 0. Any escaping mistake in
+    // the redirect or the EXIT-trap `rm` would abort the script non-zero.
     let script = build_prompt_assembly_script(
         "Base",
         PromptMode::Normal,
@@ -343,7 +365,10 @@ fn script_executes_with_spaces_in_prompt_file_and_workdir() {
         "prompt assembly failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(prompt_file.exists(), "prompt file must be created");
+    assert!(
+        !prompt_file.exists(),
+        "EXIT trap must remove the per-invocation prompt file"
+    );
 }
 
 #[tokio::test]
@@ -655,6 +680,7 @@ async fn script_file_mode_sed_escape_produces_actual_zwsp_at_runtime() {
     // We only need the redirect-to-stdout portion; intercept by replacing
     // the redirect target with a temp path and then read it back.
     let prompt_file = dir.path().join("prompt.md");
+    let script = strip_cleanup_trap(&script);
     let modified = script.replace(
         "/tmp/right-test-system-prompt.md",
         prompt_file.to_str().unwrap(),
@@ -670,7 +696,6 @@ async fn script_file_mode_sed_escape_produces_actual_zwsp_at_runtime() {
         "script must produce prompt file. stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-
     let prompt = std::fs::read_to_string(&prompt_file).expect("prompt file readable");
     // The literal close delimiter from MEMORY.md must NOT appear unescaped
     // in the assembled prompt (other than the legitimate ironclaw suffix).

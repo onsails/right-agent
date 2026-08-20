@@ -8,7 +8,6 @@ use std::future::Future;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
@@ -51,6 +50,8 @@ const MEDIA_GROUP_HARD_CAP_MS: u64 = 2500;
 
 /// Maximum time to wait for a CC subprocess to complete.
 const CC_TIMEOUT_SECS: u64 = 600;
+/// Maximum time a foreground invocation may produce no API progress after stdin is delivered.
+pub(crate) const FOREGROUND_API_PROGRESS_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Bound on `child.wait()` after we've already broken from the streaming
 /// loop. The slave should be either gone (deadline/stop SIGKILL) or about
@@ -62,6 +63,55 @@ const POST_BREAK_WAIT_TIMEOUT_SECS: u64 = 5;
 /// when the pipe is wedged (FD held by some other process) we'd rather
 /// log the wedge and continue with an empty buffer than block the worker.
 const POST_BREAK_STDERR_TIMEOUT_SECS: u64 = 2;
+fn stream_event_is_api_progress(event: &crate::cc::stream::StreamEvent) -> bool {
+    matches!(
+        event,
+        crate::cc::stream::StreamEvent::Text(_)
+            | crate::cc::stream::StreamEvent::Thinking
+            | crate::cc::stream::StreamEvent::ToolUse { .. }
+            | crate::cc::stream::StreamEvent::Result(_)
+    )
+}
+
+fn stream_event_is_terminal(event: &crate::cc::stream::StreamEvent) -> bool {
+    matches!(event, crate::cc::stream::StreamEvent::Result(_))
+}
+
+/// Derive the foreground turn's semantic exit from CC's terminal result.
+///
+/// The result contract is authoritative even when killing a wedged SDK session
+/// makes the transport report no process exit. Malformed or absent results
+/// retain the transport's actual exit, with `-1` representing no reported exit.
+fn effective_exit_code(result_line: Option<&str>, actual_exit_code: Option<i32>) -> i32 {
+    let result_is_error = result_line.and_then(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()?
+            .get("is_error")?
+            .as_bool()
+    });
+    match result_is_error {
+        Some(false) => 0,
+        Some(true) => 1,
+        None => actual_exit_code.unwrap_or(-1),
+    }
+}
+
+fn should_recover_auth(
+    input_delivered: bool,
+    saw_api_progress: bool,
+    init_deadline_fired: bool,
+) -> bool {
+    input_delivered && init_deadline_fired && !saw_api_progress
+}
+
+fn stdin_delivery_timeout_detail(input_delivered: bool) -> Option<String> {
+    (!input_delivered).then(|| {
+        format!(
+            "stdin delivery timed out after {}s",
+            FOREGROUND_API_PROGRESS_TIMEOUT.as_secs(),
+        )
+    })
+}
 
 /// Maximum character count for Hindsight recall queries (~530 tokens, safely under the 500-token API limit).
 const RECALL_MAX_CHARS: usize = 800;
@@ -296,11 +346,8 @@ pub struct WorkerContext {
     /// Live Agent Sandbox handle. `None` once the backend has degraded: nothing
     /// runs without it (see `guard_no_sandboxed_host_exec`).
     pub sandbox: Option<crate::sandbox::Sandbox>,
-    /// Guard: true when an auth watcher task is active for this agent. Prevents duplicates.
-    pub auth_watcher_active: Arc<AtomicBool>,
-    /// Slot for auth code sender — when login flow is waiting for a code from Telegram,
-    /// the oneshot::Sender is stored here. Message handler checks this before routing to worker.
-    pub auth_code_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
+    /// Single pending setup-token request shared by every conversation for this agent.
+    pub(crate) pending_auth: super::handler::PendingAuthRequests,
     /// Show live thinking indicator in Telegram.
     pub show_thinking: bool,
     /// Claude model override (passed as --model). None = inherit CLI default.
@@ -1823,7 +1870,7 @@ async fn invoke_bootstrap_question_model(
         &base_prompt,
         prompt_mode,
         "/sandbox",
-        "/tmp/right-bootstrap-question-prompt.md",
+        &crate::cc::prompt::sandbox_prompt_file_path("bootstrap-question-prompt"),
         "/sandbox",
         &claude_args,
         None,
@@ -2480,6 +2527,36 @@ pub fn spawn_worker(
                 }
             }
 
+            // Check only local token presence and syntax before session preparation.
+            // The foreground turn itself is the sole runtime API validator.
+            match crate::keepalive::runtime_auth_status(&ctx.agent_db_dir).await {
+                Ok(crate::keepalive::RuntimeAuthStatus::Valid) => {}
+                Ok(crate::keepalive::RuntimeAuthStatus::Missing)
+                | Ok(crate::keepalive::RuntimeAuthStatus::Invalid) => {
+                    if let Err(error) = start_token_request(&ctx, tg_chat_id, eff_thread_id).await {
+                        tracing::warn!(
+                            ?key,
+                            "failed to start or remind about authentication: {error:#}"
+                        );
+                    }
+                    cancel_token.cancel();
+                    typing_task.await.ok();
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(?key, "Claude authentication status check failed: {error:#}");
+                    cancel_token.cancel();
+                    typing_task.await.ok();
+                    let _ = send_tg(
+                        &ctx.bot,
+                        tg_chat_id,
+                        eff_thread_id,
+                        "⚠️ Claude authentication could not be checked because the credential store is unavailable. Please try again.",
+                    )
+                    .await;
+                    continue;
+                }
+            }
             // Idle-compaction: any foreground turn is activity — cancel a
             // pending compaction so it cannot fire during this turn.
             crate::idle_compaction::cancel(&ctx.compact_timers, chat_id, eff_thread_id);
@@ -2574,6 +2651,7 @@ pub fn spawn_worker(
             // The completed interview keeps the bootstrap lock while preparing
             // and invoking its single finalization turn.
             let first_text = batch.first().and_then(|m| m.text.as_deref());
+
             let prepared =
                 match prepare_cc_invocation(&ctx.agent_dir, chat_id, eff_thread_id, first_text)
                     .await
@@ -3631,22 +3709,57 @@ pub(crate) async fn send_tg_html(
     send_tg_inner(bot, chat_id, eff_thread_id, text, true).await
 }
 
-/// Spawn a background task that requests a setup-token from the user.
-///
-/// 1. Sends instruction to user via Telegram.
-/// 2. Waits for token from Telegram message intercept.
-/// 3. Saves token to data.db.
-fn spawn_token_request(ctx: &WorkerContext, tg_chat_id: i64, eff_thread_id: i64) {
+/// Atomically start a setup-token request, or remind this conversation where
+/// the existing request must be completed.
+async fn start_token_request(
+    ctx: &WorkerContext,
+    tg_chat_id: i64,
+    eff_thread_id: i64,
+) -> Result<(), super::tg_bot::TgError> {
+    let scope = super::handler::AuthRequestScope::new(tg_chat_id, eff_thread_id);
+    let start = ctx.pending_auth.lock().await.start_if_idle(scope);
+    match start {
+        super::handler::AuthRequestStart::Started {
+            request_id,
+            receiver,
+        } => {
+            spawn_token_request(ctx, scope, request_id, receiver);
+            Ok(())
+        }
+        super::handler::AuthRequestStart::AlreadyPending { owner } => {
+            let message = if owner == scope {
+                "Authentication setup is already pending in this conversation. Send the setup token here."
+            } else {
+                "Authentication setup is already pending in another conversation. Complete it there before trying again."
+            };
+            send_tg(&ctx.bot, tg_chat_id, eff_thread_id, message).await
+        }
+    }
+}
+
+/// Spawn the owner task for an already-reserved setup-token request.
+/// The reservation is installed before this function can send instructions, so
+/// even an immediate Telegram reply reaches the correct receiver. This task
+/// owns both the bounded token wait and subsequent persistence.
+fn spawn_token_request(
+    ctx: &WorkerContext,
+    scope: super::handler::AuthRequestScope,
+    request_id: u64,
+    token_rx: tokio::sync::oneshot::Receiver<String>,
+) {
     let agent_name = ctx.agent_name.clone();
     let bot = ctx.bot.clone();
     let agent_db_dir = ctx.agent_db_dir.clone();
-    let active_flag = Arc::clone(&ctx.auth_watcher_active);
-    let auth_code_tx_slot = Arc::clone(&ctx.auth_code_tx);
+    let pending_auth = Arc::clone(&ctx.pending_auth);
+    let shutdown = ctx.shutdown.clone();
 
     tokio::spawn(async move {
-        // Send instruction to user (with HTML parse mode for <pre> formatting)
+        const TOKEN_SUBMISSION_TIMEOUT: Duration = Duration::from_secs(300);
+
+        let tg_chat_id = scope.chat_id;
+        let eff_thread_id = scope.effective_thread_id;
         let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
-        let send_result = bot
+        if let Err(e) = bot
             .send_message_opts(
                 tg_chat_id,
                 crate::login::auth_instruction_message(),
@@ -3655,69 +3768,110 @@ fn spawn_token_request(ctx: &WorkerContext, tg_chat_id: i64, eff_thread_id: i64)
                 None,
                 None,
             )
-            .await;
-        if let Err(e) = send_result {
+            .await
+        {
             tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
-            active_flag.store(false, Ordering::SeqCst);
+            pending_auth.lock().await.cleanup_if_owned(request_id);
             return;
         }
 
-        // Create channel for token from Telegram
-        let (token_tx, token_rx) = tokio::sync::oneshot::channel::<String>();
-        auth_code_tx_slot.lock().await.replace(token_tx);
-
-        // Create event channel
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::login::LoginEvent>(4);
-
-        // Spawn token request task
-        let agent_for_login = agent_name.clone();
-        tokio::spawn(async move {
-            crate::login::request_token(&agent_db_dir, &agent_for_login, event_tx, token_rx).await;
-        });
-
-        // Process events with timeout
-        let timeout = tokio::time::sleep(Duration::from_secs(300));
-        tokio::pin!(timeout);
-
-        tokio::select! {
-            event = event_rx.recv() => {
-                match event {
-                    Some(crate::login::LoginEvent::Done) => {
+        let token = tokio::select! {
+            () = shutdown.cancelled() => None,
+            result = tokio::time::timeout(TOKEN_SUBMISSION_TIMEOUT, token_rx) => {
+                match result {
+                    Ok(Ok(token)) => Some(token),
+                    Ok(Err(_)) => {
+                        tracing::warn!(agent = %agent_name, "token request: token channel closed");
                         if let Err(e) = send_tg(
-                            &bot, tg_chat_id, eff_thread_id,
-                            "Token saved. You can continue chatting.",
+                            &bot,
+                            tg_chat_id,
+                            eff_thread_id,
+                            "Token setup was cancelled. Send another message to retry.",
                         ).await {
                             tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
                         }
+                        None
                     }
-                    Some(crate::login::LoginEvent::Error(msg)) => {
-                        tracing::error!(agent = %agent_name, "token request: {msg}");
+                    Err(_) => {
+                        tracing::warn!(agent = %agent_name, "token request: timed out after 5 min");
                         if let Err(e) = send_tg(
-                            &bot, tg_chat_id, eff_thread_id,
-                            &format!("Token setup failed: {msg}"),
+                            &bot,
+                            tg_chat_id,
+                            eff_thread_id,
+                            "Token request timed out after 5 minutes. Send another message to retry.",
                         ).await {
                             tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
                         }
-                    }
-                    None => {
-                        tracing::info!(agent = %agent_name, "token request: task exited");
+                        None
                     }
                 }
             }
-            _ = &mut timeout => {
-                tracing::warn!(agent = %agent_name, "token request: timed out after 5 min");
-                if let Err(e) = send_tg(
-                    &bot, tg_chat_id, eff_thread_id,
-                    "Token request timed out after 5 minutes. Send another message to retry.",
-                ).await {
-                    tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
+        };
+
+        if let Some(token) = token {
+            let (event_tx, mut event_rx) =
+                tokio::sync::mpsc::channel::<crate::login::LoginEvent>(4);
+            let login =
+                crate::login::validate_submitted_token(&agent_db_dir, &agent_name, event_tx, token);
+            let events = async {
+                loop {
+                    match event_rx.recv().await {
+                        Some(crate::login::LoginEvent::Saving(delivered)) => {
+                            match send_tg(&bot, tg_chat_id, eff_thread_id, "Saving token…").await
+                            {
+                                Ok(()) => {
+                                    if delivered.send(()).is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
+                                    break;
+                                }
+                            }
+                        }
+                        Some(crate::login::LoginEvent::Done) => {
+                            if let Err(e) = send_tg(
+                                &bot,
+                                tg_chat_id,
+                                eff_thread_id,
+                                "Token saved. Send your message again.",
+                            )
+                            .await
+                            {
+                                tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
+                            }
+                            break;
+                        }
+                        Some(crate::login::LoginEvent::Error(msg)) => {
+                            tracing::error!(agent = %agent_name, "token request: {msg}");
+                            if let Err(e) = send_tg(
+                                &bot,
+                                tg_chat_id,
+                                eff_thread_id,
+                                &format!("Token setup failed: {msg}"),
+                            )
+                            .await
+                            {
+                                tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
+                            }
+                            break;
+                        }
+                        None => {
+                            tracing::info!(agent = %agent_name, "token request: task exited");
+                            break;
+                        }
+                    }
                 }
+            };
+
+            tokio::select! {
+                () = shutdown.cancelled() => {}
+                _ = async { tokio::join!(login, events); } => {}
             }
         }
 
-        // Cleanup
-        auth_code_tx_slot.lock().await.take();
-        active_flag.store(false, Ordering::SeqCst);
+        pending_auth.lock().await.cleanup_if_owned(request_id);
     });
 }
 
@@ -4446,7 +4600,7 @@ async fn invoke_cc(
         &base_prompt,
         prompt_mode.clone(),
         "/sandbox",
-        &format!("/tmp/right-system-prompt-{session_uuid}.md"),
+        &crate::cc::prompt::sandbox_prompt_file_path("system-prompt"),
         "/sandbox",
         &claude_args,
         mcp_instructions.as_deref(),
@@ -4623,15 +4777,27 @@ async fn invoke_cc(
 
     let mut timed_out = false;
     let mut stopped = false;
+    let mut startup_auth_timeout = false;
     let mut schema_run = SchemaRejectionRun::default();
     let mut schema_loop_detected = false;
     // Set once stdin (carrying the volatile prefix's memory-status marker) is
     // fully written; gates the deferred edge-trigger commit below.
     let mut input_delivered = false;
+    // The initial 20-second guard covers transport delivery as well as the
+    // first model API progress. A delivery stall is a transport failure, not
+    // evidence that credentials need recovery.
+    let foreground_api_progress_deadline =
+        tokio::time::Instant::now() + FOREGROUND_API_PROGRESS_TIMEOUT;
 
-    // Write input to stdin, then drop to signal EOF.
-    if let Some(mut stdin) = child.stdin() {
-        use tokio::io::AsyncWriteExt;
+    // Deliver the complete input and guest EOF as one cancellation-safe unit.
+    // `stdin` is already detached from `child`, so the child remains available
+    // for termination while write/close is pending.
+    let delivery_failure = if let Some(mut stdin) = child.stdin() {
+        let delivery = async move {
+            stdin.write_all(effective_input.as_bytes()).await?;
+            stdin.close().await
+        };
+        tokio::pin!(delivery);
         tokio::select! {
             biased;
             _ = stop_token.cancelled() => {
@@ -4643,43 +4809,58 @@ async fn invoke_cc(
                     session_uuid = %log_ctx.session_uuid,
                     turn_id = log_ctx.turn_id,
                     child_pid = child.pid(),
-                    "stop_token cancelled during stdin write -- sending SIGKILL to claude -p",
+                    "stop_token cancelled during stdin delivery -- sending SIGKILL to claude -p",
                 );
                 child.kill().await;
+                None
             }
-            result = stdin.write_all(effective_input.as_bytes()) => {
-                if let Err(e) = result {
-                    tracing::error!(
-                        chat_id = log_ctx.chat_id,
-                        eff_thread_id = log_ctx.eff_thread_id,
-                        key = ?log_ctx.key(),
-                        session_uuid = %log_ctx.session_uuid,
-                        turn_id = log_ctx.turn_id,
-                        "stdin write failed: {e:#}"
-                    );
-                    clear_foreground_handoff_controls(
-                        &ctx.stop_tokens,
-                        &ctx.bg_requests,
-                        &ctx.bg_handoff_gates,
-                        (chat_id, eff_thread_id),
-                        turn_id,
-                    );
-                    if let Some(active) = active_progress.take() {
-                        finish_progress_invocation(ctx, active).await;
-                    }
-                    cleanup_prepared_first_call_session(
-                        conn,
-                        chat_id,
-                        eff_thread_id,
-                        is_first_call,
-                        &session_uuid,
-                    )
-                    .await;
-                    return Err(format_error_reply(-1, &format!("stdin write failed: {:#}", e)).into());
+            result = &mut delivery => match result {
+                Ok(()) => {
+                    input_delivered = true;
+                    None
                 }
-                input_delivered = true;
+                Err(error) => {
+                    child.kill().await;
+                    Some(format!("stdin delivery failed: {error:#}"))
+                }
+            },
+            _ = tokio::time::sleep_until(foreground_api_progress_deadline) => {
+                child.kill().await;
+                stdin_delivery_timeout_detail(input_delivered)
             }
         }
+    } else {
+        Some("stdin delivery failed: no stdin handle".to_string())
+    };
+
+    if let Some(detail) = delivery_failure {
+        tracing::error!(
+            chat_id = log_ctx.chat_id,
+            eff_thread_id = log_ctx.eff_thread_id,
+            key = ?log_ctx.key(),
+            session_uuid = %log_ctx.session_uuid,
+            turn_id = log_ctx.turn_id,
+            "{detail}"
+        );
+        clear_foreground_handoff_controls(
+            &ctx.stop_tokens,
+            &ctx.bg_requests,
+            &ctx.bg_handoff_gates,
+            (chat_id, eff_thread_id),
+            turn_id,
+        );
+        if let Some(active) = active_progress.take() {
+            finish_progress_invocation(ctx, active).await;
+        }
+        cleanup_prepared_first_call_session(
+            conn,
+            chat_id,
+            eff_thread_id,
+            is_first_call,
+            &session_uuid,
+        )
+        .await;
+        return Err(format_error_reply(-1, &detail).into());
     }
 
     // The memory-status marker is now in the agent's stdin, so commit the
@@ -4798,6 +4979,7 @@ async fn invoke_cc(
     last_edit = tokio::time::Instant::now();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(CC_TIMEOUT_SECS);
+    let mut saw_api_progress = false;
     loop {
         tokio::select! {
             line_result = lines.next_line() => {
@@ -4826,6 +5008,7 @@ async fn invoke_cc(
                         }
 
                         let event = crate::cc::stream::parse_stream_event(&line);
+                        saw_api_progress |= stream_event_is_api_progress(&event);
 
                         // Null-repair evidence: track the last assistant text block
                         // and any send_message call across ALL content blocks
@@ -4929,6 +5112,9 @@ async fn invoke_cc(
                                 }
                             }
                         }
+                        if stream_event_is_terminal(&event) {
+                            break;
+                        }
 
                         // Thinking message: always send (Stop button anchor).
                         if crate::cc::stream::format_event(&event).is_some() {
@@ -4999,6 +5185,21 @@ async fn invoke_cc(
                     }
                 }
             }
+            _ = tokio::time::sleep_until(foreground_api_progress_deadline), if !saw_api_progress && !stopped => {
+                startup_auth_timeout = should_recover_auth(input_delivered, saw_api_progress, true);
+                tracing::warn!(
+                    chat_id = log_ctx.chat_id,
+                    eff_thread_id = log_ctx.eff_thread_id,
+                    key = ?log_ctx.key(),
+                    session_uuid = %log_ctx.session_uuid,
+                    turn_id = log_ctx.turn_id,
+                    child_pid = child.pid(),
+                    timeout_secs = FOREGROUND_API_PROGRESS_TIMEOUT.as_secs(),
+                    "foreground produced no API progress before initial deadline; starting auth recovery",
+                );
+                child.kill().await;
+                break;
+            }
             _ = tokio::time::sleep_until(deadline) => {
                 timed_out = true;
                 tracing::warn!(
@@ -5029,6 +5230,13 @@ async fn invoke_cc(
                 break;
             }
         }
+    }
+
+    // A terminal stream-json result is the completion contract. The SDK may
+    // never emit Exited or close its stream afterward, so explicitly close the
+    // guest exec session before the existing bounded wait/drop cleanup.
+    if result_line.is_some() {
+        child.kill().await;
     }
 
     // Post-break cleanup. ProcessGroupChild::Drop kills the slave's group on
@@ -5073,7 +5281,8 @@ async fn invoke_cc(
             None
         }
     };
-    let exit_code = exit_status.unwrap_or(-1);
+    let actual_exit_code = exit_status;
+    let exit_code = effective_exit_code(result_line.as_deref(), actual_exit_code);
     tracing::debug!(
         chat_id = log_ctx.chat_id,
         eff_thread_id = log_ctx.eff_thread_id,
@@ -5082,6 +5291,7 @@ async fn invoke_cc(
         turn_id = log_ctx.turn_id,
         child_pid,
         exit_code,
+        actual_exit_code = ?actual_exit_code,
         wait_ms = wait_started.elapsed().as_millis() as u64,
         "post-break: child waited",
     );
@@ -5212,10 +5422,10 @@ async fn invoke_cc(
     // If we're about to return a Reflectable, spawn_worker will edit the
     // thinking message into a banner — skip the cost/turns finalization here
     // to avoid a visible flash of the final summary before the banner.
-    let will_reflect = exit_code != 0 && !is_auth_error(&stdout_str);
+    let will_reflect = !startup_auth_timeout && exit_code != 0 && !is_auth_error(&stdout_str);
     // Backgrounding paths (user-requested via bg button, or auto-timeout) also
     // hand the thinking message off to spawn_worker for the bg banner edit.
-    let will_background = was_bg_request || timed_out;
+    let will_background = !startup_auth_timeout && (was_bg_request || timed_out);
 
     // Final thinking message update based on completion mode.
     if let Some(msg_id) = thinking_msg_id {
@@ -5250,6 +5460,36 @@ async fn invoke_cc(
         }
         // When will_reflect is true, DO NOT touch the thinking message here —
         // spawn_worker will edit it into a banner.
+    }
+
+    // A startup without model API progress is treated as credential recovery,
+    // never as background work: expired setup tokens can emit system/init and
+    // then retry indefinitely without reaching the API.
+    if startup_auth_timeout {
+        super::release_bg_handoff_gate(&ctx.bg_handoff_gates, (chat_id, eff_thread_id));
+        deactivate_session_if_active(conn, chat_id, eff_thread_id, &session_uuid)
+            .await
+            .map_err(|error| {
+                format!("deactivate foreground invocation during startup auth recovery: {error:#}")
+            })?;
+        start_token_request(ctx, ctx.chat_id, ctx.effective_thread_id)
+            .await
+            .map_err(|error| {
+                format!("start setup-token request after API-progress timeout: {error:#}")
+            })?;
+        return Ok(CcReply {
+            output: None,
+            session_uuid,
+            turn_id,
+            is_first_call,
+            prompt_mode,
+            usage: usage.clone(),
+            wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
+            learning_invocation_id: learning_invocation_id.clone(),
+            last_assistant_text: None,
+            send_message_used: false,
+            session_guard,
+        });
     }
 
     // Handle user-requested backgrounding — must come BEFORE the `stopped`
@@ -5362,63 +5602,33 @@ async fn invoke_cc(
                         turn_id = log_ctx.turn_id,
                         "deactivate_session_if_active on auth error: {:#}",
                         e
-                    )
-                })
-                .ok();
+                    );
+                    format!("deactivate foreground invocation after auth error: {e:#}")
+                })?;
+            if let Err(error) = start_token_request(ctx, ctx.chat_id, ctx.effective_thread_id).await
             {
-                // Spawn token request if not already active.
-                if !ctx.auth_watcher_active.swap(true, Ordering::SeqCst) {
-                    let tg_chat_id = ctx.chat_id;
-                    if let Err(e) = send_tg(
-                        &ctx.bot,
-                        tg_chat_id,
-                        ctx.effective_thread_id,
-                        "Claude needs authentication. Setup instructions incoming...",
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            chat_id = log_ctx.chat_id,
-                            eff_thread_id = log_ctx.eff_thread_id,
-                            key = ?log_ctx.key(),
-                            session_uuid = %log_ctx.session_uuid,
-                            turn_id = log_ctx.turn_id,
-                            "failed to send auth error notification: {e:#}"
-                        );
-                    }
-                    spawn_token_request(ctx, tg_chat_id, ctx.effective_thread_id);
-                    // Return Ok(None) — the initial message above is sufficient,
-                    // don't send a second error message before instructions arrive.
-                    return Ok(CcReply {
-                        output: None,
-                        session_uuid,
-                        turn_id,
-                        is_first_call,
-                        prompt_mode,
-                        usage: usage.clone(),
-                        wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
-                        learning_invocation_id: learning_invocation_id.clone(),
-                        last_assistant_text: None,
-                        send_message_used: false,
-                        session_guard,
-                    });
-                } else {
-                    // Token request already running — silent, don't spam.
-                    return Ok(CcReply {
-                        output: None,
-                        session_uuid,
-                        turn_id,
-                        is_first_call,
-                        prompt_mode,
-                        usage: usage.clone(),
-                        wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
-                        learning_invocation_id: learning_invocation_id.clone(),
-                        last_assistant_text: None,
-                        send_message_used: false,
-                        session_guard,
-                    });
-                }
+                tracing::warn!(
+                    chat_id = log_ctx.chat_id,
+                    eff_thread_id = log_ctx.eff_thread_id,
+                    key = ?log_ctx.key(),
+                    session_uuid = %log_ctx.session_uuid,
+                    turn_id = log_ctx.turn_id,
+                    "failed to start or remind about authentication: {error:#}"
+                );
             }
+            return Ok(CcReply {
+                output: None,
+                session_uuid,
+                turn_id,
+                is_first_call,
+                prompt_mode,
+                usage: usage.clone(),
+                wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
+                learning_invocation_id: learning_invocation_id.clone(),
+                last_assistant_text: None,
+                send_message_used: false,
+                session_guard,
+            });
         }
 
         // If this was the first call, CC never created the session — deactivate
@@ -6085,10 +6295,11 @@ mod tests {
             agent_name: "test-agent".into(),
             bot: super::super::bot::build_bot("0:fake_token_for_tests".into()),
             agent_db_dir: agent_dir.to_path_buf(),
-            debug: Arc::new(AtomicBool::new(false)),
+            debug: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sandbox: None,
-            auth_watcher_active: Arc::new(AtomicBool::new(false)),
-            auth_code_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            pending_auth: Arc::new(tokio::sync::Mutex::new(
+                super::super::handler::PendingAuthState::default(),
+            )),
             show_thinking: false,
             model: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
             stop_tokens: Arc::new(DashMap::new()),
@@ -7156,6 +7367,51 @@ mod tests {
     }
 
     // classify_cc_result tests
+    #[test]
+    fn successful_terminal_result_overrides_missing_process_exit() {
+        let result = r#"{"type":"result","is_error":false,"result":"ok"}"#;
+        assert_eq!(effective_exit_code(Some(result), None), 0);
+    }
+
+    #[test]
+    fn error_terminal_result_overrides_process_exit() {
+        let result = r#"{"type":"result","is_error":true,"result":"failed"}"#;
+        assert_eq!(effective_exit_code(Some(result), Some(-1)), 1);
+        assert_eq!(effective_exit_code(Some(result), Some(0)), 1);
+    }
+
+    #[test]
+    fn malformed_or_missing_terminal_result_uses_actual_exit_or_sentinel() {
+        assert_eq!(effective_exit_code(Some("not json"), Some(7)), 7);
+        assert_eq!(effective_exit_code(Some(r#"{"type":"result"}"#), None), -1);
+        assert_eq!(effective_exit_code(None, Some(9)), 9);
+        assert_eq!(effective_exit_code(None, None), -1);
+    }
+
+    #[test]
+    fn only_result_stream_events_are_terminal() {
+        assert!(stream_event_is_terminal(
+            &crate::cc::stream::parse_stream_event(
+                r#"{"type":"result","is_error":false,"result":"ok"}"#,
+            ),
+        ));
+        assert!(!stream_event_is_terminal(
+            &crate::cc::stream::parse_stream_event(
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+            ),
+        ));
+        assert!(!stream_event_is_terminal(
+            &crate::cc::stream::parse_stream_event(r#"{"type":"system","subtype":"init"}"#),
+        ));
+    }
+
+    #[test]
+    fn terminal_rate_limit_result_is_classified_for_user_facing_path() {
+        let result = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":529,"result":"API Error: 529 Overloaded."}"#;
+        assert_eq!(effective_exit_code(Some(result), None), 1);
+        assert_eq!(classify_cc_result(result), CcResultClass::RateLimited);
+    }
+
     #[tokio::test]
     async fn classify_detects_429_rate_limit() {
         let stdout = r#"{"type":"result","is_error":true,"api_error_status":429,"result":"API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"}"#;
@@ -8528,6 +8784,62 @@ mod bg_request_race_tests {
         let b = super::super::next_turn_id_after(None);
         let c = super::super::next_turn_id_after(None);
         assert!(a < b && b < c, "turn ids must be strictly increasing");
+    }
+
+    #[test]
+    fn no_api_progress_before_deadline_recovers_auth() {
+        assert!(should_recover_auth(true, false, true));
+    }
+
+    #[test]
+    fn system_init_does_not_count_as_api_progress() {
+        let event = crate::cc::stream::parse_stream_event(r#"{"type":"system","subtype":"init"}"#);
+        assert!(!stream_event_is_api_progress(&event));
+        assert!(should_recover_auth(true, false, true));
+    }
+
+    #[test]
+    fn assistant_events_disable_auth_guard() {
+        let lines = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}"#,
+        ];
+        for line in lines {
+            let event = crate::cc::stream::parse_stream_event(line);
+            assert!(stream_event_is_api_progress(&event));
+            assert!(!should_recover_auth(true, true, true));
+        }
+    }
+
+    #[test]
+    fn result_event_disables_auth_guard() {
+        let event = crate::cc::stream::parse_stream_event(
+            r#"{"type":"result","subtype":"success","result":"hi"}"#,
+        );
+        assert!(stream_event_is_api_progress(&event));
+        assert!(!should_recover_auth(true, true, true));
+    }
+
+    #[test]
+    fn global_deadline_remains_background_timeout() {
+        assert!(!should_recover_auth(true, false, false));
+        assert_eq!(FOREGROUND_API_PROGRESS_TIMEOUT, Duration::from_secs(20));
+        assert_eq!(CC_TIMEOUT_SECS, 600);
+    }
+
+    #[test]
+    fn stdin_delivery_deadline_never_recovers_auth() {
+        assert!(!should_recover_auth(false, false, true));
+    }
+
+    #[test]
+    fn stdin_delivery_timeout_has_clear_transport_error() {
+        assert_eq!(
+            stdin_delivery_timeout_detail(false).as_deref(),
+            Some("stdin delivery timed out after 20s"),
+        );
+        assert!(stdin_delivery_timeout_detail(true).is_none());
     }
 
     // Intra-turn race: bg click lands AFTER stdout closed and child exited 0.
