@@ -378,12 +378,12 @@ mod tests {
         // The borrow body names the SOURCE (owner) agent; the destination is the
         // current dashboard agent, supplied server-side — never from the body.
         let body: ProviderBorrowBody = serde_json::from_value(serde_json::json!({
-            "owner_agent": "agent-a",
+            "owner_agent": "riskoff",
             "provider": "fal"
         }))
         .unwrap();
 
-        assert_eq!(body.owner_agent, "agent-a");
+        assert_eq!(body.owner_agent, "riskoff");
         assert_eq!(body.provider, "fal");
     }
 }

@@ -346,7 +346,7 @@ Add these tests to `crates/bot/src/keepalive.rs`:
 #[test]
 fn repair_notice_is_one_shot() {
     let health = ClaudeHealth::new(
-        "agent-b".to_owned(),
+        "him".to_owned(),
         PathBuf::from("/tmp/agent"),
         None,
         None,
@@ -362,7 +362,7 @@ fn repair_notice_is_one_shot() {
 #[test]
 fn repair_lock_rejects_concurrent_second_holder() {
     let health = ClaudeHealth::new(
-        "agent-b".to_owned(),
+        "him".to_owned(),
         PathBuf::from("/tmp/agent"),
         None,
         None,

@@ -166,10 +166,10 @@ fn verification_reports_every_entry_that_did_not_arrive() {
 
 /// Build a plan good enough to render a recap; only the names are read.
 fn recap_plan() -> SourcePlan {
-    let yaml = "sandbox:\n  name: test-sandbox\n";
+    let yaml = "sandbox:\n  name: right-him\n";
     SourcePlan {
-        old_name: "test-sandbox-20260516-1649".to_owned(),
-        new_name: "test-sandbox".to_owned(),
+        old_name: "right-him-20260516-1649".to_owned(),
+        new_name: "right-him".to_owned(),
         migrated_yaml: yaml.to_owned(),
         migrated_config: serde_saphyr::from_str(yaml).expect("fixture parses"),
     }
@@ -230,21 +230,21 @@ fn recap_names_providers_that_need_their_credentials_re_entered() {
         std::path::Path::new("/tmp/sandbox.tar.gz"),
         true,
         &SeededProviders {
-            needs_credential: vec!["agent-a-provider".to_owned(), "agent-a-openai".to_owned()],
-            ready: vec!["agent-a-shared".to_owned()],
-            undeclared: vec!["agent-a-ghost".to_owned()],
+            needs_credential: vec!["riskoff-right-fal".to_owned(), "riskoff-openai".to_owned()],
+            ready: vec!["riskoff-shared".to_owned()],
+            undeclared: vec!["riskoff-ghost".to_owned()],
         },
         None,
     )
     .render(right_ui::Theme::Mono);
-    for name in ["agent-a-provider", "agent-a-openai"] {
+    for name in ["riskoff-right-fal", "riskoff-openai"] {
         assert!(
             rendered.contains(name),
             "every provider awaiting a credential must be named: {rendered}"
         );
     }
     assert!(
-        rendered.contains("agent-a-ghost"),
+        rendered.contains("riskoff-ghost"),
         "a provider the yaml never declared cannot be recorded, so it must be reported: {rendered}"
     );
     assert!(
@@ -252,7 +252,7 @@ fn recap_names_providers_that_need_their_credentials_re_entered() {
         "the operator needs the dashboard step: {rendered}"
     );
     assert!(
-        rendered.contains("agent-a-shared"),
+        rendered.contains("riskoff-shared"),
         "a provider that already holds a credential must not be listed as needing one: {rendered}"
     );
 }
@@ -268,12 +268,12 @@ async fn store() -> (tempfile::TempDir, right_providers::ProviderStore) {
 
 const PROVIDER_YAML: &str = "\
 sandbox:
-  name: test-sandbox-a
+  name: right-riskoff
   providers:
-    - name: agent-a-provider
+    - name: riskoff-right-fal
       type: right-fal
       label: prod
-    - name: agent-a-acme
+    - name: riskoff-acme
       type: generic
       generic:
         env_var: ACME_KEY
@@ -294,18 +294,18 @@ async fn seeding_lands_every_declared_provider_as_needs_value() {
     let (_home, store) = store().await;
     let config = provider_config();
 
-    let seeded = seed_provider_records(&store, "agent-a", config.providers(), &[])
+    let seeded = seed_provider_records(&store, "riskoff", config.providers(), &[])
         .await
         .expect("seeding a fresh store");
 
     assert_eq!(
         seeded.needs_credential,
-        vec!["agent-a-provider".to_owned(), "agent-a-acme".to_owned()]
+        vec!["riskoff-right-fal".to_owned(), "riskoff-acme".to_owned()]
     );
     assert!(seeded.ready.is_empty());
 
     let builtin = store
-        .get("agent-a", "agent-a-provider")
+        .get("riskoff", "riskoff-right-fal")
         .await
         .expect("built-in record was written");
     assert_eq!(builtin.status, right_providers::ProviderStatus::NeedsValue);
@@ -313,7 +313,7 @@ async fn seeding_lands_every_declared_provider_as_needs_value() {
     assert_eq!(builtin.label, "prod");
 
     let generic = store
-        .get("agent-a", "agent-a-acme")
+        .get("riskoff", "riskoff-acme")
         .await
         .expect("generic record was written");
     assert_eq!(generic.status, right_providers::ProviderStatus::NeedsValue);
@@ -335,26 +335,26 @@ async fn seeding_lands_every_declared_provider_as_needs_value() {
 async fn seeding_leaves_an_existing_record_alone() {
     let (_home, store) = store().await;
     let config = provider_config();
-    seed_provider_records(&store, "agent-a", config.providers(), &[])
+    seed_provider_records(&store, "riskoff", config.providers(), &[])
         .await
         .expect("first run");
     store
         .rotate(
-            "agent-a",
-            "agent-a-provider",
+            "riskoff",
+            "riskoff-right-fal",
             right_providers::Credential::from("re-entered".to_owned()),
         )
         .await
         .expect("operator adds the credential from the dashboard");
 
-    let seeded = seed_provider_records(&store, "agent-a", config.providers(), &[])
+    let seeded = seed_provider_records(&store, "riskoff", config.providers(), &[])
         .await
         .expect("re-run");
 
-    assert_eq!(seeded.ready, vec!["agent-a-provider".to_owned()]);
-    assert_eq!(seeded.needs_credential, vec!["agent-a-acme".to_owned()]);
+    assert_eq!(seeded.ready, vec!["riskoff-right-fal".to_owned()]);
+    assert_eq!(seeded.needs_credential, vec!["riskoff-acme".to_owned()]);
     assert_eq!(
-        store.list("agent-a").await.expect("list").len(),
+        store.list("riskoff").await.expect("list").len(),
         2,
         "a re-run must not duplicate records"
     );
@@ -367,13 +367,13 @@ async fn seeding_leaves_an_existing_record_alone() {
 async fn attached_providers_the_yaml_never_declared_are_reported() {
     let (_home, store) = store().await;
     let config = provider_config();
-    let attached = vec!["agent-a-provider".to_owned(), "agent-a-ghost".to_owned()];
+    let attached = vec!["riskoff-right-fal".to_owned(), "riskoff-ghost".to_owned()];
 
-    let seeded = seed_provider_records(&store, "agent-a", config.providers(), &attached)
+    let seeded = seed_provider_records(&store, "riskoff", config.providers(), &attached)
         .await
         .expect("seeding");
 
-    assert_eq!(seeded.undeclared, vec!["agent-a-ghost".to_owned()]);
+    assert_eq!(seeded.undeclared, vec!["riskoff-ghost".to_owned()]);
 }
 
 /// A definition the store cannot accept would leave the agent unstartable
@@ -382,20 +382,20 @@ async fn attached_providers_the_yaml_never_declared_are_reported() {
 async fn a_provider_definition_the_store_rejects_aborts_the_migration() {
     let (_home, store) = store().await;
     let config: right_agent::agent::types::AgentConfig = serde_saphyr::from_str(
-        "sandbox:\n  name: test-sandbox-a\n  providers:\n    - name: agent-a-gone\n      type: no-such-provider\n",
+        "sandbox:\n  name: right-riskoff\n  providers:\n    - name: riskoff-gone\n      type: no-such-provider\n",
     )
     .expect("fixture parses");
 
-    let error = seed_provider_records(&store, "agent-a", config.providers(), &[])
+    let error = seed_provider_records(&store, "riskoff", config.providers(), &[])
         .await
         .expect_err("an unknown provider type cannot be recorded");
 
     assert!(
-        format!("{error:#}").contains("agent-a-gone"),
+        format!("{error:#}").contains("riskoff-gone"),
         "the failure must name the provider: {error:#}"
     );
     assert!(
-        store.list("agent-a").await.expect("list").is_empty(),
+        store.list("riskoff").await.expect("list").is_empty(),
         "a rejected definition must leave the store as it was"
     );
 }

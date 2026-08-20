@@ -15,7 +15,7 @@ either explicitly addressed (`@mention` / reply-to-bot / `/cmd`) or part of a
 each forwarded message arrives as a separate `Message` update with no shared
 identifier, and a forward without `@bot` in its caption is dropped silently.
 
-Concrete reproduction from `~/.right/logs/agent-b.log.2026-05-01`:
+Concrete reproduction from `~/.right/logs/him.log.2026-05-01`:
 
 ```
 10:31:03.177  text "@rightaww_bot наш пруф..."   entities=1   ← routed (handle_message)

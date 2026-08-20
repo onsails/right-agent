@@ -12,7 +12,7 @@
 
 ## Evidence
 
-The reproduced `agent-b-bot` failure was not caused by missing sandbox files, bad `attach://` wiring, or a broken local path. The agent emitted four existing WebP files under `/sandbox/outbox/logos-webp/*.webp`, and the sandbox files had valid `RIFF....WEBP` headers.
+The reproduced `him-bot` failure was not caused by missing sandbox files, bad `attach://` wiring, or a broken local path. The agent emitted four existing WebP files under `/sandbox/outbox/logos-webp/*.webp`, and the sandbox files had valid `RIFF....WEBP` headers.
 
 Live Bot API probes showed:
 

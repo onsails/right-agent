@@ -253,7 +253,7 @@ from `new_record_name`); existing `{agent}-{slug}` records keep their names.
 `agent.yaml` simply declare the same record id:
 
 ```yaml
-# owner (agent-a)               # borrower (right) — SAME record id
+# owner (riskoff)               # borrower (right) — SAME record id
 sandbox:                        sandbox:
   providers:                      providers:
     - name: fal-a1b2c3              - name: fal-a1b2c3

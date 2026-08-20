@@ -12,7 +12,7 @@
 
 ## Diagnosis To Preserve
 
-Observed local runtime state for agent `agent-b` on 2026-05-19:
+Observed local runtime state for agent `him` on 2026-05-19:
 
 ```sql
 SELECT id, source_invocation_id, root_session_id, trigger_kind, status, confidence,
@@ -339,34 +339,34 @@ devenv shell -- git add docs/architecture/sessions.md docs/architecture/mcp.md P
 devenv shell -- git commit -m "docs: clarify learned-skill review visibility"
 ```
 
-## Task 5: Runtime Verification Against `agent-b`
+## Task 5: Runtime Verification Against `him`
 
 **Files:**
 - No repository file changes in this task.
 
-- [ ] **Step 1: Confirm current `agent-b` baseline**
+- [ ] **Step 1: Confirm current `him` baseline**
 
 Run:
 
 ```bash
-devenv shell -- sqlite3 -readonly -header -column /Users/developer/.right/agents/agent-b/data.db "SELECT agent_name, tool_iters_since_review, turns_since_review, skill_issue_hints_since_review, review_running, creation_review_interval, daily_review_count, daily_review_date, last_review_at, last_review_status FROM skill_nudge_state"
+devenv shell -- sqlite3 -readonly -header -column /Users/molt/.right/agents/him/data.db "SELECT agent_name, tool_iters_since_review, turns_since_review, skill_issue_hints_since_review, review_running, creation_review_interval, daily_review_count, daily_review_date, last_review_at, last_review_status FROM skill_nudge_state"
 ```
 
-Expected: one row for `agent-b`. `review_running` must be `0` before manual smoke testing.
+Expected: one row for `him`. `review_running` must be `0` before manual smoke testing.
 
-- [ ] **Step 2: Restart `agent-b` through the normal platform path**
+- [ ] **Step 2: Restart `him` through the normal platform path**
 
 Run:
 
 ```bash
-devenv shell -- cargo run -p right -- restart agent-b
+devenv shell -- cargo run -p right -- restart him
 ```
 
-Expected: command exits 0 and `agent-b-bot` restarts.
+Expected: command exits 0 and `him-bot` restarts.
 
 - [ ] **Step 3: Trigger a foreground task with a reusable workflow**
 
-In Telegram, ask `agent-b` to perform a task with an obviously reusable workflow. Use this exact shape so the smoke is comparable:
+In Telegram, ask `him` to perform a task with an obviously reusable workflow. Use this exact shape so the smoke is comparable:
 
 ```text
 Create or update a recurring GitHub release tracker for a repository, fetch the latest release/tag, store the last seen version in memory, and explain the repeatable workflow you used.
@@ -379,7 +379,7 @@ Expected: the foreground task completes. If the foreground reply emits a `learni
 Run:
 
 ```bash
-devenv shell -- sqlite3 -readonly -header -column /Users/developer/.right/agents/agent-b/data.db "SELECT id, source_invocation_id, trigger_kind, status, confidence, candidate_skill_name, telegram_notified, created_at, substr(review_output_json,1,700) AS output FROM skill_review_reports ORDER BY id DESC LIMIT 5"
+devenv shell -- sqlite3 -readonly -header -column /Users/molt/.right/agents/him/data.db "SELECT id, source_invocation_id, trigger_kind, status, confidence, candidate_skill_name, telegram_notified, created_at, substr(review_output_json,1,700) AS output FROM skill_review_reports ORDER BY id DESC LIMIT 5"
 ```
 
 Expected for a good smoke: a new row appears. For a reusable workflow, preferred result is `create_candidate` or `update_candidate` with `confidence = high`, a `rightx-*` candidate name, non-empty `user_notice`, and `telegram_notified = 1`. If the model still returns `nothing_to_learn`, preserve the JSON output in the implementation notes and tighten only the prompt decision rules; do not change the Telegram policy.
@@ -389,7 +389,7 @@ Expected for a good smoke: a new row appears. For a reusable workflow, preferred
 Run:
 
 ```bash
-devenv shell -- rg -n "learned-skill background review completed|learned-skill background review failed|learned-skill review Telegram notice failed" /Users/developer/.right/logs/agent-b.log.2026-05-19
+devenv shell -- rg -n "learned-skill background review completed|learned-skill background review failed|learned-skill review Telegram notice failed" /Users/molt/.right/logs/him.log.2026-05-19
 ```
 
 Expected: at least one completion log line for the new review, including status, confidence, trigger, and `telegram_notified`.

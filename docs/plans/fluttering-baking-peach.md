@@ -116,15 +116,15 @@ switch. We unify the wizard code and add validation.
    - `devenv shell -- cargo clippy --workspace -- -D warnings`
 
 3. **Manual end-to-end**
-   - `cargo run --bin rightclaw -- agent config agent-b` →
+   - `cargo run --bin rightclaw -- agent config him` →
      - "Memory: file" appears in menu.
      - Switching to Hindsight prompts api_key/bank_id/budget/max_tokens.
      - With a bogus key → "Key rejected. Save anyway? [y/N]".
      - With valid `$HINDSIGHT_API_KEY` → "Use env var? [Y]" path works.
-     - After save, `cat ~/.rightclaw/agents/agent-b/agent.yaml` shows correct
+     - After save, `cat ~/.rightclaw/agents/him/agent.yaml` shows correct
        `memory:` block.
      - Switching back to File → warning shown, `memory.api_key`/`bank_id` stripped.
-   - `cargo run --bin rightclaw -- up --agents agent-b` starts successfully with
+   - `cargo run --bin rightclaw -- up --agents him` starts successfully with
      new config; bot log shows `"Hindsight bank ready"` when provider=Hindsight.
 
 ## Out of scope

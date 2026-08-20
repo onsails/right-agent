@@ -47,7 +47,7 @@ git rev-parse --abbrev-ref HEAD
 git status
 ```
 
-Expected: working directory `/Users/developer/dev/rightclaw/.worktrees/providers`, branch `feat/providers`, working tree clean.
+Expected: working directory `/Users/molt/dev/rightclaw/.worktrees/providers`, branch `feat/providers`, working tree clean.
 
 - [ ] **Step 2: Capture baseline for right-dashboard**
 
@@ -599,7 +599,7 @@ git commit -m "ci(tests): add explicit dashboard-bundle freshness step"
 
 ```bash
 TMPCO=$(mktemp -d)
-git clone --branch feat/providers /Users/developer/dev/rightclaw/.worktrees/providers "$TMPCO/repo"
+git clone --branch feat/providers /Users/molt/dev/rightclaw/.worktrees/providers "$TMPCO/repo"
 cd "$TMPCO/repo"
 ```
 
@@ -622,7 +622,7 @@ Expected: test passes.
 - [ ] **Step 4: Tear down**
 
 ```bash
-cd /Users/developer/dev/rightclaw/.worktrees/providers
+cd /Users/molt/dev/rightclaw/.worktrees/providers
 rm -rf "$TMPCO"
 ```
 

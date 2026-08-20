@@ -980,7 +980,7 @@ mod tests {
         let response = usage_overview(
             &conn,
             UsageOverviewInput {
-                agent: "agent-b".to_owned(),
+                agent: "him".to_owned(),
                 generated_at: "2026-05-21T05:00:00Z".to_owned(),
                 timezone: Some("UTC".to_owned()),
                 range: Some("today".to_owned()),
@@ -1031,7 +1031,7 @@ mod tests {
         let response = usage_overview(
             &conn,
             UsageOverviewInput {
-                agent: "agent-b".to_owned(),
+                agent: "him".to_owned(),
                 generated_at: "2026-05-21T05:00:00Z".to_owned(),
                 timezone: Some("UTC".to_owned()),
                 range: Some("today".to_owned()),
@@ -1470,7 +1470,7 @@ mod tests {
         let today_response = usage_overview(
             &conn,
             UsageOverviewInput {
-                agent: "agent-b".to_owned(),
+                agent: "him".to_owned(),
                 generated_at: "2026-05-21T05:00:00Z".to_owned(),
                 timezone: Some("UTC".to_owned()),
                 range: Some("today".to_owned()),
@@ -1486,7 +1486,7 @@ mod tests {
         let all_time_response = usage_overview(
             &conn,
             UsageOverviewInput {
-                agent: "agent-b".to_owned(),
+                agent: "him".to_owned(),
                 generated_at: "2026-05-21T05:00:00Z".to_owned(),
                 timezone: Some("UTC".to_owned()),
                 range: Some("all_time".to_owned()),

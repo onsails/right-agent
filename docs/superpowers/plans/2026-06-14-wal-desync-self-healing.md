@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the platform auto-recover from the Turso multiprocess-WAL desync that wedged `agent-a`, and stop the aggregator from holding a long-lived `data.db` handle.
+**Goal:** Make the platform auto-recover from the Turso multiprocess-WAL desync that wedged `riskoff`, and stop the aggregator from holding a long-lived `data.db` handle.
 
 **Architecture:** Two composing changes. (1) `right_db::open_connection` detects the "short read on WAL frame" desync and self-heals by resetting the `-tshm`/`-shm` sidecars under the existing per-agent bootstrap lock, then retrying once. (2) The aggregator (`RightBackend`) opens `data.db` per operation instead of caching a long-lived connection, so recovery can delete sidecars without split-brain.
 
@@ -317,7 +317,7 @@ Expected: PASS with "RIGHT_WAL_FIXTURE unset — skipping" printed.
 
 - [ ] **Step 3: Run it with the incident fixture (manual validation)**
 
-Run: `RIGHT_WAL_FIXTURE=/Users/developer/.right/agents/agent-a/_wal_incident_backup_20260614 devenv shell -- cargo test -p right-db --test wal_recovery -- --nocapture`
+Run: `RIGHT_WAL_FIXTURE=/Users/molt/.right/agents/riskoff/_wal_incident_backup_20260614 devenv shell -- cargo test -p right-db --test wal_recovery -- --nocapture`
 Expected: PASS — open succeeds, `cron_specs` count read, `-tshm` gone.
 (If the live backup has been pruned, this step is informational; the self-skip path is the committed behavior.)
 

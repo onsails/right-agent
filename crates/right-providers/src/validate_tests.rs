@@ -9,23 +9,23 @@ fn reason(err: StoreError) -> String {
 
 #[test]
 fn name_accepts_agent_prefixed_and_agent_agnostic_shapes() {
-    validate_name("agent-a", "agent-a-provider").expect("legacy {agent}-{slug}");
-    validate_name("agent-a", "fal-a1b2c3").expect("agent-agnostic {type}-{hex}");
+    validate_name("riskoff", "riskoff-fal").expect("legacy {agent}-{slug}");
+    validate_name("riskoff", "fal-a1b2c3").expect("agent-agnostic {type}-{hex}");
 }
 
 #[test]
 fn name_rejects_empty_slug_after_prefix() {
-    let err = validate_name("agent-a", "agent-a-").unwrap_err();
+    let err = validate_name("riskoff", "riskoff-").unwrap_err();
     assert_eq!(reason(err), "1-40 chars after optional agent prefix");
 }
 
 #[test]
 fn name_slug_cap_is_forty_after_the_prefix() {
     let slug = "a".repeat(40);
-    validate_name("agent-a", &format!("agent-a-{slug}")).expect("40 chars is the boundary");
+    validate_name("riskoff", &format!("riskoff-{slug}")).expect("40 chars is the boundary");
 
     let over = "a".repeat(41);
-    let err = validate_name("agent-a", &format!("agent-a-{over}")).unwrap_err();
+    let err = validate_name("riskoff", &format!("riskoff-{over}")).unwrap_err();
     assert_eq!(reason(err), "1-40 chars after optional agent prefix");
 }
 
@@ -42,7 +42,7 @@ fn name_full_length_cap_is_sixty_four() {
 #[test]
 fn name_alphabet_is_lowercase_digits_and_dash_starting_with_a_letter() {
     for bad in ["Fal-a1b2c3", "1fal", "-fal", "fal_a1b2c3", "fal.a1"] {
-        let err = validate_name("agent-a", bad).unwrap_err();
+        let err = validate_name("riskoff", bad).unwrap_err();
         assert_eq!(
             reason(err),
             "lowercase a-z/0-9/'-', must start a-z",

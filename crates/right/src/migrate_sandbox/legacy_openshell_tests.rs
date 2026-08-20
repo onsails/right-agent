@@ -297,21 +297,21 @@ fn attached_provider_names_come_from_the_first_table_column() {
     // them to copy-paste is why this parser shipped returning an empty list
     // for every sandbox — the test passed while production found no header.
     let table = "\u{1b}[1mNAME\u{1b}[0m        \u{1b}[1mTYPE\u{1b}[0m                 \u{1b}[1mCREDENTIAL_KEYS\u{1b}[0m  \u{1b}[1mCONFIG_KEYS\u{1b}[0m\n\
-                 agent-a-provider   right-fal                          1                0\n\
-                 agent-a-twitterapi  right-provider-agent-a-service   1                0\n";
+                 riskoff-right-fal   right-fal                          1                0\n\
+                 riskoff-twitterapi  right-provider-riskoff-twitterapi   1                0\n";
     assert_eq!(
         parse_attached_provider_names(table),
-        vec!["agent-a-provider", "agent-a-twitterapi"]
+        vec!["riskoff-right-fal", "riskoff-twitterapi"]
     );
 }
 
 #[test]
 fn attached_provider_names_parse_without_escapes_too() {
     let table = "NAME        TYPE\n\
-                 agent-a-provider   right-fal\n";
+                 riskoff-right-fal   right-fal\n";
     assert_eq!(
         parse_attached_provider_names(table),
-        vec!["agent-a-provider"]
+        vec!["riskoff-right-fal"]
     );
 }
 

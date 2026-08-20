@@ -6,7 +6,7 @@
 
 ## Problem
 
-Live investigation of agent `agent-b` (2026-05-30) confirmed the new learning
+Live investigation of agent `him` (2026-05-30) confirmed the new learning
 pipeline now runs end-to-end and produces good skills, but two real defects
 remain, plus an observability gap:
 

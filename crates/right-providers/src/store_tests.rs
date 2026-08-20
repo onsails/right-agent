@@ -48,7 +48,7 @@ async fn open_is_idempotent_and_the_file_is_owner_only() -> Result<()> {
     drop(first);
     let second = ProviderStore::open(home.path()).await?;
     assert_eq!(second.db_path(), db_path);
-    assert!(second.list("agent-a").await?.is_empty());
+    assert!(second.list("riskoff").await?.is_empty());
 
     #[cfg(unix)]
     {
@@ -63,15 +63,15 @@ async fn open_is_idempotent_and_the_file_is_owner_only() -> Result<()> {
 async fn create_then_get_returns_a_ready_record_without_a_credential() -> Result<()> {
     let (_home, store) = store().await?;
     let created = store
-        .create(builtin("agent-a", "fal-a1b2c3"), cred("real-value"))
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("real-value"))
         .await?;
     assert_eq!(created.name, "fal-a1b2c3");
-    assert_eq!(created.owner_agent, "agent-a");
+    assert_eq!(created.owner_agent, "riskoff");
     assert_eq!(created.env_var, "FAL_KEY");
     assert_eq!(created.status, ProviderStatus::Ready);
     assert!(created.borrower_agent.is_none());
 
-    let fetched = store.get("agent-a", "fal-a1b2c3").await?;
+    let fetched = store.get("riskoff", "fal-a1b2c3").await?;
     assert_eq!(fetched, created);
     assert!(
         !format!("{fetched:?}").contains("real-value"),
@@ -84,11 +84,11 @@ async fn create_then_get_returns_a_ready_record_without_a_credential() -> Result
 async fn create_rejects_a_duplicate_name_and_a_duplicate_env_var() -> Result<()> {
     let (_home, store) = store().await?;
     store
-        .create(builtin("agent-a", "fal-a1b2c3"), cred("v1"))
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("v1"))
         .await?;
 
     let err = store
-        .create(builtin("agent-a", "fal-a1b2c3"), cred("v2"))
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("v2"))
         .await
         .unwrap_err();
     assert!(
@@ -97,7 +97,7 @@ async fn create_rejects_a_duplicate_name_and_a_duplicate_env_var() -> Result<()>
     );
 
     let err = store
-        .create(builtin("agent-a", "fal-d4e5f6"), cred("v2"))
+        .create(builtin("riskoff", "fal-d4e5f6"), cred("v2"))
         .await
         .unwrap_err();
     assert!(
@@ -110,11 +110,11 @@ async fn create_rejects_a_duplicate_name_and_a_duplicate_env_var() -> Result<()>
 #[tokio::test]
 async fn create_rejects_a_reserved_type_and_a_bare_generic_slug() -> Result<()> {
     let (_home, store) = store().await?;
-    let mut reserved = builtin("agent-a", "claude-a1b2c3");
+    let mut reserved = builtin("riskoff", "claude-a1b2c3");
     reserved.kind = ProviderKind::Builtin("claude".into());
     assert!(store.create(reserved, cred("v")).await.is_err());
 
-    let mut bare_generic = builtin("agent-a", "generic-a1b2c3");
+    let mut bare_generic = builtin("riskoff", "generic-a1b2c3");
     bare_generic.kind = ProviderKind::Builtin(GENERIC_SLUG.into());
     let err = store.create(bare_generic, cred("v")).await.unwrap_err();
     assert!(
@@ -132,22 +132,22 @@ async fn create_rejects_a_reserved_type_and_a_bare_generic_slug() -> Result<()> 
 async fn a_credential_less_record_reports_needs_value() -> Result<()> {
     let (_home, store) = store().await?;
     let created = store
-        .create(builtin("agent-a", "fal-a1b2c3"), Credential::absent())
+        .create(builtin("riskoff", "fal-a1b2c3"), Credential::absent())
         .await?;
     assert_eq!(created.status, ProviderStatus::NeedsValue);
     assert!(
         store
-            .source_ref_binding("agent-a", "fal-a1b2c3")
+            .source_ref_binding("riskoff", "fal-a1b2c3")
             .await
             .is_err(),
         "a record awaiting its credential must never produce a binding"
     );
 
     store
-        .rotate("agent-a", "fal-a1b2c3", cred("real-value"))
+        .rotate("riskoff", "fal-a1b2c3", cred("real-value"))
         .await?;
     assert_eq!(
-        store.get("agent-a", "fal-a1b2c3").await?.status,
+        store.get("riskoff", "fal-a1b2c3").await?.status,
         ProviderStatus::Ready
     );
     Ok(())
@@ -157,14 +157,14 @@ async fn a_credential_less_record_reports_needs_value() -> Result<()> {
 async fn rotate_and_remove_report_not_found_for_an_unknown_record() -> Result<()> {
     let (_home, store) = store().await?;
     let err = store
-        .rotate("agent-a", "fal-a1b2c3", cred("v"))
+        .rotate("riskoff", "fal-a1b2c3", cred("v"))
         .await
         .unwrap_err();
     assert!(
         matches!(&err, StoreError::NotFound { name } if name == "fal-a1b2c3"),
         "got {err:?}"
     );
-    assert!(store.remove("agent-a", "fal-a1b2c3").await.is_err());
+    assert!(store.remove("riskoff", "fal-a1b2c3").await.is_err());
     Ok(())
 }
 
@@ -173,18 +173,18 @@ async fn update_generic_is_owner_only_generic_only_and_env_var_stable() -> Resul
     let (_home, store) = store().await?;
     store
         .create(
-            generic("agent-a", "generic-a1b2c3", "EXAMPLE_KEY"),
+            generic("riskoff", "generic-a1b2c3", "EXAMPLE_KEY"),
             cred("v"),
         )
         .await?;
     store
-        .create(builtin("agent-a", "fal-d4e5f6"), cred("v"))
+        .create(builtin("riskoff", "fal-d4e5f6"), cred("v"))
         .await?;
 
     // Built-ins have no endpoints to edit.
     let err = store
         .update_generic(
-            "agent-a",
+            "riskoff",
             "fal-d4e5f6",
             GenericSpec {
                 env_var: "FAL_KEY".into(),
@@ -203,7 +203,7 @@ async fn update_generic_is_owner_only_generic_only_and_env_var_stable() -> Resul
     // Rebinding to a different env var is a create, not a config edit.
     let err = store
         .update_generic(
-            "agent-a",
+            "riskoff",
             "generic-a1b2c3",
             GenericSpec {
                 env_var: "OTHER_KEY".into(),
@@ -222,7 +222,7 @@ async fn update_generic_is_owner_only_generic_only_and_env_var_stable() -> Resul
     // Hosts are normalized and the cleared prefix sticks.
     store
         .update_generic(
-            "agent-a",
+            "riskoff",
             "generic-a1b2c3",
             GenericSpec {
                 env_var: "EXAMPLE_KEY".into(),
@@ -235,7 +235,7 @@ async fn update_generic_is_owner_only_generic_only_and_env_var_stable() -> Resul
             },
         )
         .await?;
-    let record = store.get("agent-a", "generic-a1b2c3").await?;
+    let record = store.get("riskoff", "generic-a1b2c3").await?;
     let spec = record.kind.generic().expect("generic record");
     assert_eq!(
         spec.upstream_hosts,
@@ -249,11 +249,11 @@ async fn update_generic_is_owner_only_generic_only_and_env_var_stable() -> Resul
 async fn share_creates_a_read_only_borrowed_reference() -> Result<()> {
     let (_home, store) = store().await?;
     store
-        .create(builtin("agent-a", "fal-a1b2c3"), cred("real-value"))
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("real-value"))
         .await?;
 
-    let borrowed = store.share("agent-a", "fal-a1b2c3", "right").await?;
-    assert_eq!(borrowed.owner_agent, "agent-a");
+    let borrowed = store.share("riskoff", "fal-a1b2c3", "right").await?;
+    assert_eq!(borrowed.owner_agent, "riskoff");
     assert_eq!(borrowed.borrower_agent.as_deref(), Some("right"));
     assert_eq!(borrowed.holder_agent(), "right");
     assert_eq!(borrowed.env_var, "FAL_KEY");
@@ -267,7 +267,7 @@ async fn share_creates_a_read_only_borrowed_reference() -> Result<()> {
     ] {
         assert!(
             matches!(&err, StoreError::BorrowedReadOnly { name, owner }
-                if name == "fal-a1b2c3" && owner == "agent-a"),
+                if name == "fal-a1b2c3" && owner == "riskoff"),
             "got {err:?}"
         );
     }
@@ -278,13 +278,13 @@ async fn share_creates_a_read_only_borrowed_reference() -> Result<()> {
 async fn resharing_points_at_the_true_owner_not_the_intermediary() -> Result<()> {
     let (_home, store) = store().await?;
     store
-        .create(builtin("agent-a", "fal-a1b2c3"), cred("real-value"))
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("real-value"))
         .await?;
-    store.share("agent-a", "fal-a1b2c3", "right").await?;
+    store.share("riskoff", "fal-a1b2c3", "right").await?;
 
     let third = store.share("right", "fal-a1b2c3", "scout").await?;
     assert_eq!(
-        third.owner_agent, "agent-a",
+        third.owner_agent, "riskoff",
         "a re-share resolves to the owning agent, never the intermediary"
     );
     Ok(())
@@ -294,11 +294,11 @@ async fn resharing_points_at_the_true_owner_not_the_intermediary() -> Result<()>
 async fn share_rejects_self_and_duplicate_destinations() -> Result<()> {
     let (_home, store) = store().await?;
     store
-        .create(builtin("agent-a", "fal-a1b2c3"), cred("v"))
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("v"))
         .await?;
 
     let err = store
-        .share("agent-a", "fal-a1b2c3", "agent-a")
+        .share("riskoff", "fal-a1b2c3", "riskoff")
         .await
         .unwrap_err();
     assert!(
@@ -306,9 +306,9 @@ async fn share_rejects_self_and_duplicate_destinations() -> Result<()> {
         "got {err:?}"
     );
 
-    store.share("agent-a", "fal-a1b2c3", "right").await?;
+    store.share("riskoff", "fal-a1b2c3", "right").await?;
     let err = store
-        .share("agent-a", "fal-a1b2c3", "right")
+        .share("riskoff", "fal-a1b2c3", "right")
         .await
         .unwrap_err();
     assert!(
@@ -322,19 +322,19 @@ async fn share_rejects_self_and_duplicate_destinations() -> Result<()> {
 async fn unshare_drops_the_reference_and_never_the_record() -> Result<()> {
     let (_home, store) = store().await?;
     store
-        .create(builtin("agent-a", "fal-a1b2c3"), cred("v"))
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("v"))
         .await?;
-    store.share("agent-a", "fal-a1b2c3", "right").await?;
+    store.share("riskoff", "fal-a1b2c3", "right").await?;
 
     store.unshare("right", "fal-a1b2c3").await?;
     assert!(store.list("right").await?.is_empty());
     assert_eq!(
-        store.list("agent-a").await?.len(),
+        store.list("riskoff").await?.len(),
         1,
         "owner keeps the record"
     );
 
-    let err = store.unshare("agent-a", "fal-a1b2c3").await.unwrap_err();
+    let err = store.unshare("riskoff", "fal-a1b2c3").await.unwrap_err();
     assert!(
         matches!(&err, StoreError::ShareConflict { reason }
             if reason.contains("use remove, not unshare")),
@@ -347,14 +347,14 @@ async fn unshare_drops_the_reference_and_never_the_record() -> Result<()> {
 async fn owner_removal_re_homes_to_a_surviving_borrower() -> Result<()> {
     let (_home, store) = store().await?;
     store
-        .create(builtin("agent-a", "fal-a1b2c3"), cred("real-value"))
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("real-value"))
         .await?;
-    store.share("agent-a", "fal-a1b2c3", "alpha").await?;
-    store.share("agent-a", "fal-a1b2c3", "beta").await?;
+    store.share("riskoff", "fal-a1b2c3", "alpha").await?;
+    store.share("riskoff", "fal-a1b2c3", "beta").await?;
 
-    store.remove("agent-a", "fal-a1b2c3").await?;
+    store.remove("riskoff", "fal-a1b2c3").await?;
 
-    assert!(store.list("agent-a").await?.is_empty(), "owner detached");
+    assert!(store.list("riskoff").await?.is_empty(), "owner detached");
     let alpha = store.get("alpha", "fal-a1b2c3").await?;
     assert_eq!(
         alpha.owner_agent, "alpha",
@@ -377,11 +377,11 @@ async fn owner_removal_re_homes_to_a_surviving_borrower() -> Result<()> {
 async fn owner_removal_deletes_the_record_when_nobody_borrows_it() -> Result<()> {
     let (_home, store) = store().await?;
     store
-        .create(builtin("agent-a", "fal-a1b2c3"), cred("v"))
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("v"))
         .await?;
-    store.remove("agent-a", "fal-a1b2c3").await?;
-    assert!(store.list("agent-a").await?.is_empty());
-    assert!(store.get("agent-a", "fal-a1b2c3").await.is_err());
+    store.remove("riskoff", "fal-a1b2c3").await?;
+    assert!(store.list("riskoff").await?.is_empty());
+    assert!(store.get("riskoff", "fal-a1b2c3").await.is_err());
     Ok(())
 }
 
@@ -389,21 +389,21 @@ async fn owner_removal_deletes_the_record_when_nobody_borrows_it() -> Result<()>
 async fn list_returns_owned_then_borrowed() -> Result<()> {
     let (_home, store) = store().await?;
     store
-        .create(builtin("agent-a", "fal-a1b2c3"), cred("v"))
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("v"))
         .await?;
     store
         .create(generic("other", "generic-d4e5f6", "EXAMPLE_KEY"), cred("v"))
         .await?;
-    store.share("other", "generic-d4e5f6", "agent-a").await?;
+    store.share("other", "generic-d4e5f6", "riskoff").await?;
 
-    let listed = store.list("agent-a").await?;
+    let listed = store.list("riskoff").await?;
     let shape: Vec<(&str, Option<&str>)> = listed
         .iter()
         .map(|r| (r.name.as_str(), r.borrower_agent.as_deref()))
         .collect();
     assert_eq!(
         shape,
-        vec![("fal-a1b2c3", None), ("generic-d4e5f6", Some("agent-a"))]
+        vec![("fal-a1b2c3", None), ("generic-d4e5f6", Some("riskoff"))]
     );
     Ok(())
 }
@@ -412,10 +412,10 @@ async fn list_returns_owned_then_borrowed() -> Result<()> {
 async fn source_ref_binding_carries_names_and_hosts_only() -> Result<()> {
     let (_home, store) = store().await?;
     store
-        .create(builtin("agent-a", "fal-a1b2c3"), cred("real-value"))
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("real-value"))
         .await?;
 
-    let binding = store.source_ref_binding("agent-a", "fal-a1b2c3").await?;
+    let binding = store.source_ref_binding("riskoff", "fal-a1b2c3").await?;
     assert_eq!(binding.env_var, "FAL_KEY");
     assert_eq!(binding.source_env_var, "RIGHT_PROVIDER_FAL_A1B2C3");
     assert_eq!(binding.placeholder, "$MSB_FAL_KEY");
@@ -447,11 +447,11 @@ async fn a_borrower_can_bind_the_owner_s_credential() -> Result<()> {
     let (_home, store) = store().await?;
     store
         .create(
-            generic("agent-a", "generic-b0rr0w", "BORROW_KEY"),
+            generic("riskoff", "generic-b0rr0w", "BORROW_KEY"),
             cred("shared-value"),
         )
         .await?;
-    store.share("agent-a", "generic-b0rr0w", "right").await?;
+    store.share("riskoff", "generic-b0rr0w", "right").await?;
 
     let binding = store.source_ref_binding("right", "generic-b0rr0w").await?;
     assert_eq!(binding.env_var, "BORROW_KEY");
@@ -464,10 +464,10 @@ async fn a_borrower_can_bind_the_owner_s_credential() -> Result<()> {
 async fn an_unusable_credential_is_a_hard_error_not_an_empty_binding() -> Result<()> {
     let (_home, store) = store().await?;
     store
-        .create(generic("agent-a", "generic-empty1", "EMPTY_KEY"), cred(""))
+        .create(generic("riskoff", "generic-empty1", "EMPTY_KEY"), cred(""))
         .await?;
     let err = store
-        .source_ref_binding("agent-a", "generic-empty1")
+        .source_ref_binding("riskoff", "generic-empty1")
         .await
         .unwrap_err();
     assert!(
@@ -478,12 +478,12 @@ async fn an_unusable_credential_is_a_hard_error_not_an_empty_binding() -> Result
 
     store
         .create(
-            generic("agent-a", "generic-redact", "REDACT_KEY"),
+            generic("riskoff", "generic-redact", "REDACT_KEY"),
             cred(REDACTION_SENTINEL),
         )
         .await?;
     let err = store
-        .source_ref_binding("agent-a", "generic-redact")
+        .source_ref_binding("riskoff", "generic-redact")
         .await
         .unwrap_err();
     assert!(
@@ -497,8 +497,8 @@ async fn an_unusable_credential_is_a_hard_error_not_an_empty_binding() -> Result
 fn source_env_var_is_deterministic_and_shell_safe() {
     assert_eq!(source_env_var("fal-a1b2c3"), "RIGHT_PROVIDER_FAL_A1B2C3");
     assert_eq!(
-        source_env_var("agent-a-generic-1"),
-        "RIGHT_PROVIDER_agent-a_GENERIC_1"
+        source_env_var("riskoff-generic-1"),
+        "RIGHT_PROVIDER_RISKOFF_GENERIC_1"
     );
 }
 
@@ -507,11 +507,11 @@ async fn the_per_agent_lock_serializes_callers() -> Result<()> {
     let (_home, store) = store().await?;
     let store = std::sync::Arc::new(store);
 
-    let first = store.agent_lock("agent-a").await;
+    let first = store.agent_lock("riskoff").await;
     let contender = tokio::spawn({
         let store = std::sync::Arc::clone(&store);
         async move {
-            let _guard = store.agent_lock("agent-a").await;
+            let _guard = store.agent_lock("riskoff").await;
         }
     });
     // A different agent is never blocked by this guard.

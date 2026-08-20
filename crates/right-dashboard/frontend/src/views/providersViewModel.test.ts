@@ -127,15 +127,15 @@ describe('isBorrowed / borrowedOwnerLabel', () => {
   })
 
   it('treats a non-empty shared_from as borrowed and builds the owner label', () => {
-    const p = providerView({ shared_from: 'agent-a' })
+    const p = providerView({ shared_from: 'riskoff' })
     expect(isBorrowed(p)).toBe(true)
-    expect(borrowedOwnerLabel(p)).toBe('Shared from agent-a')
+    expect(borrowedOwnerLabel(p)).toBe('Shared from riskoff')
   })
 })
 
 describe('shareTargetState', () => {
   function peer(overrides: Partial<ProviderPeer> = {}): ProviderPeer {
-    return { agent: 'agent-a', network_policy: 'permissive', providers: [], ...overrides }
+    return { agent: 'riskoff', network_policy: 'permissive', providers: [], ...overrides }
   }
 
   it('allows sharing an owned provider to a peer that lacks it', () => {
@@ -168,18 +168,18 @@ describe('borrowCandidates', () => {
     return { name: 'fal', type: 'right-fal', env_var: 'FAL_KEY', label: null, generic: null, ...overrides }
   }
   function peer(overrides: Partial<ProviderPeer> = {}): ProviderPeer {
-    return { agent: 'agent-a', network_policy: 'permissive', providers: [], ...overrides }
+    return { agent: 'riskoff', network_policy: 'permissive', providers: [], ...overrides }
   }
 
   it('flattens every peer provider into a candidate tagged with its owner agent', () => {
     const peers = [
-      peer({ agent: 'agent-a', providers: [peerProvider({ name: 'fal' }), peerProvider({ name: 'openai' })] }),
+      peer({ agent: 'riskoff', providers: [peerProvider({ name: 'fal' }), peerProvider({ name: 'openai' })] }),
       peer({ agent: 'scout', providers: [peerProvider({ name: 'gh' })] }),
     ]
     const got = borrowCandidates(peers, [])
     expect(got.map((c) => [c.owner, c.provider.name])).toEqual([
-      ['agent-a', 'fal'],
-      ['agent-a', 'openai'],
+      ['riskoff', 'fal'],
+      ['riskoff', 'openai'],
       ['scout', 'gh'],
     ])
     expect(got.every((c) => c.blocked === null)).toBe(true)

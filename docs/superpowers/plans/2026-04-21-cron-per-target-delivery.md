@@ -2305,19 +2305,19 @@ Expected: clean.
 Run: `cargo test --workspace`
 Expected: all green.
 
-- [ ] **Step 3: Manual smoke against the `agent-b` agent**
+- [ ] **Step 3: Manual smoke against the `him` agent**
 
 (Run from your dev machine with the bot stopped; do not commit any state changes.)
 
 ```bash
 # Inspect the existing cron — should have NULL target after migration.
-sqlite3 ~/.rightclaw/agents/agent-b/data.db "SELECT job_name, target_chat_id, target_thread_id FROM cron_specs;"
+sqlite3 ~/.rightclaw/agents/him/data.db "SELECT job_name, target_chat_id, target_thread_id FROM cron_specs;"
 ```
 Expected: existing rows show `NULL | NULL`.
 
 - [ ] **Step 4: Doctor smoke test**
 
-Run: `cargo run -p rightclaw-cli -- doctor --agent agent-b`
+Run: `cargo run -p rightclaw-cli -- doctor --agent him`
 Expected: a `cron targets` warn line for each NULL-target cron, with the `cron_update` fix hint.
 
 - [ ] **Step 5: Manual fix the agenda cron via `cron_update`**
@@ -2325,7 +2325,7 @@ Expected: a `cron targets` warn line for each NULL-target cron, with the `cron_u
 This step is for the operator to run after deploy — document it in the release notes:
 
 ```
-В Telegram-чате с agent-b: попроси агента вызвать
+В Telegram-чате с him: попроси агента вызвать
   cron_update job_name=<имя крона> target_chat_id=-1001234567890
 для перенацеливания agenda на группу aibots.
 ```

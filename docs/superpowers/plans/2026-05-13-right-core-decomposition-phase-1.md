@@ -12,7 +12,7 @@
 
 ## Scope
 
-This plan implements only Phase 1 from [2026-05-13-right-core-decomposition-design.md](/Users/developer/dev/rightclaw/docs/superpowers/specs/2026-05-13-right-core-decomposition-design.md).
+This plan implements only Phase 1 from [2026-05-13-right-core-decomposition-design.md](/Users/molt/dev/rightclaw/docs/superpowers/specs/2026-05-13-right-core-decomposition-design.md).
 
 Out of scope for this plan:
 
@@ -27,7 +27,7 @@ Those need separate plans after Phase 1 is verified.
 
 ## Execution Notes
 
-- Run every command from `/Users/developer/dev/rightclaw`.
+- Run every command from `/Users/molt/dev/rightclaw`.
 - Prefix commands with `devenv shell --`.
 - Before writing Rust implementation code, use `rust-dev:rust-dev` if that skill is available in the execution session. If unavailable, state that explicitly and follow `AGENTS.rust.md`.
 - Existing unrelated modified files may be present. Do not stage or revert them.

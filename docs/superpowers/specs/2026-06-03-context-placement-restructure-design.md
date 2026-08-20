@@ -26,7 +26,7 @@ system prompt. So the system prefix differs on nearly every turn.
 - **right agent:** Anthropic's own `cache_miss_reason` names
   `system_changed` as the dominant cause — **110 turns, 8.59M missed
   tokens**; ~12.7M–22.8M wasted `cache_creation` tokens (≈80% of all cc).
-- **agent-b agent:** opening-turn (`--resume`) median `cache_read` ≈ 9.5k but
+- **him agent:** opening-turn (`--resume`) median `cache_read` ≈ 9.5k but
   median `cache_creation` ≈ 109.6k — the inverse of a healthy resume; ≈98%
   of `cache_creation` tokens (~300M) paid by write instead of read (~12×
   penalty on the busted portion).
@@ -217,7 +217,7 @@ for stdin (recall + edge-triggered memory-status + repair-notice; the
   prefix; `cache_creation` per turn drops to roughly the new user message +
   new assistant output.
 - Estimated recovered `cache_creation`: ~12.7M–22.8M tokens on right; the
-  ~300M-equivalent on agent-b.
+  ~300M-equivalent on him.
 - Tool-related (`tools_changed`) and model (`model_changed`) misses are out
   of scope (spec 2).
 

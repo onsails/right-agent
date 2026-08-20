@@ -6,7 +6,7 @@
 
 ## Problem
 
-Agent `agent-a` went functionally dead while its process stayed alive. Every
+Agent `riskoff` went functionally dead while its process stayed alive. Every
 per-operation DB open failed in a hot loop:
 
 ```
@@ -194,7 +194,7 @@ always rescans the WAL on open and tolerates a torn/truncated tail: truncating
 plus the valid WAL prefix — no error. The real desync occurs only when Turso
 trusts a **stale persisted authority** (`-tshm`) accumulated across process
 generations without rescanning. Turso's heal-after-sidecar-removal is therefore
-established by the spike (Q3) and the live `agent-a` recovery, not re-proven in
+established by the spike (Q3) and the live `riskoff` recovery, not re-proven in
 CI. Committed tests cover **our** code deterministically:
 
 1. **Detector unit test** (`error.rs`): construct

@@ -214,7 +214,7 @@ path.
 ## Out of scope
 
 - The user's live agents were investigated (read-only) and are healthy:
-  `agent-b` and `right` both have all three identity files present in-sandbox,
+  `him` and `right` both have all three identity files present in-sandbox,
   byte-matching the host mirrors, with no recreate/migration in the logs. The
   "missing" report was a transient exec timeout (addressed by §D), not data
   loss — so no platform/data-recovery work is needed.

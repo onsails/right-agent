@@ -20,7 +20,7 @@ fn credential_debug_never_renders_the_value() {
 fn record_debug_has_no_credential_field() {
     let record = ProviderRecord {
         name: "fal-a1b2c3".into(),
-        owner_agent: "agent-a".into(),
+        owner_agent: "riskoff".into(),
         kind: ProviderKind::Builtin("right-fal".into()),
         label: "prod".into(),
         env_var: "FAL_KEY".into(),
@@ -115,7 +115,7 @@ fn generic_spec_omits_an_absent_path_prefix() {
 fn holder_is_the_borrower_when_borrowed() {
     let record = ProviderRecord {
         name: "fal-a1b2c3".into(),
-        owner_agent: "agent-a".into(),
+        owner_agent: "riskoff".into(),
         kind: ProviderKind::Builtin("right-fal".into()),
         label: "prod".into(),
         env_var: "FAL_KEY".into(),

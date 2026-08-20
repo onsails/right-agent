@@ -513,7 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn vonder_repro_three_album_siblings_all_routed() {
-        // Reproduces the bug from ~/.right/logs/agent-b.log.2026-04-27 lines 137-152:
+        // Reproduces the bug from ~/.right/logs/him.log.2026-04-27 lines 137-152:
         // three messages sharing media_group_id, only the third carries the @mention.
         let identity = BotIdentity {
             username: "rightaww_bot".into(),

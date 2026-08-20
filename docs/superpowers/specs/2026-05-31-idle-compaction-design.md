@@ -51,7 +51,7 @@ of the full history.
 
 ### How Hermes does it (research)
 
-`/Users/developer/dev/hermes-agent/agent/context_compressor.py` runs its own
+`/Users/molt/dev/hermes-agent/agent/context_compressor.py` runs its own
 agent loop over an OpenAI-style `messages[]` array and compacts that array
 directly: prune old tool outputs → protect a head (`protect_first_n=3`)
 → protect a **token-budgeted tail** (≈20% of the threshold, with a

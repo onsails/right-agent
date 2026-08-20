@@ -5,7 +5,7 @@
 
 ## Problem
 
-Agent `agent-b` told the user to run `/mcp auth composio` after a Composio
+Agent `him` told the user to run `/mcp auth composio` after a Composio
 tool returned `has_active_connection: false` for Google Docs. That advice
 was wrong on two levels:
 
@@ -93,17 +93,17 @@ Insert a new row in the table:
 
 ## Verification
 
-After bot restart (`right restart agent-b`):
+After bot restart (`right restart him`):
 
-1. In the `aibots` chat, ask `agent-b` to read the same Google Doc that
+1. In the `aibots` chat, ask `him` to read the same Google Doc that
    triggered the original misdirection.
 2. Expected behavior:
    - Agent calls `COMPOSIO_MANAGE_CONNECTIONS` (as Composio's own
      `status_message` instructs), OR
    - Agent relays Composio's `status_message` verbatim to the user.
    - Agent does **not** suggest `/mcp auth composio`.
-3. Inspect `~/.right/logs/agent-b.log.<date>`:
-   `rg "/mcp auth composio" ~/.right/logs/agent-b.log.<date>` should show
+3. Inspect `~/.right/logs/him.log.<date>`:
+   `rg "/mcp auth composio" ~/.right/logs/him.log.<date>` should show
    no new entries in `📝` (assistant text) lines after the restart
    timestamp.
 

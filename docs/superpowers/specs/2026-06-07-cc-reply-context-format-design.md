@@ -5,7 +5,7 @@
 
 ## Problem
 
-Agent "agent-b" replied "🍄?" (confusion) to a bare-mention reply. Root cause,
+Agent "him" replied "🍄?" (confusion) to a bare-mention reply. Root cause,
 verified from the sandbox CC transcript for session
 `f7d5a319-447f-4e58-ba8f-3c23dd476367`, turn 6:
 

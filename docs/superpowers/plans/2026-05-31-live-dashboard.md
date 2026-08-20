@@ -169,7 +169,7 @@ Expected: PASS (3 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/composables/liveStatus.ts crates/right-dashboard/frontend/src/composables/liveStatus.test.ts
 git commit -m "feat(dashboard): liveStatus store with pure reduce/classify"
@@ -217,7 +217,7 @@ Expected: PASS (no errors).
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/composables/liveConfig.ts
 git commit -m "feat(dashboard): liveConfig provide/inject for poll interval"
@@ -403,7 +403,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/composables/useLiveResource.ts crates/right-dashboard/frontend/src/composables/useLiveResource.test.ts
 git commit -m "feat(dashboard): useLiveResource polling composable"
@@ -477,7 +477,7 @@ Expected: PASS (3 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/views/activitySelection.ts crates/right-dashboard/frontend/src/views/activitySelection.test.ts
 git commit -m "feat(dashboard): activityContainsRun selection helper"
@@ -518,7 +518,7 @@ Expected: PASS.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/views/UsageContainer.vue
 git commit -m "feat(dashboard): UsageContainer self-fetches via useLiveResource"
@@ -596,7 +596,7 @@ Expected: PASS.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/views/IdentityContainer.vue
 git commit -m "feat(dashboard): IdentityContainer (30s poll + file detail)"
@@ -637,7 +637,7 @@ Expected: PASS.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/views/learning/ReportsContainer.vue
 git commit -m "feat(dashboard): ReportsContainer self-fetches learning overview"
@@ -738,7 +738,7 @@ Expected: PASS.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/views/SkillsContainer.vue
 git commit -m "feat(dashboard): SkillsContainer (poll + skill detail + pin)"
@@ -786,7 +786,7 @@ Expected: PASS.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/views/KnowledgeContainer.vue
 git commit -m "feat(dashboard): KnowledgeContainer routes learning/skills subtabs"
@@ -833,7 +833,7 @@ Expected: PASS.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/views/OverviewContainer.vue
 git commit -m "feat(dashboard): OverviewContainer (overview + activity resources)"
@@ -920,7 +920,7 @@ Expected: PASS.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/views/ActivityContainer.vue
 git commit -m "feat(dashboard): ActivityContainer (poll + run detail + reconcile)"
@@ -975,7 +975,7 @@ Expected: PASS.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/views/HealthContainer.vue
 git commit -m "feat(dashboard): HealthContainer (manual doctor/sandbox refresh)"
@@ -1136,7 +1136,7 @@ Expected: PASS — the SPA compiles.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 test "$(git rev-parse --abbrev-ref HEAD)" = master || { echo "not on master"; exit 1; }
 git add crates/right-dashboard/frontend/src/App.vue
 git rm crates/right-dashboard/frontend/src/views/KnowledgeView.vue

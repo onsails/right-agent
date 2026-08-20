@@ -112,20 +112,20 @@ mod provider_validation_tests {
 
     #[test]
     fn validate_name_accepts_legacy_agent_prefixed() {
-        validate_name("agent-a", "agent-a-provider").expect("legacy {agent}-{slug} must validate");
+        validate_name("riskoff", "riskoff-fal").expect("legacy {agent}-{slug} must validate");
     }
 
     #[test]
     fn validate_name_accepts_agent_agnostic_uuid_form() {
-        validate_name("agent-a", "fal-a1b2c3").expect("agent-agnostic name must validate");
+        validate_name("riskoff", "fal-a1b2c3").expect("agent-agnostic name must validate");
     }
 
     #[test]
     fn validate_name_rejects_bad_agnostic_forms() {
-        assert!(validate_name("agent-a", "Fal-a1b2c3").is_err()); // uppercase
-        assert!(validate_name("agent-a", "1fal-a1b2c3").is_err()); // leading digit
-        assert!(validate_name("agent-a", "").is_err()); // empty
-        assert!(validate_name("agent-a", &"f".repeat(41)).is_err()); // over 40-char slug cap
+        assert!(validate_name("riskoff", "Fal-a1b2c3").is_err()); // uppercase
+        assert!(validate_name("riskoff", "1fal-a1b2c3").is_err()); // leading digit
+        assert!(validate_name("riskoff", "").is_err()); // empty
+        assert!(validate_name("riskoff", &"f".repeat(41)).is_err()); // over 40-char slug cap
     }
 
     #[test]
@@ -220,7 +220,7 @@ mod provider_view_tests {
     fn record(kind: ProviderKind, status: right_providers::ProviderStatus) -> ProviderRecord {
         ProviderRecord {
             name: "fal-a1b2c3".into(),
-            owner_agent: "agent-a".into(),
+            owner_agent: "riskoff".into(),
             kind,
             label: String::new(),
             env_var: "FAL_KEY".into(),
@@ -278,7 +278,7 @@ mod provider_view_tests {
         );
         rec.borrower_agent = Some("right".into());
         let json = serde_json::to_value(record_view(&rec)).unwrap();
-        assert_eq!(json["shared_from"], "agent-a");
+        assert_eq!(json["shared_from"], "riskoff");
     }
 
     #[test]
@@ -337,7 +337,7 @@ mod provider_view_tests {
         ));
         let serialized = serialize_provider_entry(&entry);
         assert!(
-            !serialized.contains("shared_from") && !serialized.contains("agent-a"),
+            !serialized.contains("shared_from") && !serialized.contains("riskoff"),
             "borrowed record must not leak ownership into agent.yaml; got: {serialized}"
         );
     }
@@ -460,21 +460,21 @@ mod plan_share_tests {
 
     #[test]
     fn plan_share_rejects_dup_when_dest_already_has_record() {
-        let existing = vec![HeldProvider::new("fal-a1b2c3", "agent-a")];
-        let e = plan_share("agent-a", "right", "fal-a1b2c3", &existing).unwrap_err();
+        let existing = vec![HeldProvider::new("fal-a1b2c3", "riskoff")];
+        let e = plan_share("riskoff", "right", "fal-a1b2c3", &existing).unwrap_err();
         assert!(matches!(e, StoreError::ShareConflict { .. }));
     }
 
     #[test]
     fn plan_share_accepts_new_record() {
-        plan_share("agent-a", "right", "fal-a1b2c3", &[]).expect("share into a fresh dest is ok");
+        plan_share("riskoff", "right", "fal-a1b2c3", &[]).expect("share into a fresh dest is ok");
     }
 
     #[test]
     fn plan_share_rejects_dup_even_when_dest_borrows_same_name_from_elsewhere() {
         // Name uniqueness is per-holding-agent regardless of owner.
         let existing = vec![HeldProvider::new("fal-a1b2c3", "someone-else")];
-        assert!(plan_share("agent-a", "right", "fal-a1b2c3", &existing).is_err());
+        assert!(plan_share("riskoff", "right", "fal-a1b2c3", &existing).is_err());
     }
 
     #[test]
@@ -488,14 +488,14 @@ mod plan_share_tests {
 
     #[test]
     fn plan_unshare_accepts_borrowed_entry() {
-        let borrowed = HeldProvider::new("fal-a1b2c3", "agent-a");
+        let borrowed = HeldProvider::new("fal-a1b2c3", "riskoff");
         plan_unshare("right", &borrowed).expect("borrowed entry can be unshared");
     }
 
     #[test]
     fn true_owner_points_past_the_intermediary() {
-        let borrowed = HeldProvider::new("fal-a1b2c3", "agent-a");
-        assert_eq!(right_providers::plan::true_owner(&borrowed), "agent-a");
+        let borrowed = HeldProvider::new("fal-a1b2c3", "riskoff");
+        assert_eq!(right_providers::plan::true_owner(&borrowed), "riskoff");
     }
 }
 
@@ -1471,9 +1471,9 @@ mod peers_tests {
     #[test]
     fn require_trusted_accepts_member_rejects_others() {
         let tmp = tempfile::tempdir().unwrap();
-        write_agent(tmp.path(), "agent-a", &[7], "  providers: []\n");
-        assert!(require_trusted(tmp.path(), "agent-a", 7).is_ok());
-        let err = require_trusted(tmp.path(), "agent-a", 99).unwrap_err();
+        write_agent(tmp.path(), "riskoff", &[7], "  providers: []\n");
+        assert!(require_trusted(tmp.path(), "riskoff", 7).is_ok());
+        let err = require_trusted(tmp.path(), "riskoff", 99).unwrap_err();
         assert!(matches!(err, ProviderApiError::Unauthorized { .. }));
     }
 
@@ -1585,17 +1585,17 @@ mod peers_tests {
     async fn build_peers_excludes_self_and_untrusted_and_reports_providers() {
         let tmp = tempfile::tempdir().unwrap();
         write_agent(tmp.path(), "current", &[7], "  providers: []\n");
-        write_agent(tmp.path(), "agent-a", &[7], "  providers: []\n");
+        write_agent(tmp.path(), "riskoff", &[7], "  providers: []\n");
         write_agent(tmp.path(), "secret", &[42], "  providers: []\n");
 
         let store = open_store(tmp.path()).await;
-        create_builtin(&store, "agent-a", "agent-a-provider", "right-fal").await;
+        create_builtin(&store, "riskoff", "riskoff-fal", "right-fal").await;
 
         let peers = build_peers(&store, tmp.path(), 7, "current").await.unwrap();
         let names: Vec<&str> = peers.iter().map(|p| p.agent.as_str()).collect();
-        assert_eq!(names, vec!["agent-a"]); // self + untrusted filtered
+        assert_eq!(names, vec!["riskoff"]); // self + untrusted filtered
         assert_eq!(peers[0].providers.len(), 1);
-        assert_eq!(peers[0].providers[0].name, "agent-a-provider");
+        assert_eq!(peers[0].providers[0].name, "riskoff-fal");
         assert_eq!(peers[0].providers[0].env_var, "FAL_KEY");
         assert_eq!(peers[0].network_policy, "permissive");
     }
@@ -1606,20 +1606,20 @@ mod peers_tests {
         // only); the credential value never crosses the read path.
         let tmp = tempfile::tempdir().unwrap();
         write_agent(tmp.path(), "current", &[7], "  providers: []\n");
-        write_agent(tmp.path(), "agent-a", &[7], "  providers: []\n");
+        write_agent(tmp.path(), "riskoff", &[7], "  providers: []\n");
         write_agent(tmp.path(), "borrower", &[7], "  providers: []\n");
 
         let store = open_store(tmp.path()).await;
-        create_builtin(&store, "agent-a", "agent-a-provider", "right-fal").await;
+        create_builtin(&store, "riskoff", "riskoff-fal", "right-fal").await;
         store
-            .share("agent-a", "agent-a-provider", "borrower")
+            .share("riskoff", "riskoff-fal", "borrower")
             .await
             .expect("share to borrower");
 
         let peers = build_peers(&store, tmp.path(), 7, "current").await.unwrap();
         let borrower = peers.iter().find(|p| p.agent == "borrower").unwrap();
         assert_eq!(borrower.providers.len(), 1);
-        assert_eq!(borrower.providers[0].name, "agent-a-provider");
+        assert_eq!(borrower.providers[0].name, "riskoff-fal");
         assert_eq!(borrower.providers[0].env_var, "FAL_KEY");
         // PeerProvider has no credential field at all — structural redaction.
     }

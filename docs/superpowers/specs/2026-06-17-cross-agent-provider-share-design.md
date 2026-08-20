@@ -30,7 +30,7 @@ resolves the real secret on each, with no read-back. Verified:
 Two distinct needs were conflated by "copy". Per product decisions only one is
 kept:
 - **Share the same account** across agents (e.g. one fal account for `right` and
-  `agent-a`) → multi-attach. **Keep.**
+  `riskoff`) → multi-attach. **Keep.**
 - **Independent copy** (separate records, independent rotation) → needs the
   secret value, unreadable from the host → **dropped** (decision §Decisions.3).
 
@@ -85,7 +85,7 @@ Ownership is recorded in `agent.yaml`, not in the name. Owner's entry has no
 borrowed so reconcile/UI never try to own/rotate/delete it:
 
 ```yaml
-# owner (agent-a)
+# owner (riskoff)
 sandbox:
   providers:
     - name: fal-a1b2c3             # agent-agnostic record id
@@ -94,7 +94,7 @@ sandbox:
 sandbox:
   providers:
     - name: fal-a1b2c3             # SAME record id
-      shared_from: agent-a         # presence ⇒ borrowed; read-only for this agent
+      shared_from: riskoff         # presence ⇒ borrowed; read-only for this agent
 ```
 
 `shared_from: None` (absent) = owned. Backward-compatible additive field

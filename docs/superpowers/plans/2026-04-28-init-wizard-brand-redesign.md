@@ -68,7 +68,7 @@ Goal: ship the shared module with full unit-test coverage. Touches zero command 
 
 - [ ] **Step 1: Add insta to workspace deps**
 
-Edit `/Users/developer/dev/rightclaw/Cargo.toml`. Inside `[workspace.dependencies]`, add (alphabetical order, near `inquire`):
+Edit `/Users/molt/dev/rightclaw/Cargo.toml`. Inside `[workspace.dependencies]`, add (alphabetical order, near `inquire`):
 
 ```toml
 insta = { version = "1.41", features = ["yaml"] }
@@ -76,7 +76,7 @@ insta = { version = "1.41", features = ["yaml"] }
 
 - [ ] **Step 2: Add insta to right-agent dev-dependencies**
 
-Edit `/Users/developer/dev/rightclaw/crates/right-agent/Cargo.toml`. Locate `[dev-dependencies]` (or add it if absent) and add:
+Edit `/Users/molt/dev/rightclaw/crates/right-agent/Cargo.toml`. Locate `[dev-dependencies]` (or add it if absent) and add:
 
 ```toml
 [dev-dependencies]
@@ -217,7 +217,7 @@ impl std::error::Error for BlockAlreadyRendered {}
 
 - [ ] **Step 5: Wire the module into `lib.rs`**
 
-Edit `/Users/developer/dev/rightclaw/crates/right-agent/src/lib.rs`. Find the existing `pub mod` declarations (alphabetical) and add:
+Edit `/Users/molt/dev/rightclaw/crates/right-agent/src/lib.rs`. Find the existing `pub mod` declarations (alphabetical) and add:
 
 ```rust
 pub mod ui;
@@ -1363,7 +1363,7 @@ Expected: FAIL — current `cmd_doctor` doesn't print `▐ diagnostics` or `chec
 
 - [ ] **Step 1: Add a `to_ui_line` helper in doctor.rs**
 
-Edit `/Users/developer/dev/rightclaw/crates/right-agent/src/doctor.rs`. Locate the `impl fmt::Display for DoctorCheck` block (lines 26–39). Replace the block with:
+Edit `/Users/molt/dev/rightclaw/crates/right-agent/src/doctor.rs`. Locate the `impl fmt::Display for DoctorCheck` block (lines 26–39). Replace the block with:
 
 ```rust
 use crate::ui::{self, Glyph};
@@ -1397,7 +1397,7 @@ If only the `use` remains, delete that line.
 
 - [ ] **Step 2: Update `cmd_doctor` to use ui::Block**
 
-Edit `/Users/developer/dev/rightclaw/crates/right/src/main.rs`. Locate `cmd_doctor` (line 1868). Replace its body (lines 1868–1892) with:
+Edit `/Users/molt/dev/rightclaw/crates/right/src/main.rs`. Locate `cmd_doctor` (line 1868). Replace its body (lines 1868–1892) with:
 
 ```rust
 fn cmd_doctor(home: &Path) -> miette::Result<()> {
@@ -1666,7 +1666,7 @@ async fn cmd_status(home: &Path) -> miette::Result<()> {
 
 `miette` will format `BlockAlreadyRendered` as an empty Display (we set it that way), but it still prints a brief "Error:" header. Update the top-level error handler to suppress that case.
 
-Locate `fn main()` in `/Users/developer/dev/rightclaw/crates/right/src/main.rs` (search for `#[tokio::main]` or `fn main`). Find the place where `miette::Result` is unwrapped at the binary boundary. If the pattern is:
+Locate `fn main()` in `/Users/molt/dev/rightclaw/crates/right/src/main.rs` (search for `#[tokio::main]` or `fn main`). Find the place where `miette::Result` is unwrapped at the binary boundary. If the pattern is:
 
 ```rust
 fn main() -> miette::Result<()> {
@@ -1822,7 +1822,7 @@ Expected: FAIL — current `cmd_init` prints no splash, no `▐ ready`, no `next
 
 - [ ] **Step 1: Add a probe helper at the top of `cmd_init`**
 
-Edit `cmd_init` in `/Users/developer/dev/rightclaw/crates/right/src/main.rs`. Right after the `let interactive = !yes;` line (1085), insert:
+Edit `cmd_init` in `/Users/molt/dev/rightclaw/crates/right/src/main.rs`. Right after the `let interactive = !yes;` line (1085), insert:
 
 ```rust
     // Brand: splash + dependency probe.
@@ -2908,7 +2908,7 @@ Need to read where the existing CLI is parsed (clap derive). The `--home`, `--de
 
 - [ ] **Step 1: Add the flag to `Cli`**
 
-In `/Users/developer/dev/rightclaw/crates/right/src/main.rs`, locate the top-level clap struct (likely named `Cli`). Add a field:
+In `/Users/molt/dev/rightclaw/crates/right/src/main.rs`, locate the top-level clap struct (likely named `Cli`). Add a field:
 
 ```rust
     /// Disable color output. Equivalent to setting NO_COLOR=1 for this run.

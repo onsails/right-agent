@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give a foreground agent a `mcp__right__send_message` tool to deliver multiple standalone rich messages (photo+caption, documents, …) mid-turn, and guard the worker against the invisible, unbounded structured-output schema-rejection loop that caused the `agent-a` hang.
+**Goal:** Give a foreground agent a `mcp__right__send_message` tool to deliver multiple standalone rich messages (photo+caption, documents, …) mid-turn, and guard the worker against the invisible, unbounded structured-output schema-rejection loop that caused the `riskoff` hang.
 
 **Architecture:** Part A reuses the existing `send_progress` cross-process channel (aggregator MCP server → bot Unix-socket route → Telegram) and the existing `partition_sends`/`send_attachments` delivery path; the only new wire type lives in `right-mcp` (shared by `right` and `bot`). Part B adds a counter in the `invoke_cc` stream loop that detects 3 consecutive schema rejections, kills the child, and routes to the existing reflection primitive, plus logs the previously-invisible rejections.
 

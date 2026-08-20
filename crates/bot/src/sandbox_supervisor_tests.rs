@@ -90,9 +90,9 @@ fn an_unreachable_runtime_degrades() {
 /// One built-in provider, declared exactly as `agent.yaml` declares it.
 const AGENT_YAML: &str = "\
 sandbox:
-  name: test-sandbox-a
+  name: right-riskoff
   providers:
-    - name: agent-a-provider
+    - name: riskoff-right-fal
       type: right-fal
 ";
 
@@ -111,8 +111,8 @@ async fn store() -> (tempfile::TempDir, ProviderStore) {
 
 fn declared_provider() -> NewProvider {
     NewProvider {
-        owner_agent: "agent-a".to_owned(),
-        name: "agent-a-provider".to_owned(),
+        owner_agent: "riskoff".to_owned(),
+        name: "riskoff-right-fal".to_owned(),
         kind: ProviderKind::Builtin("right-fal".to_owned()),
         label: String::new(),
     }
@@ -174,7 +174,7 @@ async fn a_provider_awaiting_its_credential_is_skipped_with_a_warning() {
         .expect("seed the record the migration writes");
 
     let (buffer, guard) = capture_log();
-    let spec = agent_sandbox_spec_for("agent-a", "test-sandbox-a", &provider_config(), &store)
+    let spec = agent_sandbox_spec_for("riskoff", "right-riskoff", &provider_config(), &store)
         .await
         .expect("a provider awaiting its credential must not stop bring-up");
     drop(guard);
@@ -186,7 +186,7 @@ async fn a_provider_awaiting_its_credential_is_skipped_with_a_warning() {
     );
     let log = captured(&buffer);
     assert!(
-        log.contains("agent-a-provider"),
+        log.contains("riskoff-right-fal"),
         "the operator needs the provider's name: {log}"
     );
     assert!(
@@ -201,13 +201,13 @@ async fn a_provider_awaiting_its_credential_is_skipped_with_a_warning() {
 async fn a_declared_provider_with_no_record_still_hard_fails() {
     let (_home, store) = store().await;
 
-    let error = agent_sandbox_spec_for("agent-a", "test-sandbox-a", &provider_config(), &store)
+    let error = agent_sandbox_spec_for("riskoff", "right-riskoff", &provider_config(), &store)
         .await
         .expect_err("a declared provider the store has never heard of is a hard error");
 
     let rendered = format!("{error:#}");
     assert!(
-        rendered.contains("agent-a-provider") && rendered.contains("not found"),
+        rendered.contains("riskoff-right-fal") && rendered.contains("not found"),
         "the error must name the provider and why: {rendered}"
     );
 }
@@ -225,7 +225,7 @@ async fn a_provider_that_holds_a_credential_still_binds() {
         .await
         .expect("create");
 
-    let spec = agent_sandbox_spec_for("agent-a", "test-sandbox-a", &provider_config(), &store)
+    let spec = agent_sandbox_spec_for("riskoff", "right-riskoff", &provider_config(), &store)
         .await
         .expect("a credential-holding provider binds");
 

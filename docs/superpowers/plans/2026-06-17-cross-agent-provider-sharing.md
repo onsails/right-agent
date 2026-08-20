@@ -64,10 +64,10 @@ fn provider_entry_shared_from_round_trips_and_defaults_absent() {
 
     // Present shared_from = borrowed.
     let borrowed: ProviderEntry = serde_yaml::from_str(
-        "name: fal-a1b2c3\ntype: !BuiltIn right-fal\nshared_from: agent-a\n",
+        "name: fal-a1b2c3\ntype: !BuiltIn right-fal\nshared_from: riskoff\n",
     )
     .unwrap();
-    assert_eq!(borrowed.shared_from.as_deref(), Some("agent-a"));
+    assert_eq!(borrowed.shared_from.as_deref(), Some("riskoff"));
     assert!(borrowed.is_borrowed() && !borrowed.is_owned());
 
     // Serialization omits shared_from when None.
@@ -139,13 +139,13 @@ git commit -m "feat(agent-config): add shared_from to ProviderEntry for borrowed
 ```rust
 #[test]
 fn validate_name_accepts_legacy_agent_prefixed() {
-    validate_name("agent-a", "agent-a-provider").expect("legacy {agent}-{slug} must validate");
+    validate_name("riskoff", "riskoff-fal").expect("legacy {agent}-{slug} must validate");
 }
 
 #[test]
 fn validate_name_accepts_agent_agnostic_uuid_form() {
     // No agent prefix required for the new form.
-    validate_name("agent-a", "fal-a1b2c3").expect("agent-agnostic name must validate");
+    validate_name("riskoff", "fal-a1b2c3").expect("agent-agnostic name must validate");
 }
 
 #[test]
@@ -344,7 +344,7 @@ fn plan_unshare_rejects_owned_entry() {
 }
 #[test]
 fn plan_unshare_accepts_borrowed_entry() {
-    let borrowed = ProviderEntry { name: "fal-a1b2c3".into(), type_: ProviderType::BuiltIn("right-fal".into()), label: None, generic: None, shared_from: Some("agent-a".into()) };
+    let borrowed = ProviderEntry { name: "fal-a1b2c3".into(), type_: ProviderType::BuiltIn("right-fal".into()), label: None, generic: None, shared_from: Some("riskoff".into()) };
     plan_unshare(&borrowed).expect("borrowed entry can be unshared");
 }
 ```
@@ -376,10 +376,10 @@ git commit -m "feat(providers): internal provider_share/provider_unshare (multi-
 #[test]
 fn refcount_keeps_record_when_borrower_remains() {
     let agents = vec![
-        ("agent-a".to_string(), vec![owned("fal-a1b2c3")]),
-        ("right".to_string(), vec![borrowed("fal-a1b2c3", "agent-a")]),
+        ("riskoff".to_string(), vec![owned("fal-a1b2c3")]),
+        ("right".to_string(), vec![borrowed("fal-a1b2c3", "riskoff")]),
     ];
-    let plan = plan_destroy_provider_cascade("agent-a", &agents);
+    let plan = plan_destroy_provider_cascade("riskoff", &agents);
     assert!(plan.detach.contains(&"fal-a1b2c3".to_string()));
     assert!(!plan.delete.contains(&"fal-a1b2c3".to_string()), "still referenced by right");
     assert_eq!(plan.rehome_owner_to.get("fal-a1b2c3").map(String::as_str), Some("right"));
@@ -387,8 +387,8 @@ fn refcount_keeps_record_when_borrower_remains() {
 
 #[test]
 fn refcount_deletes_record_when_last_reference() {
-    let agents = vec![("agent-a".to_string(), vec![owned("fal-a1b2c3")])];
-    let plan = plan_destroy_provider_cascade("agent-a", &agents);
+    let agents = vec![("riskoff".to_string(), vec![owned("fal-a1b2c3")])];
+    let plan = plan_destroy_provider_cascade("riskoff", &agents);
     assert!(plan.delete.contains(&"fal-a1b2c3".to_string()));
 }
 ```

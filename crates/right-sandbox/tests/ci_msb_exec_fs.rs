@@ -786,7 +786,7 @@ async fn ci_msb_unprivileged_user_cannot_write_platform_files() -> Result<()> {
 /// file, or embedded in an assertion message.
 fn host_oauth_token() -> Result<String> {
     let db = PathBuf::from(std::env::var("HOME").expect("HOME is set"))
-        .join(".right/agents/agent-b/data.db");
+        .join(".right/agents/him/data.db");
     if !db.exists() {
         bail!("no host token database at {}", db.display());
     }

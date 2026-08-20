@@ -145,14 +145,14 @@ flowchart LR
 
 Run:
 ```bash
-rg -n 'I1\[\(Identity\)\]|HS\[\(Hindsight Cloud\)\]|primary path is \*\*Hindsight Cloud\*\*|primary backend — semantic recall' /Users/developer/dev/rightclaw/README.md
+rg -n 'I1\[\(Identity\)\]|HS\[\(Hindsight Cloud\)\]|primary path is \*\*Hindsight Cloud\*\*|primary backend — semantic recall' /Users/molt/dev/rightclaw/README.md
 ```
 
 Expected: 4 matches — `I1[(Identity)]` in the diagram, `HS[(Hindsight Cloud)]` in the diagram, `primary path is **Hindsight Cloud**` in the Memory section, `primary backend — semantic recall` on the intro line.
 
 Also run:
 ```bash
-rg -n 'M1\[\(Memory · identity\)\]|M2\[\(Memory · identity\)\]|Two modes, one switch' /Users/developer/dev/rightclaw/README.md
+rg -n 'M1\[\(Memory · identity\)\]|M2\[\(Memory · identity\)\]|Two modes, one switch' /Users/molt/dev/rightclaw/README.md
 ```
 
 Expected: 0 matches — old strings should be gone.
@@ -265,14 +265,14 @@ Notes on this rewrite:
 
 Run:
 ```bash
-rg -n 'Hindsight mode \(primary\)|File mode \(fallback\)|File mode \(default\)|Hindsight mode \(optional\)' /Users/developer/dev/rightclaw/ARCHITECTURE.md
+rg -n 'Hindsight mode \(primary\)|File mode \(fallback\)|File mode \(default\)|Hindsight mode \(optional\)' /Users/molt/dev/rightclaw/ARCHITECTURE.md
 ```
 
 Expected: exactly two matches — `Hindsight mode (primary)` and `File mode (fallback)`. The two `(default)` / `(optional)` strings should be gone.
 
 Also run:
 ```bash
-rg -n -A 1 '^### Memory$' /Users/developer/dev/rightclaw/ARCHITECTURE.md
+rg -n -A 1 '^### Memory$' /Users/molt/dev/rightclaw/ARCHITECTURE.md
 ```
 
 Expected: shows the heading followed by the "Two modes, configured per-agent…" line — confirms section structure is intact.

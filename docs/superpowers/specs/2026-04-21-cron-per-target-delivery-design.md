@@ -20,7 +20,7 @@ Even if Layer 1 were fixed in isolation, an agenda cron created in one group wou
 
 ### Concrete example
 
-Agent `agent-b` has:
+Agent `him` has:
 - `agent.yaml` → `allowed_chat_ids: [12345678]` (owner DM only)
 - `allowlist.yaml` → users `[12345678]` + groups `[-1001234567890 "aibots"]` (group opened 2026-04-21 11:41:38Z)
 - one cron (`agenda`) created from a message in the `aibots` group
@@ -166,7 +166,7 @@ This is normative — it is the contract the agent must follow. The MCP tool's a
 
 Existing cron rows have `target_chat_id IS NULL`. They will not deliver after the migration; instead, each delivery attempt logs a WARN and marks the row `'no_target'`. The operator must run `cron_update` (or recreate the cron) to set a target.
 
-For the `agent-b` agent specifically (one cron, `agenda`, intended for the `aibots` group):
+For the `him` agent specifically (one cron, `agenda`, intended for the `aibots` group):
 
 ```
 cron_update target_chat_id=-1001234567890 job_name=agenda
