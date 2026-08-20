@@ -12,8 +12,8 @@ right init  /  right agent init <name>
   │   automation only from `RIGHT_CLAUDE_SETUP_TOKEN` (never argv), securely
   │   prompt interactive calls, and reject non-interactive calls without a
   │   token. Restore never trusts the source backup's token. The no-MCP probe
-  │   clears competing auth, requires setup-token auth plus final exact `OK`,
-  │   and sends sandbox tokens through SSH stdin rather than local argv.
+  │   clears competing auth and requires setup-token auth plus either final exact
+  │   `OK` or an authenticated account rate-limit rejection; sandbox tokens use SSH stdin.
   ├─ Before no-sandbox state creation, execute `claude --version` (falling back
   │   to the supported `claude-bun` wrapper, including on NixOS) and require it
   │   to identify as Claude Code. A path entry alone is not readiness.

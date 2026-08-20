@@ -109,6 +109,7 @@ fn init_auth_probe_invocation(model: Option<String>) -> crate::cc::invocation::C
 
 fn init_auth_probe_succeeded(stdout: &[u8]) -> bool {
     let mut saw_setup_token_auth = false;
+    let mut saw_authenticated_rate_limit_rejection = false;
     let mut final_event = None;
 
     for line in stdout.split(|byte| *byte == b'\n') {
@@ -131,6 +132,16 @@ fn init_auth_probe_succeeded(stdout: &[u8]) -> bool {
             }
             saw_setup_token_auth = true;
         }
+        if saw_setup_token_auth
+            && event.get("type").and_then(serde_json::Value::as_str) == Some("rate_limit_event")
+            && event
+                .get("rate_limit_info")
+                .and_then(|info| info.get("status"))
+                .and_then(serde_json::Value::as_str)
+                == Some("rejected")
+        {
+            saw_authenticated_rate_limit_rejection = true;
+        }
         final_event = Some(event);
     }
 
@@ -138,19 +149,20 @@ fn init_auth_probe_succeeded(stdout: &[u8]) -> bool {
         return false;
     };
     saw_setup_token_auth
-        && final_event.get("type").and_then(serde_json::Value::as_str) == Some("result")
-        && final_event
-            .get("subtype")
-            .and_then(serde_json::Value::as_str)
-            == Some("success")
-        && final_event
-            .get("is_error")
-            .and_then(serde_json::Value::as_bool)
-            == Some(false)
-        && final_event
-            .get("result")
-            .and_then(serde_json::Value::as_str)
-            == Some("OK")
+        && (saw_authenticated_rate_limit_rejection
+            || (final_event.get("type").and_then(serde_json::Value::as_str) == Some("result")
+                && final_event
+                    .get("subtype")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("success")
+                && final_event
+                    .get("is_error")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+                && final_event
+                    .get("result")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("OK")))
 }
 
 fn clear_competing_auth(command: &mut tokio::process::Command) {
@@ -310,7 +322,7 @@ async fn run_init_auth_command_with_timeout(
             anyhow::bail!("Claude authentication validation timed out");
         }
     };
-    if !output.status.success() || !init_auth_probe_succeeded(&output.stdout) {
+    if !init_auth_probe_succeeded(&output.stdout) {
         anyhow::bail!(
             "Claude authentication validation failed; rerun init with a fresh token from `claude setup-token`"
         );
@@ -828,6 +840,21 @@ mod tests {
     }
 
     #[test]
+    fn init_auth_probe_accepts_authenticated_rate_limit_rejection() {
+        const INIT: &str = r#"{"type":"system","subtype":"init","apiKeySource":"none"}"#;
+        const RATE_LIMIT: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day"}}"#;
+        const ERROR: &str =
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true}"#;
+
+        assert!(init_auth_probe_succeeded(
+            format!("{INIT}\n{RATE_LIMIT}\n{ERROR}\n").as_bytes()
+        ));
+        assert!(!init_auth_probe_succeeded(
+            format!("{RATE_LIMIT}\n{ERROR}\n").as_bytes()
+        ));
+    }
+
+    #[test]
     fn init_auth_host_command_isolates_competing_auth() {
         let args = init_auth_probe_invocation(None).into_args();
         let command =
@@ -899,6 +926,19 @@ mod tests {
         let stdout = run_init_auth_command(command, Some(token)).await.unwrap();
         assert!(init_auth_probe_succeeded(&stdout));
         assert!(!String::from_utf8_lossy(&stdout).contains(token));
+    }
+
+    #[tokio::test]
+    async fn init_auth_runner_accepts_authenticated_rate_limit_rejection_exit_one() {
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(
+            "printf '%s\\n%s\\n%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"apiKeySource\":\"none\"}' '{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"seven_day\"}}' '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true}'; exit 1",
+        );
+
+        let stdout = run_init_auth_command(command, None)
+            .await
+            .expect("authenticated rate-limit rejection must validate the credential");
+        assert!(init_auth_probe_succeeded(&stdout));
     }
 
     #[tokio::test]
