@@ -12,7 +12,7 @@
 
 ## Conventions for every task
 
-- Run all commands from the repo root `/Users/developer/dev/rightclaw`.
+- Run all commands from the repo root `/Users/molt/dev/rightclaw`.
 - Rust commands are prefixed `devenv shell --`. Frontend commands run inside `crates/right-dashboard/frontend`.
 - Frontend test runner: `cd crates/right-dashboard/frontend && pnpm test` (vitest, runs all). Single file: `pnpm test -- src/path/to/file.test.ts`. Type-check: `pnpm typecheck`.
 - Component tests use Vue SSR (`createSSRApp` + `renderToString` from `@vue/server-renderer`) — copy the shape of `src/components/AppShell.test.ts`. Pure-logic tests import a `*.ts` helper directly — copy the shape of `src/components/secretInputModel.ts` + `SecretInput.test.ts`.

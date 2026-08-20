@@ -1070,7 +1070,7 @@ prefilter_enabled: false
         // Ownership lives in providers.db since stage 3; an agent.yaml written
         // before that still carries `shared_from:` and must keep loading.
         let entry: ProviderEntry =
-            serde_saphyr::from_str("name: fal-a1b2c3\ntype: right-fal\nshared_from: agent-a\n")
+            serde_saphyr::from_str("name: fal-a1b2c3\ntype: right-fal\nshared_from: riskoff\n")
                 .unwrap();
         assert_eq!(entry.name, "fal-a1b2c3");
 

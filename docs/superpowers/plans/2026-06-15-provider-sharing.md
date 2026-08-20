@@ -286,8 +286,8 @@ mod plan_copy_tests {
 
     #[test]
     fn create_when_no_env_var_match() {
-        let src = builtin("agent-a-provider", "right-fal");
-        let plan = plan_copy("agent-a", &src, "FAL_KEY", &[], false, None).unwrap();
+        let src = builtin("riskoff-fal", "right-fal");
+        let plan = plan_copy("riskoff", &src, "FAL_KEY", &[], false, None).unwrap();
         match plan {
             CopyPlan::Create { type_, label, generic } => {
                 assert_eq!(type_, "right-fal");
@@ -300,8 +300,8 @@ mod plan_copy_tests {
 
     #[test]
     fn create_label_override_wins() {
-        let src = builtin("agent-a-provider", "right-fal");
-        let plan = plan_copy("agent-a", &src, "FAL_KEY", &[], false, Some("media")).unwrap();
+        let src = builtin("riskoff-fal", "right-fal");
+        let plan = plan_copy("riskoff", &src, "FAL_KEY", &[], false, Some("media")).unwrap();
         match plan {
             CopyPlan::Create { label, .. } => assert_eq!(label.as_deref(), Some("media")),
             _ => panic!("expected Create"),
@@ -310,32 +310,32 @@ mod plan_copy_tests {
 
     #[test]
     fn create_collision_without_overwrite_errors() {
-        let src = builtin("agent-a-provider", "right-fal");
+        let src = builtin("riskoff-fal", "right-fal");
         let dest = vec![builtin("other-fal", "right-fal")];
-        let err = plan_copy("agent-a", &src, "FAL_KEY", &dest, false, None).unwrap_err();
+        let err = plan_copy("riskoff", &src, "FAL_KEY", &dest, false, None).unwrap_err();
         assert!(matches!(err, ProviderApiError::EnvVarCollision { .. }));
     }
 
     #[test]
     fn overwrite_without_match_errors() {
-        let src = builtin("agent-a-provider", "right-fal");
-        let err = plan_copy("agent-a", &src, "FAL_KEY", &[], true, None).unwrap_err();
+        let src = builtin("riskoff-fal", "right-fal");
+        let err = plan_copy("riskoff", &src, "FAL_KEY", &[], true, None).unwrap_err();
         assert!(matches!(err, ProviderApiError::CopyConflict { .. }));
     }
 
     #[test]
     fn overwrite_type_mismatch_errors() {
-        let src = generic("agent-a-provider", "FAL_KEY", &["fal.run"], Some("/v1"));
+        let src = generic("riskoff-fal", "FAL_KEY", &["fal.run"], Some("/v1"));
         let dest = vec![builtin("other-fal", "right-fal")];
-        let err = plan_copy("agent-a", &src, "FAL_KEY", &dest, true, None).unwrap_err();
+        let err = plan_copy("riskoff", &src, "FAL_KEY", &dest, true, None).unwrap_err();
         assert!(matches!(err, ProviderApiError::CopyConflict { .. }));
     }
 
     #[test]
     fn overwrite_builtin_is_credential_only() {
-        let src = builtin("agent-a-provider", "right-fal");
+        let src = builtin("riskoff-fal", "right-fal");
         let dest = vec![builtin("other-fal", "right-fal")];
-        let plan = plan_copy("agent-a", &src, "FAL_KEY", &dest, true, None).unwrap();
+        let plan = plan_copy("riskoff", &src, "FAL_KEY", &dest, true, None).unwrap();
         match plan {
             CopyPlan::Overwrite { dest_name, resync_generic } => {
                 assert_eq!(dest_name, "other-fal");
@@ -347,16 +347,16 @@ mod plan_copy_tests {
 
     #[test]
     fn overwrite_generic_resyncs_only_when_config_differs() {
-        let src = generic("agent-a-provider", "FAL_KEY", &["fal.run", "queue.fal.run"], Some("/v1"));
+        let src = generic("riskoff-fal", "FAL_KEY", &["fal.run", "queue.fal.run"], Some("/v1"));
         // identical config → no resync
         let same = vec![generic("other-fal", "FAL_KEY", &["fal.run", "queue.fal.run"], Some("/v1"))];
-        match plan_copy("agent-a", &src, "FAL_KEY", &same, true, None).unwrap() {
+        match plan_copy("riskoff", &src, "FAL_KEY", &same, true, None).unwrap() {
             CopyPlan::Overwrite { resync_generic, .. } => assert!(resync_generic.is_none()),
             _ => panic!("expected Overwrite"),
         }
         // different hosts → resync
         let diff = vec![generic("other-fal", "FAL_KEY", &["fal.run"], Some("/v1"))];
-        match plan_copy("agent-a", &src, "FAL_KEY", &diff, true, None).unwrap() {
+        match plan_copy("riskoff", &src, "FAL_KEY", &diff, true, None).unwrap() {
             CopyPlan::Overwrite { resync_generic, .. } => {
                 let g = resync_generic.expect("resync");
                 assert_eq!(g.upstream_hosts, vec!["fal.run", "queue.fal.run"]);
@@ -538,9 +538,9 @@ mod peers_tests {
     #[test]
     fn require_trusted_accepts_member_rejects_others() {
         let tmp = tempfile::tempdir().unwrap();
-        write_agent(tmp.path(), "agent-a", &[7], "  providers: []\n");
-        assert!(require_trusted(tmp.path(), "agent-a", 7).is_ok());
-        let err = require_trusted(tmp.path(), "agent-a", 99).unwrap_err();
+        write_agent(tmp.path(), "riskoff", &[7], "  providers: []\n");
+        assert!(require_trusted(tmp.path(), "riskoff", 7).is_ok());
+        let err = require_trusted(tmp.path(), "riskoff", 99).unwrap_err();
         assert!(matches!(err, ProviderApiError::Unauthorized { .. }));
     }
 
@@ -550,17 +550,17 @@ mod peers_tests {
         write_agent(tmp.path(), "current", &[7], "  providers: []\n");
         write_agent(
             tmp.path(),
-            "agent-a",
+            "riskoff",
             &[7],
-            "  providers:\n    - name: agent-a-provider\n      type: right-fal\n",
+            "  providers:\n    - name: riskoff-fal\n      type: right-fal\n",
         );
         write_agent(tmp.path(), "secret", &[42], "  providers: []\n");
 
         let peers = build_peers(tmp.path(), 7, "current").unwrap();
         let names: Vec<&str> = peers.iter().map(|p| p.agent.as_str()).collect();
-        assert_eq!(names, vec!["agent-a"]); // self + untrusted filtered
+        assert_eq!(names, vec!["riskoff"]); // self + untrusted filtered
         assert_eq!(peers[0].providers.len(), 1);
-        assert_eq!(peers[0].providers[0].name, "agent-a-provider");
+        assert_eq!(peers[0].providers[0].name, "riskoff-fal");
         assert_eq!(peers[0].providers[0].env_var, "FAL_KEY");
         assert_eq!(peers[0].network_policy, "permissive");
     }
@@ -930,16 +930,16 @@ Add to the `#[cfg(test)] mod tests` block (or create one) in
 fn provider_copy_request_serializes_without_credential_field() {
     let req = ProviderCopyRequest {
         actor_user_id: 7,
-        source_agent: "agent-a",
-        source_provider: "agent-a-provider",
+        source_agent: "riskoff",
+        source_provider: "riskoff-fal",
         dest_agent: "other",
         label: Some("fal"),
         overwrite: true,
     };
     let v = serde_json::to_value(&req).unwrap();
     assert_eq!(v["actor_user_id"], 7);
-    assert_eq!(v["source_agent"], "agent-a");
-    assert_eq!(v["source_provider"], "agent-a-provider");
+    assert_eq!(v["source_agent"], "riskoff");
+    assert_eq!(v["source_provider"], "riskoff-fal");
     assert_eq!(v["dest_agent"], "other");
     assert_eq!(v["label"], "fal");
     assert_eq!(v["overwrite"], true);
@@ -1035,12 +1035,12 @@ Add to the `#[cfg(test)] mod tests` block at the bottom of
 #[test]
 fn import_body_defaults_overwrite_false() {
     let b: ProviderImportBody = serde_json::from_value(serde_json::json!({
-        "source_agent": "agent-a",
-        "source_provider": "agent-a-provider"
+        "source_agent": "riskoff",
+        "source_provider": "riskoff-fal"
     }))
     .unwrap();
-    assert_eq!(b.source_agent, "agent-a");
-    assert_eq!(b.source_provider, "agent-a-provider");
+    assert_eq!(b.source_agent, "riskoff");
+    assert_eq!(b.source_provider, "riskoff-fal");
     assert!(b.label.is_none());
     assert!(!b.overwrite);
 }
@@ -1049,12 +1049,12 @@ fn import_body_defaults_overwrite_false() {
 fn export_body_parses_overwrite() {
     let b: ProviderExportBody = serde_json::from_value(serde_json::json!({
         "provider": "current-fal",
-        "dest_agent": "agent-a",
+        "dest_agent": "riskoff",
         "overwrite": true
     }))
     .unwrap();
     assert_eq!(b.provider, "current-fal");
-    assert_eq!(b.dest_agent, "agent-a");
+    assert_eq!(b.dest_agent, "riskoff");
     assert!(b.overwrite);
 }
 ```
@@ -1288,18 +1288,18 @@ describe('provider sharing api', () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ name: 'cur-fal' }), { status: 200 }),
     )
-    await providerImport({ source_agent: 'agent-a', source_provider: 'agent-a-provider', overwrite: false })
+    await providerImport({ source_agent: 'riskoff', source_provider: 'riskoff-fal', overwrite: false })
     const [path, init] = fetchMock.mock.calls[0]
     expect(path).toBe('api/v1/providers/import')
     expect(init?.method).toBe('POST')
-    expect(JSON.parse(init?.body as string).source_agent).toBe('agent-a')
+    expect(JSON.parse(init?.body as string).source_agent).toBe('riskoff')
   })
 
   it('providerExport POSTs the export body', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ name: 'agent-a-provider' }), { status: 200 }),
+      new Response(JSON.stringify({ name: 'riskoff-fal' }), { status: 200 }),
     )
-    await providerExport({ provider: 'cur-fal', dest_agent: 'agent-a', overwrite: true })
+    await providerExport({ provider: 'cur-fal', dest_agent: 'riskoff', overwrite: true })
     const [path, init] = fetchMock.mock.calls[0]
     expect(path).toBe('api/v1/providers/export')
     expect(init?.method).toBe('POST')
@@ -1379,7 +1379,7 @@ describe('copyTargetMode', () => {
 
 describe('exportTargetState', () => {
   function peer(overrides: Partial<ProviderPeer> = {}): ProviderPeer {
-    return { agent: 'agent-a', network_policy: 'permissive', providers: [], ...overrides }
+    return { agent: 'riskoff', network_policy: 'permissive', providers: [], ...overrides }
   }
 
   it('blocks a generic provider when the peer is restrictive', () => {
@@ -1391,7 +1391,7 @@ describe('exportTargetState', () => {
   it('marks overwrite when the peer already has the env var', () => {
     const p = providerView({ env_var: 'FAL_KEY', generic: null })
     const target = peer({
-      providers: [{ name: 'agent-a-provider', type: 'right-fal', env_var: 'FAL_KEY', label: null, generic: null }],
+      providers: [{ name: 'riskoff-fal', type: 'right-fal', env_var: 'FAL_KEY', label: null, generic: null }],
     })
     const state = exportTargetState(target, p)
     expect(state.blocked).toBeNull()

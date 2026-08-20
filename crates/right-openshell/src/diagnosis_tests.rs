@@ -47,32 +47,32 @@ fn docker_down_diagnosis_summary_and_fixes_are_actionable() {
 #[test]
 fn sandbox_error_diagnosis_names_the_sandbox_and_is_recovery_oriented() {
     let d = GatewayCause::SandboxError {
-        sandbox: "test-sandbox-1".to_owned(),
+        sandbox: "right-him-1".to_owned(),
     }
     .diagnose();
     assert_eq!(
         d.cause,
         GatewayCause::SandboxError {
-            sandbox: "test-sandbox-1".to_owned()
+            sandbox: "right-him-1".to_owned()
         }
     );
-    assert!(d.summary.contains("test-sandbox-1"));
+    assert!(d.summary.contains("right-him-1"));
     assert!(!d.fixes.is_empty());
 }
 
 #[test]
 fn sandbox_not_ready_diagnosis_names_the_sandbox_and_is_starting_oriented() {
     let d = GatewayCause::SandboxNotReady {
-        sandbox: "test-sandbox-1".to_owned(),
+        sandbox: "right-him-1".to_owned(),
     }
     .diagnose();
     assert_eq!(
         d.cause,
         GatewayCause::SandboxNotReady {
-            sandbox: "test-sandbox-1".to_owned()
+            sandbox: "right-him-1".to_owned()
         }
     );
-    assert!(d.summary.contains("test-sandbox-1"));
+    assert!(d.summary.contains("right-him-1"));
     assert!(d.summary.contains("starting up"));
     // Must not reuse the misleading Unreachable fixes (Docker / gateway restart).
     let fixes = d.fixes.join(" ").to_lowercase();

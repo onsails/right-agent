@@ -665,7 +665,7 @@ fn ensure_agent_nudge_state(conn: &rusqlite::Connection, agent: &str) {
 #[test]
 fn gate_skips_when_daily_budget_exceeded() {
     let conn = conn();
-    ensure_agent_nudge_state(&conn, "agent-b");
+    ensure_agent_nudge_state(&conn, "him");
     // 5.50 spent across today's learning sources — over $5 budget.
     insert_usage(&conn, "2026-05-21T01:00:00Z", "learning_selector", 2.50);
     insert_usage(&conn, "2026-05-21T02:00:00Z", "learning_reviewer", 3.00);
@@ -675,7 +675,7 @@ fn gate_skips_when_daily_budget_exceeded() {
         now_utc: "2026-05-21T03:00:00Z",
         daily_budget_usd: 5.00,
     };
-    let decision = try_mark_review_started(&conn, "agent-b", input).unwrap();
+    let decision = try_mark_review_started(&conn, "him", input).unwrap();
     assert_eq!(
         decision,
         ReviewGateDecision::Skip(ReviewSkipReason::DailyBudget)
@@ -685,7 +685,7 @@ fn gate_skips_when_daily_budget_exceeded() {
 #[test]
 fn gate_ignores_non_learning_sources_and_yesterdays_spend() {
     let conn = conn();
-    ensure_agent_nudge_state(&conn, "agent-b");
+    ensure_agent_nudge_state(&conn, "him");
     // Yesterday — must be ignored.
     insert_usage(&conn, "2026-05-20T23:59:00Z", "learning_selector", 10.00);
     // Non-learning source today — must be ignored.
@@ -698,16 +698,16 @@ fn gate_ignores_non_learning_sources_and_yesterdays_spend() {
         now_utc: "2026-05-21T03:00:00Z",
         daily_budget_usd: 5.00,
     };
-    let decision = try_mark_review_started(&conn, "agent-b", input).unwrap();
+    let decision = try_mark_review_started(&conn, "him", input).unwrap();
     assert!(matches!(decision, ReviewGateDecision::Start(_)));
 }
 
 #[test]
 fn gate_skips_when_circuit_open() {
     let conn = conn();
-    ensure_agent_nudge_state(&conn, "agent-b");
+    ensure_agent_nudge_state(&conn, "him");
     conn.execute(
-        "UPDATE skill_nudge_state SET review_circuit_open_until = ?1 WHERE agent_name = 'agent-b'",
+        "UPDATE skill_nudge_state SET review_circuit_open_until = ?1 WHERE agent_name = 'him'",
         ["2026-05-21T04:00:00Z"],
     )
     .unwrap();
@@ -717,7 +717,7 @@ fn gate_skips_when_circuit_open() {
         now_utc: "2026-05-21T03:00:00Z",
         daily_budget_usd: 5.00,
     };
-    let decision = try_mark_review_started(&conn, "agent-b", input).unwrap();
+    let decision = try_mark_review_started(&conn, "him", input).unwrap();
     assert_eq!(
         decision,
         ReviewGateDecision::Skip(ReviewSkipReason::CircuitOpen)
@@ -727,12 +727,12 @@ fn gate_skips_when_circuit_open() {
 #[test]
 fn gate_clears_expired_circuit_and_resets_failure_count() {
     let conn = conn();
-    ensure_agent_nudge_state(&conn, "agent-b");
+    ensure_agent_nudge_state(&conn, "him");
     conn.execute(
         "UPDATE skill_nudge_state SET \
             review_circuit_open_until = '2026-05-21T02:30:00Z', \
             consecutive_review_failures = 5 \
-         WHERE agent_name = 'agent-b'",
+         WHERE agent_name = 'him'",
         [],
     )
     .unwrap();
@@ -742,13 +742,13 @@ fn gate_clears_expired_circuit_and_resets_failure_count() {
         now_utc: "2026-05-21T03:00:00Z",
         daily_budget_usd: 5.00,
     };
-    let decision = try_mark_review_started(&conn, "agent-b", input).unwrap();
+    let decision = try_mark_review_started(&conn, "him", input).unwrap();
     assert!(matches!(decision, ReviewGateDecision::Start(_)));
 
     let (open_until, count): (Option<String>, i64) = conn
         .query_row(
             "SELECT review_circuit_open_until, consecutive_review_failures \
-             FROM skill_nudge_state WHERE agent_name = 'agent-b'",
+             FROM skill_nudge_state WHERE agent_name = 'him'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -896,20 +896,20 @@ Add to test module:
 #[test]
 fn mark_review_finished_resets_circuit_and_failures() {
     let conn = conn();
-    ensure_agent_nudge_state(&conn, "agent-b");
+    ensure_agent_nudge_state(&conn, "him");
     conn.execute(
         "UPDATE skill_nudge_state SET \
             review_running = 1, \
             consecutive_review_failures = 4, \
             review_circuit_open_until = '2026-05-21T05:00:00Z' \
-         WHERE agent_name = 'agent-b'",
+         WHERE agent_name = 'him'",
         [],
     )
     .unwrap();
 
     mark_review_finished(
         &conn,
-        "agent-b",
+        "him",
         ReviewTriggerKind::EffortThreshold,
         ReviewStatus::NothingToLearn,
         false,
@@ -919,7 +919,7 @@ fn mark_review_finished_resets_circuit_and_failures() {
     let (running, failures, open_until): (i64, i64, Option<String>) = conn
         .query_row(
             "SELECT review_running, consecutive_review_failures, review_circuit_open_until \
-             FROM skill_nudge_state WHERE agent_name = 'agent-b'",
+             FROM skill_nudge_state WHERE agent_name = 'him'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -987,16 +987,16 @@ Add to test module:
 #[test]
 fn record_review_failure_increments_and_returns_opened_false_below_threshold() {
     let conn = conn();
-    ensure_agent_nudge_state(&conn, "agent-b");
+    ensure_agent_nudge_state(&conn, "him");
     conn.execute(
-        "UPDATE skill_nudge_state SET review_running = 1, consecutive_review_failures = 2 WHERE agent_name = 'agent-b'",
+        "UPDATE skill_nudge_state SET review_running = 1, consecutive_review_failures = 2 WHERE agent_name = 'him'",
         [],
     )
     .unwrap();
 
     let (count, opened) = record_review_failure(
         &conn,
-        "agent-b",
+        "him",
         "2026-05-21T03:00:00Z",
         5,
         60,
@@ -1007,7 +1007,7 @@ fn record_review_failure_increments_and_returns_opened_false_below_threshold() {
 
     let (running, open_until): (i64, Option<String>) = conn
         .query_row(
-            "SELECT review_running, review_circuit_open_until FROM skill_nudge_state WHERE agent_name = 'agent-b'",
+            "SELECT review_running, review_circuit_open_until FROM skill_nudge_state WHERE agent_name = 'him'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -1019,16 +1019,16 @@ fn record_review_failure_increments_and_returns_opened_false_below_threshold() {
 #[test]
 fn record_review_failure_opens_circuit_exactly_at_threshold() {
     let conn = conn();
-    ensure_agent_nudge_state(&conn, "agent-b");
+    ensure_agent_nudge_state(&conn, "him");
     conn.execute(
-        "UPDATE skill_nudge_state SET review_running = 1, consecutive_review_failures = 4 WHERE agent_name = 'agent-b'",
+        "UPDATE skill_nudge_state SET review_running = 1, consecutive_review_failures = 4 WHERE agent_name = 'him'",
         [],
     )
     .unwrap();
 
     let (count, opened) = record_review_failure(
         &conn,
-        "agent-b",
+        "him",
         "2026-05-21T03:00:00Z",
         5,
         60,
@@ -1039,7 +1039,7 @@ fn record_review_failure_opens_circuit_exactly_at_threshold() {
 
     let open_until: Option<String> = conn
         .query_row(
-            "SELECT review_circuit_open_until FROM skill_nudge_state WHERE agent_name = 'agent-b'",
+            "SELECT review_circuit_open_until FROM skill_nudge_state WHERE agent_name = 'him'",
             [],
             |r| r.get(0),
         )
@@ -1050,20 +1050,20 @@ fn record_review_failure_opens_circuit_exactly_at_threshold() {
 #[test]
 fn record_review_failure_does_not_reopen_already_open_circuit() {
     let conn = conn();
-    ensure_agent_nudge_state(&conn, "agent-b");
+    ensure_agent_nudge_state(&conn, "him");
     conn.execute(
         "UPDATE skill_nudge_state SET \
             review_running = 1, \
             consecutive_review_failures = 7, \
             review_circuit_open_until = '2026-05-21T05:00:00Z' \
-         WHERE agent_name = 'agent-b'",
+         WHERE agent_name = 'him'",
         [],
     )
     .unwrap();
 
     let (count, opened) = record_review_failure(
         &conn,
-        "agent-b",
+        "him",
         "2026-05-21T03:00:00Z",
         5,
         60,
@@ -1074,7 +1074,7 @@ fn record_review_failure_does_not_reopen_already_open_circuit() {
 
     let open_until: Option<String> = conn
         .query_row(
-            "SELECT review_circuit_open_until FROM skill_nudge_state WHERE agent_name = 'agent-b'",
+            "SELECT review_circuit_open_until FROM skill_nudge_state WHERE agent_name = 'him'",
             [],
             |r| r.get(0),
         )
@@ -1775,7 +1775,7 @@ fn usage_overview_includes_learning_sources() {
     let response = usage_overview(
         &conn,
         UsageOverviewInput {
-            agent: "agent-b".to_owned(),
+            agent: "him".to_owned(),
             generated_at: "2026-05-21T05:00:00Z".to_owned(),
         },
     )
@@ -1908,16 +1908,16 @@ Expected: clean.
 Run: `devenv shell -- cargo build --workspace`
 Expected: success.
 
-- [ ] **Step 4: Note the operational cleanup SQL for `agent-b`**
+- [ ] **Step 4: Note the operational cleanup SQL for `him`**
 
-The spec lists the one-time SQL block to free `agent-b`'s stuck pending episodes and reset gate state. It is NOT run by code — apply manually after the new bot is deployed:
+The spec lists the one-time SQL block to free `him`'s stuck pending episodes and reset gate state. It is NOT run by code — apply manually after the new bot is deployed:
 
 ```sql
 UPDATE learning_episodes
 SET status = 'no_episode',
     selector_output_json = json_object('status', 'no_episode', 'reason', 'stale_cleanup'),
     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-WHERE agent_name = 'agent-b'
+WHERE agent_name = 'him'
   AND status = 'pending'
   AND created_at < datetime('now', '-24 hours');
 
@@ -1927,10 +1927,10 @@ UPDATE skill_nudge_state SET
     consecutive_review_failures = 0,
     review_circuit_open_until = NULL,
     review_running = 0
-WHERE agent_name = 'agent-b';
+WHERE agent_name = 'him';
 ```
 
-Run this with `sqlite3 ~/.right/agents/agent-b/data.db < cleanup.sql` before the first `right restart agent-b` after deploy.
+Run this with `sqlite3 ~/.right/agents/him/data.db < cleanup.sql` before the first `right restart him` after deploy.
 
 ---
 

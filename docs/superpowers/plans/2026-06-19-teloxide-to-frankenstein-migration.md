@@ -76,7 +76,7 @@
 - [ ] **Step 1: Create the worktree**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 git worktree add .worktrees/frankenstein-migration -b feat/frankenstein-migration master
 cd .worktrees/frankenstein-migration
 ```

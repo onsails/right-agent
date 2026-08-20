@@ -34,7 +34,7 @@ Content-Type: application/json
 
 Response 200:
 {
-  "added": ["agent-b"],
+  "added": ["him"],
   "total": 3
 }
 ```

@@ -226,16 +226,16 @@ test style; it imports `super::*`):
     #[test]
     fn sandbox_error_diagnosis_names_the_sandbox_and_is_recovery_oriented() {
         let d = GatewayCause::SandboxError {
-            sandbox: "test-sandbox-1".to_owned(),
+            sandbox: "right-him-1".to_owned(),
         }
         .diagnose();
         assert_eq!(
             d.cause,
             GatewayCause::SandboxError {
-                sandbox: "test-sandbox-1".to_owned()
+                sandbox: "right-him-1".to_owned()
             }
         );
-        assert!(d.summary.contains("test-sandbox-1"));
+        assert!(d.summary.contains("right-him-1"));
         assert!(!d.fixes.is_empty());
     }
 ```
@@ -331,7 +331,7 @@ use right_openshell::diagnosis::GatewayCause;
 
 #[test]
 fn ready_phase_does_not_degrade() {
-    assert!(degrade_decision(ProbeOutcome::Ready, "test-sandbox-1").is_none());
+    assert!(degrade_decision(ProbeOutcome::Ready, "right-him-1").is_none());
 }
 
 #[test]
@@ -340,13 +340,13 @@ fn error_phase_degrades_with_sandbox_error_cause() {
         ProbeOutcome::Error {
             detail: "phase=ERROR status=...".to_owned(),
         },
-        "test-sandbox-1",
+        "right-him-1",
     )
     .expect("Error phase must degrade");
     assert_eq!(
         diag.cause,
         GatewayCause::SandboxError {
-            sandbox: "test-sandbox-1".to_owned()
+            sandbox: "right-him-1".to_owned()
         }
     );
 }
@@ -357,7 +357,7 @@ fn gateway_unreachable_degrades_with_gateway_diagnosis() {
     // we fall back to the gateway diagnosis (e.g. DockerDown/Unreachable).
     let diag = degrade_decision(
         ProbeOutcome::GatewayDiagnosis(GatewayCause::DockerDown.diagnose()),
-        "test-sandbox-1",
+        "right-him-1",
     )
     .expect("gateway failure must degrade");
     assert_eq!(diag.cause, GatewayCause::DockerDown);
@@ -373,7 +373,7 @@ fn transient_other_phase_does_not_degrade() {
                 phase: "PROVISIONING".to_owned(),
                 detail: "prov".to_owned(),
             },
-            "test-sandbox-1"
+            "right-him-1"
         )
         .is_none()
     );

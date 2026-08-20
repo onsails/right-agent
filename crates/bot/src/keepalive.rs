@@ -856,11 +856,11 @@ mod tests {
     #[tokio::test]
     async fn every_repair_step_refuses_to_run_without_a_sandbox() {
         let health = ClaudeHealth::new(
-            "agent-b".to_owned(),
+            "him".to_owned(),
             PathBuf::from("/tmp/agent"),
             unavailable_runtime(),
         );
-        let refusal = "refusing to run agent 'agent-b' on the host: its sandbox is unavailable";
+        let refusal = "refusing to run agent 'him' on the host: its sandbox is unavailable";
 
         // Fail-closed: no host fallback exists for any of these.
         assert_eq!(run_health_probe(&health).await, Err(refusal.to_owned()));
@@ -882,7 +882,7 @@ mod tests {
     async fn every_step_resolves_the_sandbox_at_use_time() {
         let runtime = unavailable_runtime();
         let health = ClaudeHealth::new(
-            "agent-b".to_owned(),
+            "him".to_owned(),
             PathBuf::from("/tmp/agent"),
             Arc::clone(&runtime),
         );
@@ -906,7 +906,7 @@ mod tests {
     #[tokio::test]
     async fn repair_notice_is_one_shot() {
         let health = ClaudeHealth::new(
-            "agent-b".to_owned(),
+            "him".to_owned(),
             PathBuf::from("/tmp/agent"),
             unavailable_runtime(),
         );
@@ -920,7 +920,7 @@ mod tests {
     #[tokio::test]
     async fn repair_lock_rejects_concurrent_second_holder() {
         let health = ClaudeHealth::new(
-            "agent-b".to_owned(),
+            "him".to_owned(),
             PathBuf::from("/tmp/agent"),
             unavailable_runtime(),
         );
@@ -935,7 +935,7 @@ mod tests {
     #[tokio::test]
     async fn repair_timeout_releases_repair_lock() {
         let health = ClaudeHealth::new(
-            "agent-b".to_owned(),
+            "him".to_owned(),
             PathBuf::from("/tmp/agent"),
             unavailable_runtime(),
         );

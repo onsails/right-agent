@@ -416,14 +416,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let msg: Message = serde_json::from_value(serde_json::json!({
             "message_id": 7, "date": 0,
-            "chat": {"id": -1001234567890_i64, "type": "channel", "title": "agent-a"},
-            "sender_chat": {"id": -1001234567890_i64, "type": "channel", "title": "agent-a"},
+            "chat": {"id": -1001234567890_i64, "type": "channel", "title": "RiskOff"},
+            "sender_chat": {"id": -1001234567890_i64, "type": "channel", "title": "RiskOff"},
             "text": "hello channel"
         }))
         .unwrap();
         let payload = super::ArchivePayload::from_message(dir.path(), &msg, false, false).unwrap();
         assert_eq!(payload.sender_user_id, None);
-        assert_eq!(payload.sender_name.as_deref(), Some("agent-a"));
+        assert_eq!(payload.sender_name.as_deref(), Some("RiskOff"));
     }
 
     #[test]
@@ -432,7 +432,7 @@ mod tests {
         let msg = message(serde_json::json!({
             "message_id": 8,
             "date": 0,
-            "chat": {"id": -1001234567890_i64, "type": "channel", "title": "agent-a"},
+            "chat": {"id": -1001234567890_i64, "type": "channel", "title": "RiskOff"},
             "from": {"id": 42, "is_bot": false, "first_name": "User"},
             "sender_chat": {"id": -1001234567890_i64, "type": "channel", "title": "Chan"},
             "text": "both senders"

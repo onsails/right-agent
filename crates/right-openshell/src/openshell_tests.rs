@@ -38,7 +38,7 @@ fn sandbox_name_prefixes_agent_name() {
 
 #[test]
 fn sandbox_name_fits_within_upstream_routable_limit() {
-    assert_eq!(sandbox_name("agent-b"), "test-sandbox");
+    assert_eq!(sandbox_name("him"), "right-him");
     let name = sandbox_name("fourteenchars1"); // right-{agent} would be 20 chars
     assert!(name.len() <= MAX_SANDBOX_NAME_LEN);
     assert!(name.starts_with("right-"));
@@ -106,8 +106,8 @@ fn fit_sandbox_name_produces_dns1123_labels() {
 
 #[test]
 fn oversized_name_action_in_cap_names_need_nothing() {
-    assert_eq!(oversized_name_action("test-sandbox", false), None);
-    assert_eq!(oversized_name_action("test-sandbox", true), None);
+    assert_eq!(oversized_name_action("right-him", false), None);
+    assert_eq!(oversized_name_action("right-him", true), None);
 }
 
 #[test]

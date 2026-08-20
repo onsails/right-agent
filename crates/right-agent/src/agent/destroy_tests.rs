@@ -27,10 +27,10 @@ fn unique_sandbox_name(scope: &str) -> String {
 #[test]
 fn refcount_keeps_record_when_another_agent_references_it() {
     let agents = vec![
-        ("agent-a".to_string(), vec![entry("fal-a1b2c3")]),
+        ("riskoff".to_string(), vec![entry("fal-a1b2c3")]),
         ("right".to_string(), vec![entry("fal-a1b2c3")]),
     ];
-    let plan = plan_destroy_provider_cascade("agent-a", &agents, true);
+    let plan = plan_destroy_provider_cascade("riskoff", &agents, true);
     assert!(plan.detach.contains(&"fal-a1b2c3".to_string()));
     assert!(
         !plan.delete.contains(&"fal-a1b2c3".to_string()),
@@ -40,8 +40,8 @@ fn refcount_keeps_record_when_another_agent_references_it() {
 
 #[test]
 fn refcount_deletes_record_when_last_reference() {
-    let agents = vec![("agent-a".to_string(), vec![entry("fal-a1b2c3")])];
-    let plan = plan_destroy_provider_cascade("agent-a", &agents, true);
+    let agents = vec![("riskoff".to_string(), vec![entry("fal-a1b2c3")])];
+    let plan = plan_destroy_provider_cascade("riskoff", &agents, true);
     assert!(plan.delete.contains(&"fal-a1b2c3".to_string()));
 }
 
@@ -50,8 +50,8 @@ fn refcount_fails_closed_when_siblings_incomplete() {
     // When sibling enumeration was incomplete (all_complete=false), the
     // cascade must NOT delete gateway records — only detach.
     // This prevents deleting a record still referenced by an unread agent.
-    let agents = vec![("agent-a".to_string(), vec![entry("fal-a1b2c3")])];
-    let plan = plan_destroy_provider_cascade("agent-a", &agents, false);
+    let agents = vec![("riskoff".to_string(), vec![entry("fal-a1b2c3")])];
+    let plan = plan_destroy_provider_cascade("riskoff", &agents, false);
     assert!(
         plan.detach.contains(&"fal-a1b2c3".to_string()),
         "detach must still be populated"

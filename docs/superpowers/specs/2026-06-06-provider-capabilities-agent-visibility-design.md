@@ -23,7 +23,7 @@ placeholder is sent and GitHub returns `401 Bad credentials`. The agent
 then **misdiagnoses** this as an expired PAT and asks the user to rotate the
 token, when in fact `gh`/`git` work and the credential is valid.
 
-### Confirmed diagnosis (agent `right`, sandbox `test-sandbox-20260516-1640`)
+### Confirmed diagnosis (agent `right`, sandbox `right-right-20260516-1640`)
 
 - `gh api user` → `200`, returns `right-bot`. Substitution works, PAT valid.
 - `git ls-remote https://github.com/onsails/right-agent` → success.

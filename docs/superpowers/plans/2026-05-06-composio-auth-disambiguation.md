@@ -61,7 +61,7 @@ Between the table and the existing `**Critical:** "missing fields" means YOUR re
 
 - [ ] **Step 4: Rebuild the workspace so the binary embeds the new prompt**
 
-Run: `cd /Users/developer/dev/rightclaw && cargo build --workspace`
+Run: `cd /Users/molt/dev/rightclaw && cargo build --workspace`
 Expected: compiles cleanly. Two reasons to build the whole workspace, not just `right-agent`:
   1. The `OPERATING_INSTRUCTIONS.md` is `include_str!`'d at compile time inside `right-agent`, but the running binary is `right` (in crate `right`) and `right-bot` (in crate `bot`). Both must be rebuilt so the new prompt is actually shipped.
   2. Markdown content is opaque to the compiler — a green build only proves the file still exists at the expected path; it does NOT validate the prompt's behavioral effect (that's Task 3).
@@ -69,7 +69,7 @@ Expected: compiles cleanly. Two reasons to build the whole workspace, not just `
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/developer/dev/rightclaw
+cd /Users/molt/dev/rightclaw
 git add crates/right-agent/templates/right/prompt/OPERATING_INSTRUCTIONS.md
 git commit -m "feat(prompt): narrow MCP auth-error rule, trust upstream diagnostics
 
@@ -86,22 +86,22 @@ Spec: docs/superpowers/specs/2026-05-06-composio-auth-disambiguation-design.md"
 
 ---
 
-## Task 2: Restart agent-b-bot to pick up the new prompt
+## Task 2: Restart him-bot to pick up the new prompt
 
 **Files:** none (operational)
 
 - [ ] **Step 1: Restart the agent**
 
-Run: `/Users/developer/dev/rightclaw/target/debug/right restart agent-b`
-(If the binary path differs in your environment, use whatever `right` resolves to. The restart goes through `process-compose` and re-launches `agent-b-bot` with the rebuilt binary so the new embedded prompt takes effect.)
+Run: `/Users/molt/dev/rightclaw/target/debug/right restart him`
+(If the binary path differs in your environment, use whatever `right` resolves to. The restart goes through `process-compose` and re-launches `him-bot` with the rebuilt binary so the new embedded prompt takes effect.)
 
-Expected: command exits 0; `agent-b-bot` reappears in `right status` shortly afterwards.
+Expected: command exits 0; `him-bot` reappears in `right status` shortly afterwards.
 
-- [ ] **Step 2: Confirm agent-b-bot is back up**
+- [ ] **Step 2: Confirm him-bot is back up**
 
-Run: `curl -s -H "X-PC-Token-Key: $(jq -r .pc_api_token ~/.right/run/state.json)" "http://localhost:$(jq -r .pc_port ~/.right/run/state.json)/processes" | jq '.data[] | select(.name=="agent-b-bot") | {name, status, pid}'`
+Run: `curl -s -H "X-PC-Token-Key: $(jq -r .pc_api_token ~/.right/run/state.json)" "http://localhost:$(jq -r .pc_port ~/.right/run/state.json)/processes" | jq '.data[] | select(.name=="him-bot") | {name, status, pid}'`
 
-Expected output: `{"name":"agent-b-bot","status":"Running","pid":<some int>}`.
+Expected output: `{"name":"him-bot","status":"Running","pid":<some int>}`.
 
 ---
 
@@ -113,7 +113,7 @@ This task requires the operator (Andrey) to interact with the running bot in the
 
 - [ ] **Step 1: Reproduce the original scenario**
 
-In the `aibots` chat, send the same kind of request that triggered the bug — anything that requires the agent to read or modify a Google Doc through Composio. Concrete example (matches the original 15:12 UTC interaction): ask the agent to read or update the same Google Doc URL it tried to read at 15:12 UTC (find the URL in `~/.right/logs/agent-b.log.2026-05-06` near the `mcp__right__composio__COMPOSIO_MULTI_EXECUTE_TOOL` calls in turns 8 and 10 of session at that time).
+In the `aibots` chat, send the same kind of request that triggered the bug — anything that requires the agent to read or modify a Google Doc through Composio. Concrete example (matches the original 15:12 UTC interaction): ask the agent to read or update the same Google Doc URL it tried to read at 15:12 UTC (find the URL in `~/.right/logs/him.log.2026-05-06` near the `mcp__right__composio__COMPOSIO_MULTI_EXECUTE_TOOL` calls in turns 8 and 10 of session at that time).
 
 - [ ] **Step 2: Observe the agent's response in chat**
 
@@ -127,7 +127,7 @@ Failure mode (the regression we are fixing):
 
 - [ ] **Step 3: Cross-check the log**
 
-Run: `rg "/mcp auth composio" ~/.right/logs/agent-b.log.$(date -u +%Y-%m-%d) | rg -v "telegram::dispatch"`
+Run: `rg "/mcp auth composio" ~/.right/logs/him.log.$(date -u +%Y-%m-%d) | rg -v "telegram::dispatch"`
 
 Expected: zero new matches in `📝` (assistant text) or `🔧` lines after the Task 2 restart timestamp. The `telegram::dispatch` filter excludes any user-typed `/mcp auth composio` commands that would also appear in the log — we only care about the agent's own outputs.
 

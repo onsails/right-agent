@@ -5,8 +5,8 @@
 
 ## Problem
 
-Agent `agent-b` was asked for its Notion agenda and replied that Notion had been
-"unauthorized since 27 мая." This was false: `agent-b` produced a working,
+Agent `him` was asked for its Notion agenda and replied that Notion had been
+"unauthorized since 27 мая." This was false: `him` produced a working,
 live-linked agenda on 28 May — a day *after* the date it cited. The agent
 recalled a stale fact from a real 27 May incident (Composio gateway flapping +
 a re-auth share mismatch) and recited it as current truth without

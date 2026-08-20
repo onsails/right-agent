@@ -325,7 +325,7 @@ function source(over: Partial<UsageSourceSummary>): UsageSourceSummary {
 
 function usage(sources: UsageSourceSummary[]): UsageOverviewResponse {
   return {
-    agent: 'agent-b', generated_at: '2026-05-31T00:00:00Z',
+    agent: 'him', generated_at: '2026-05-31T00:00:00Z',
     windows: [{
       key: 'today', label: 'Today', sources,
       total_cost_usd: 1, subscription_cost_usd: 1, api_cost_usd: 0,

@@ -654,7 +654,7 @@ For `budget_skip_count_appears_in_window`, split the old all-window assertion in
 let today_response = usage_overview(
     &conn,
     UsageOverviewInput {
-        agent: "agent-b".to_owned(),
+        agent: "him".to_owned(),
         generated_at: "2026-05-21T05:00:00Z".to_owned(),
         timezone: Some("UTC".to_owned()),
         range: Some("today".to_owned()),
@@ -667,7 +667,7 @@ assert_eq!(today_response.window.budget_skip_count, 2);
 let all_time_response = usage_overview(
     &conn,
     UsageOverviewInput {
-        agent: "agent-b".to_owned(),
+        agent: "him".to_owned(),
         generated_at: "2026-05-21T05:00:00Z".to_owned(),
         timezone: Some("UTC".to_owned()),
         range: Some("all_time".to_owned()),

@@ -500,7 +500,7 @@ let cloudflared_script_path: std::path::PathBuf = {
 Search for `cloudflared_script_path` usage further down in `pipeline.rs`:
 
 ```sh
-rg -n "cloudflared_script_path" /Users/developer/dev/rightclaw/crates/right-agent/src/codegen/pipeline.rs
+rg -n "cloudflared_script_path" /Users/molt/dev/rightclaw/crates/right-agent/src/codegen/pipeline.rs
 ```
 
 Wherever it's wrapped in `if let Some(...)` or passed as `Option<&PathBuf>` to the process-compose template context, drop the `Option` layer — the path now always exists.
@@ -828,7 +828,7 @@ EOF
 
 - [ ] **Step 6.1: Add the feature**
 
-Edit `/Users/developer/dev/rightclaw/Cargo.toml:37`:
+Edit `/Users/molt/dev/rightclaw/Cargo.toml:37`:
 
 ```toml
 teloxide = { version = "0.17", default-features = false, features = ["macros", "throttle", "cache-me", "rustls", "webhooks-axum"] }

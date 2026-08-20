@@ -936,9 +936,9 @@ mod tests {
 
     #[test]
     fn reload_response_deserializes() {
-        let json = r#"{"added":["agent-b","test"],"removed":["gone"],"total":3}"#;
+        let json = r#"{"added":["him","test"],"removed":["gone"],"total":3}"#;
         let resp: ReloadResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.added, vec!["agent-b", "test"]);
+        assert_eq!(resp.added, vec!["him", "test"]);
         assert_eq!(resp.removed, vec!["gone"]);
         assert_eq!(resp.total, 3);
     }

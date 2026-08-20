@@ -92,7 +92,7 @@ export function isBorrowed(provider: ProviderView): boolean {
   return provider.shared_from != null && provider.shared_from !== ''
 }
 
-/** Label for a borrowed provider, e.g. "Shared from agent-a". Null if owned. */
+/** Label for a borrowed provider, e.g. "Shared from riskoff". Null if owned. */
 export function borrowedOwnerLabel(provider: ProviderView): string | null {
   return isBorrowed(provider) ? `Shared from ${provider.shared_from}` : null
 }

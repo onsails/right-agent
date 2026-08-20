@@ -6,7 +6,7 @@
 ## Problem
 
 A user who configured a provider on one agent (e.g. a `fal.ai` static-key
-provider on `agent-a`, or a custom `generic` provider) must currently
+provider on `riskoff`, or a custom `generic` provider) must currently
 re-enter the same API key by hand to use it on another agent. There is no
 way to reuse a credential that already lives on the OpenShell gateway.
 
@@ -118,7 +118,7 @@ FAIL-FAST:
   (e.g. source `generic` vs dest built-in) → error; operator must remove
   it first.
 
-No provenance ("imported from agent-a") is stored in v1 — matching by
+No provenance ("imported from riskoff") is stored in v1 — matching by
 env_var plus an explicit operator action is sufficient.
 
 ### Authorization

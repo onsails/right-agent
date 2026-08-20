@@ -75,8 +75,8 @@ Files modified or deleted by this plan, grouped by responsibility.
 - [ ] **Step 0: Create a worktree for this plan**
 
 ```bash
-git -C /Users/developer/dev/rightclaw worktree add -b remove-agents-md .worktrees/remove-agents-md master
-cd /Users/developer/dev/rightclaw/.worktrees/remove-agents-md
+git -C /Users/molt/dev/rightclaw worktree add -b remove-agents-md .worktrees/remove-agents-md master
+cd /Users/molt/dev/rightclaw/.worktrees/remove-agents-md
 ```
 
 Expected: worktree at `.worktrees/remove-agents-md` on branch `remove-agents-md`. All subsequent steps use this directory.

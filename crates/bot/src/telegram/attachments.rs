@@ -1740,7 +1740,7 @@ mod tests {
         )));
     }
 
-    const HOST_OUTBOX: &str = "/Users/x/.right/agents/agent-a/outbox";
+    const HOST_OUTBOX: &str = "/Users/x/.right/agents/riskoff/outbox";
 
     #[test]
     fn cron_host_outbox_path_is_host_local() {
