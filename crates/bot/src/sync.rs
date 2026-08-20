@@ -528,29 +528,40 @@ async fn ensure_sandbox_user_local_env(agent_dir: &Path, sbox: &Sandbox) -> miet
 /// probe images are Alpine). The user's home is `/sandbox`, which provisioning
 /// has already created by the time this runs.
 async fn ensure_sandbox_user(sbox: &Sandbox) -> miette::Result<()> {
+    let user = right_sandbox::GUEST_USER;
+    // Create the user if missing (Debian `useradd`, Alpine `adduser`), then —
+    // whether it was just created or already existed — hand the carried home
+    // to it, excluding `.platform` which must stay root-owned. The chown has
+    // to be recursive and must run every time, not just on first boot: the
+    // migration archives a home as root and defers the handover to the moment
+    // the user exists, so a re-provision (or a migrated agent whose user was
+    // created after migration) would otherwise leave `.claude` root-owned and
+    // `claude` unable to write its session state — the symptom is a turn that
+    // never finishes.
     let script = format!(
-        "if id {GUEST_USER} >/dev/null 2>&1; then exit 0; fi; \
-         if command -v useradd >/dev/null 2>&1; then \
-           useradd -m -d /sandbox -s /bin/bash {GUEST_USER}; \
-         elif command -v adduser >/dev/null 2>&1; then \
-           adduser -D -h /sandbox {GUEST_USER}; \
-         else \
-           echo 'no useradd or adduser on PATH' >&2; exit 1; \
+        "if ! id {user} >/dev/null 2>&1; then \
+           if command -v useradd >/dev/null 2>&1; then \
+             useradd -m -d /sandbox -s /bin/bash {user}; \
+           elif command -v adduser >/dev/null 2>&1; then \
+             adduser -D -h /sandbox {user}; \
+           else \
+             echo 'no useradd or adduser on PATH' >&2; exit 1; \
+           fi; \
          fi; \
-         chown {GUEST_USER}:{GUEST_USER} /sandbox",
-        GUEST_USER = right_sandbox::GUEST_USER,
+         chown {user}:{user} /sandbox; \
+         find /sandbox -mindepth 1 -maxdepth 1 ! -name .platform -exec chown -R {user}:{user} {{}} +"
     );
     let (output, code) = exec_argv(sbox, &["bash", "-lc", &script]).await?;
     if code != 0 {
         return Err(miette::miette!(
-            "sync: failed to create the guest user in {}: bash exited with {code}: {output}",
+            "sync: failed to provision the guest user in {}: bash exited with {code}: {output}",
             sbox.name()
         ));
     }
     tracing::info!(
         sandbox = sbox.name(),
         user = right_sandbox::GUEST_USER,
-        "sync: ensured guest user exists"
+        "sync: ensured guest user and ownership"
     );
     Ok(())
 }
