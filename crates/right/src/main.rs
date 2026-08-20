@@ -3302,9 +3302,7 @@ async fn cmd_up(
     // checks of other selected agents.
     let agents_dir = right_config::agents_dir(home);
     let discovery = discover_up_agents(&agents_dir, agents_filter.as_deref())?;
-    if discovery.agents.is_empty()
-        && discovery.issues.is_empty()
-        && discovery.unmigrated.is_empty()
+    if discovery.agents.is_empty() && discovery.issues.is_empty() && discovery.unmigrated.is_empty()
     {
         return Err(miette::miette!(
             "no agents found. Run `right agent init <name>` to create one."

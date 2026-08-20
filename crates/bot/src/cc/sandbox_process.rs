@@ -23,7 +23,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, ReadHalf, SimplexStream, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
 
-use right_sandbox::{ChunkedStdin, ExecEvent, ExecRequest, ExecStream, SandboxError, Stdin};
+use right_sandbox::{
+    ChunkedStdin, ExecEvent, ExecRequest, ExecStream, GUEST_USER, SandboxError, Stdin,
+};
 
 use crate::sandbox::{SANDBOX_HOME, Sandbox};
 
@@ -132,7 +134,13 @@ impl SandboxCommand {
             cmd: "/bin/sh".to_owned(),
             args: vec!["-c".to_owned(), self.script.clone()],
             cwd: Some(SANDBOX_HOME.to_owned()),
-            user: None,
+            // Claude Code refuses to run as root, so every guest command — not
+            // just the agent turns — executes as the unprivileged sandbox user
+            // provisioning creates. Stage 1 verified this override; the pilot
+            // surfaced that the turn builder never applied it, which is why
+            // every turn hung: claude printed "--dangerously-skip-permissions
+            // cannot be used with root/sudo privileges" and exited 0.
+            user: Some(GUEST_USER.to_owned()),
             env: self.env.clone(),
             stdin: if self.stdin { Stdin::Pipe } else { Stdin::Null },
             timeout: self.timeout,

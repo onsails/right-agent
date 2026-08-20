@@ -27,18 +27,16 @@ pub(crate) fn report_sync_failure(handle: Option<&SandboxRuntimeHandle>) {
 /// ensuring sandbox has correct config before any `claude -p` invocations.
 pub(crate) async fn initial_sync(agent_dir: &Path, sbox: &Sandbox) -> miette::Result<()> {
     tracing::info!(sandbox = sbox.name(), "sync: initial cycle (blocking)");
+
+    // The unprivileged guest user must exist before any `claude -p` runs: the
+    // turn executes as `GUEST_USER`, and Claude Code refuses root. Provisioning
+    // owns this (the stage-1 probes did it inline), but the stage-4 rewire
+    // dropped the step, so a migrated agent booted with no `sandbox` user and
+    // every turn hung. Idempotent, and must land before deploy_manifest because
+    // the platform tree is handed to the agent.
+    ensure_sandbox_user(sbox).await?;
+
     sync_cycle(agent_dir, sbox).await?;
-
-    // One-shot migration: clear legacy built-in skill paths from the sandbox.
-    // Kept out of `sync_cycle` so it does not re-exec every 5 minutes forever.
-    cleanup_obsolete_builtin_skill_paths(sbox).await?;
-
-    // Ensure user-local CLI/npm environment is configured before any
-    // claude invocation. Includes the `agent.yaml::env` map so per-
-    // agent operator-declared env vars (e.g. ANTHROPIC_BASE_URL when
-    // routing through a LiteLLM proxy) actually reach the sandbox.
-    ensure_sandbox_user_local_env(agent_dir, sbox).await?;
-
     Ok(())
 }
 
@@ -519,6 +517,41 @@ async fn ensure_sandbox_user_local_env(agent_dir: &Path, sbox: &Sandbox) -> miet
     }
 
     tracing::info!("sync: ensured sandbox user-local CLI/npm environment");
+    Ok(())
+}
+
+/// Create the unprivileged guest user if it does not exist.
+///
+/// Idempotent: a sandbox that already has the user is a no-op. The script
+/// tries the Debian-flavoured `useradd` first and the Alpine `adduser` second,
+/// matching the images the agent spec supports (`node:22-slim` is Debian, the
+/// probe images are Alpine). The user's home is `/sandbox`, which provisioning
+/// has already created by the time this runs.
+async fn ensure_sandbox_user(sbox: &Sandbox) -> miette::Result<()> {
+    let script = format!(
+        "if id {GUEST_USER} >/dev/null 2>&1; then exit 0; fi; \
+         if command -v useradd >/dev/null 2>&1; then \
+           useradd -m -d /sandbox -s /bin/bash {GUEST_USER}; \
+         elif command -v adduser >/dev/null 2>&1; then \
+           adduser -D -h /sandbox {GUEST_USER}; \
+         else \
+           echo 'no useradd or adduser on PATH' >&2; exit 1; \
+         fi; \
+         chown {GUEST_USER}:{GUEST_USER} /sandbox",
+        GUEST_USER = right_sandbox::GUEST_USER,
+    );
+    let (output, code) = exec_argv(sbox, &["bash", "-lc", &script]).await?;
+    if code != 0 {
+        return Err(miette::miette!(
+            "sync: failed to create the guest user in {}: bash exited with {code}: {output}",
+            sbox.name()
+        ));
+    }
+    tracing::info!(
+        sandbox = sbox.name(),
+        user = right_sandbox::GUEST_USER,
+        "sync: ensured guest user exists"
+    );
     Ok(())
 }
 
