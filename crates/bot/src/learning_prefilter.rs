@@ -556,9 +556,14 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
     let args = invocation.into_args();
     let command = build_claude_command(&args, &ctx.agent_dir, &sandbox).await;
 
-    let output = match tokio::time::timeout(PREFILTER_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => {
+    let mut child = match command
+        .stdout(crate::cc::sandbox_process::Capture::Pipe)
+        .stderr(crate::cc::sandbox_process::Capture::Pipe)
+        .spawn()
+        .await
+    {
+        Ok(child) => child,
+        Err(e) => {
             let argv = redact_prefilter_args(&args);
             tracing::warn!(
                 agent = %ctx.agent_name,
@@ -569,6 +574,25 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
             );
             return PrefilterDecision::Skip {
                 reason: "spawn failed".into(),
+            };
+        }
+    };
+    // Break on the terminal JSON envelope (kill the guest, no EOF wait) inside
+    // the same wall-clock bound the old `command.output()` raced.
+    let output = match tokio::time::timeout(PREFILTER_TIMEOUT, child.wait_for_json_envelope()).await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => {
+            let argv = redact_prefilter_args(&args);
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                model = %ctx.model,
+                sandbox = %sandbox.name(),
+                argv = ?argv,
+                "prefilter envelope read failed: {e:#}"
+            );
+            return PrefilterDecision::Skip {
+                reason: "envelope read failed".into(),
             };
         }
         Err(_) => {

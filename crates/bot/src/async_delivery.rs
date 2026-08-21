@@ -199,9 +199,10 @@ pub(crate) async fn select_delivery_candidate(
 /// See docs/superpowers/specs/2026-04-15-cron-delivery-verbatim-relay.md.
 const CRON_DELIVERY_INSTRUCTION_SUCCESS: &str = "\
 You are delivering a cron job result to the user.
-The `content` field below is the FINAL user-facing message — send it VERBATIM in your response.
+The `content` field below is the FINAL user-facing message — place it VERBATIM in your reply's `content` field.
 Do NOT summarize, rephrase, or omit any part of the content.
 You MAY prepend a short contextual intro (1 sentence max) if recent conversation was on a different topic, so the message feels natural.
+Do NOT call `mcp__right__send_message` or any other send/notify tool. The platform delivers your reply to Telegram itself — writing `content` (and optionally `attachments`) is the only way to reach the user.
 Re-emit any attachments from the report in your reply's `attachments` array. `content` and an attachment `caption` are delivered as SEPARATE messages — never repeat the content text in a caption.
 
 Here is the YAML report of the cron job:
@@ -224,9 +225,10 @@ Here is the YAML report of the cron job:
 
 const BACKGROUND_DELIVERY_INSTRUCTION_SUCCESS: &str = "\
 You are delivering a background task result to the user.
-The `content` field below is the FINAL user-facing message - send it VERBATIM in your response.
+The `content` field below is the FINAL user-facing message - place it VERBATIM in your reply's `content` field.
 Do NOT summarize, rephrase, or omit any part of the content.
 You MAY prepend a short contextual intro (1 sentence max) if recent conversation was on a different topic, so the message feels natural.
+Do NOT call `mcp__right__send_message` or any other send/notify tool. The platform delivers your reply to Telegram itself - writing `content` (and optionally `attachments`) is the only way to reach the user.
 Re-emit any attachments from the report in your reply's `attachments` array. `content` and an attachment `caption` are delivered as SEPARATE messages - never repeat the content text in a caption.
 
 Here is the YAML report of the background task:
@@ -1142,9 +1144,11 @@ async fn deliver_through_session(
 
     // Any deadline error returns from this function and drops `child`; the
     // SandboxChild drop contract kills the still-running guest process.
-    let output = run_or_delivery_deadline(delivery, child.wait_with_output())
+    // Break on the terminal JSON envelope and kill the guest, never waiting
+    // for EOF — the SDK may not report an exit after a stdin-piped resume.
+    let output = run_or_delivery_deadline(delivery, child.wait_for_json_envelope())
         .await?
-        .map_err(|e| format!("wait_with_output: {e:#}"))?;
+        .map_err(|e| format!("wait_for_json_envelope: {e:#}"))?;
 
     if !output.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1159,7 +1163,10 @@ async fn deliver_through_session(
         } else {
             "(no output)".into()
         };
-        return Err(format!("CC exited with {}: {detail}", output.code));
+        return Err(format!(
+            "CC delivery failed (code {}): {detail}",
+            output.code
+        ));
     }
 
     let raw = String::from_utf8_lossy(&output.stdout);
@@ -1904,7 +1911,8 @@ mod tests {
         let output = format_async_yaml(&pending, 2).unwrap();
         // Instruction prefix assertions
         assert!(output.starts_with("You are delivering a cron job result"));
-        assert!(output.contains("VERBATIM"));
+        assert!(output.contains("place it VERBATIM in your reply's `content` field"));
+        assert!(output.contains("Do NOT call `mcp__right__send_message`"));
         assert!(output.contains("never repeat the content text in a caption"));
         assert!(output.contains("Here is the YAML report of the cron job:"));
         // YAML content assertions

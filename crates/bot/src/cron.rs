@@ -173,6 +173,28 @@ pub(crate) fn is_lock_fresh(
     chrono::Utc::now() - lock.heartbeat < ttl
 }
 
+/// Wrap the prompt-assembly script in the cron log pipeline.
+///
+/// POSIX-sh only: the guest `/bin/sh` is dash (node:22-slim), which aborts on
+/// bash-only `set -o pipefail` before `claude` ever runs — the Aug 18–21 cron
+/// outage. No pipefail: the outcome classifier reads the terminal `result`
+/// NDJSON line, never the pipeline exit code.
+fn cron_wrapper_script(assembly_script: &str, log_dir: &str, log_filename: &str) -> String {
+    format!("mkdir -p {log_dir}\n{assembly_script} | tee {log_dir}/{log_filename}")
+}
+/// Age of a job's lock heartbeat, for the skip log line. `None` when the lock
+/// file is missing or unparseable (the caller logs `-1` — lock fresh yet
+/// unreadable is itself a signal).
+fn lock_age(agent_dir: &std::path::Path, job_name: &str) -> Option<chrono::Duration> {
+    let lock_path = agent_dir
+        .join("crons")
+        .join(".locks")
+        .join(format!("{job_name}.json"));
+    let raw = std::fs::read_to_string(&lock_path).ok()?;
+    let lock = serde_json::from_str::<LockFile>(&raw).ok()?;
+    Some(chrono::Utc::now() - lock.heartbeat)
+}
+
 fn effective_lock_ttl(spec: &CronSpec) -> &str {
     if let Some(lock_ttl) = spec.lock_ttl.as_deref() {
         return lock_ttl;
@@ -617,10 +639,14 @@ async fn execute_job(
     session_locks: &crate::telegram::SessionLocks,
     progress_state: &crate::telegram::progress::ProgressState,
 ) {
-    // Lock check (CRON-04)
+    // Lock check (CRON-04). The lock age distinguishes a healthy in-flight
+    // run from a wedged one at a glance.
     let lock_ttl = effective_lock_ttl(spec);
     if is_lock_fresh(agent_dir, job_name, lock_ttl) {
-        tracing::info!(job = %job_name, "skipping — previous run still active (lock fresh)");
+        let lock_age_secs = lock_age(agent_dir, job_name)
+            .map(|d| d.num_seconds())
+            .unwrap_or(-1);
+        tracing::info!(job = %job_name, lock_age_secs, "skipping — previous run still active (lock fresh)");
         return;
     }
 
@@ -819,10 +845,7 @@ async fn execute_job(
         None,
         Some(&notice_token),
     );
-    // `tee` the run's NDJSON into the guest log dir the agent reads back.
-    let assembly_script = format!(
-        "set -o pipefail\nmkdir -p {sandbox_log_dir}\n{assembly_script} | tee {sandbox_log_dir}/{log_filename}"
-    );
+    let assembly_script = cron_wrapper_script(&assembly_script, sandbox_log_dir, &log_filename);
 
     tracing::info!(job = %job_name, run_id = %run_id, "executing cron job");
 
@@ -849,8 +872,33 @@ async fn execute_job(
     };
 
     // Stream stdout; break on the terminal result event (do not wait for EOF —
-    // the guest stdout pipe can linger open after CC exits).
-    let outcome = consume_cron_stream(&mut child).await;
+    // the guest stdout pipe can linger open after CC exits). A wall-clock cap
+    // bounds the whole drive: a guest that dies or wedges without a terminal
+    // `result` line must not park this task until bot restart — the cap fires,
+    // the child is killed (also via `SandboxChild::Drop` on return), and the
+    // run flows through the normal failure path instead of stranding the lock.
+    let run_elapsed = run_started.elapsed();
+    let outcome = match tokio::time::timeout(
+        CRON_RUN_TIMEOUT.saturating_sub(run_elapsed),
+        consume_cron_stream(&mut child),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_elapsed) => {
+            tracing::error!(
+                job = %job_name,
+                run_id = %run_id,
+                child_pid = child.pid(),
+                elapsed_secs = run_started.elapsed().as_secs(),
+                "cron run exceeded the wall-clock cap — killing the guest and failing the run"
+            );
+            child.kill().await;
+            CronStreamOutcome::Failed {
+                collected_lines: Vec::new(),
+            }
+        }
+    };
     let collected_lines: Vec<String> = match &outcome {
         CronStreamOutcome::Success { collected_lines }
         | CronStreamOutcome::Failed { collected_lines } => collected_lines.clone(),
@@ -927,12 +975,12 @@ async fn execute_job(
             Ok(Err(e)) => {
                 tracing::warn!(job = %job_name, child_pid, "failed to read stderr: {e:#}")
             }
-            Err(_) => tracing::error!(
+            Err(_) => tracing::debug!(
                 job = %job_name,
                 child_pid,
                 bytes_so_far = buf.len(),
                 elapsed_ms = read_started.elapsed().as_millis() as u64,
-                "stderr read timed out — pipe write-end held by another process",
+                "post-break: stderr drain timed out (transport keeps the pipe open after the terminal result; benign)",
             ),
         }
         buf
@@ -947,6 +995,17 @@ async fn execute_job(
         CronStreamOutcome::Failed { .. } => "failed",
     };
     if matches!(outcome, CronStreamOutcome::Failed { .. }) {
+        // The stderr tail is the primary observability fix: a guest that dies
+        // before `claude` runs (shell errors, missing binaries) writes the
+        // reason here, and nothing else in the stream carries it.
+        let stderr_tail: String = stderr_str
+            .chars()
+            .rev()
+            .take(STDERR_TAIL_CHARS)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
         // Distinguish a captured error result from a genuinely absent one — the
         // old blanket "no terminal result" wording masked budget/turn-limit
         // failures that DID emit a result.
@@ -956,10 +1015,17 @@ async fn execute_job(
                 job = %job_name,
                 exit_code = ?exit_code,
                 detail = detail.as_deref().unwrap_or("error result"),
+                stderr_tail = %stderr_tail,
                 "cron job ended with an error result"
             );
         } else {
-            tracing::error!(job = %job_name, exit_code = ?exit_code, "cron job produced no terminal result");
+            tracing::error!(
+                job = %job_name,
+                run_id = %run_id,
+                exit_code = ?exit_code,
+                stderr_tail = %stderr_tail,
+                "cron job produced no terminal result"
+            );
         }
     }
 
@@ -1731,6 +1797,18 @@ async fn update_run_record(
 ///
 pub(crate) const SHUTDOWN_JOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Wall-clock cap on one cron run's guest drive, measured from `run_started`
+/// (before the spawn). Bounds the otherwise-unbounded stream consume: a guest
+/// that dies or wedges without a terminal `result` line cannot park the task
+/// until bot restart or strand its lock. Generous vs. real turns — the largest
+/// observed legitimate run is ~20 min.
+const CRON_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Guest stderr characters kept in the failure log line (tail). Shell-level
+/// failures put the reason in the last few lines; the cap keeps the log line
+/// bounded when a run floods stderr.
+const STDERR_TAIL_CHARS: usize = 4 * 1024;
+
 /// Bound on `child.wait()` after the cron stream loop exits — see the
 /// matching constant in `telegram::worker` for the rationale.
 const POST_BREAK_WAIT_TIMEOUT_SECS: u64 = 5;
@@ -2422,6 +2500,20 @@ mod classify_tests {
     fn terminal_failure_detail_prefers_explicit_result_text() {
         let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"all good"}"#;
         assert_eq!(terminal_failure_detail(line).as_deref(), Some("all good"));
+    }
+
+    /// The cron wrapper runs under the guest's POSIX `/bin/sh` (dash on
+    /// node:22-slim). `set -o pipefail` is a bashism dash aborts on before
+    /// `claude` ever runs — the Aug 18–21 cron outage. Guards the real
+    /// wrapper builder against bash-only constructs.
+    #[test]
+    fn cron_wrapper_script_is_posix_sh_safe() {
+        let script = cron_wrapper_script("printf 'body'", "/sandbox/crons/logs", "job-run.ndjson");
+        assert!(script.contains("tee /sandbox/crons/logs/job-run.ndjson"));
+        assert!(
+            !script.contains("pipefail"),
+            "cron wrapper must not use bash-only pipefail: {script}"
+        );
     }
 
     #[test]

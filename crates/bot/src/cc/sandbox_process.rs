@@ -37,6 +37,16 @@ const STREAM_BUFFER_BYTES: usize = 256 * 1024;
 /// only bounds the intermediate copy.
 const STDIN_READ_BYTES: usize = 64 * 1024;
 
+/// Read size for [`SandboxChild::wait_for_json_envelope`]'s incremental
+/// stdout reader. The envelope is one `--output-format json` object, so 8 KiB
+/// chunks only bound the intermediate copy.
+const JSON_ENVELOPE_READ_BYTES: usize = 8 * 1024;
+
+/// Bound on draining stderr after the terminal envelope is seen and the guest
+/// is killed. Stderr is purely diagnostic — a wedged pipe must not block the
+/// caller (mirrors the worker's `POST_BREAK_STDERR_TIMEOUT_SECS`).
+const POST_ENVELOPE_STDERR_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// What to do with one of the guest process's output streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Capture {
@@ -302,6 +312,80 @@ impl SandboxChild {
         })
     }
 
+    /// Read the terminal `--output-format json` envelope from stdout, kill the
+    /// guest, and best-effort drain stderr — without waiting for EOF.
+    ///
+    /// The sandbox transport may never report [`ExecEvent::Exited`] (or close
+    /// stdout) after a stdin-piped `--resume` turn, so `wait_with_output`'s
+    /// `join!(drain, drain, wait)` would hang. This instead breaks as soon as
+    /// the whole accumulated stdout parses as one JSON value (the envelope is
+    /// a single JSON object), then kills the guest.
+    ///
+    /// The returned [`SandboxOutput::code`] is **semantic**, not a transport
+    /// exit: `1` when the envelope reports `is_error: true`, `0` when the
+    /// envelope parsed and is not an error (`is_error` absent or false), and
+    /// `-1` when stdout ended without any envelope (guest wedged before
+    /// emitting a result). [`SandboxOutput::success`] is therefore a faithful
+    /// "parsed a non-error envelope" gate; `-1` still fails it.
+    pub(crate) async fn wait_for_json_envelope(
+        &mut self,
+    ) -> Result<SandboxOutput, SandboxProcessError> {
+        let mut stdout = Vec::new();
+        // Guarded close of any stdin the caller did not already consume and
+        // close. Delivery closes stdin itself; prefilter pipes none, so this
+        // is a defensive no-op for both current call sites.
+        if let Some(stdin) = self.stdin.take() {
+            stdin.close().await?;
+        }
+
+        let mut stdout_reader = self.stdout.take();
+        let mut envelope: Option<serde_json::Value> = None;
+        if let Some(reader) = stdout_reader.as_mut() {
+            let mut buf = [0_u8; JSON_ENVELOPE_READ_BYTES];
+            loop {
+                let n =
+                    reader
+                        .read(&mut buf)
+                        .await
+                        .map_err(|source| SandboxProcessError::Pipe {
+                            stream: "stdout",
+                            source,
+                        })?;
+                if n == 0 {
+                    break; // EOF without a complete envelope
+                }
+                stdout.extend_from_slice(&buf[..n]);
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&stdout) {
+                    envelope = Some(value);
+                    break;
+                }
+            }
+        }
+
+        // Break-on-result contract: the result is authoritative even when the
+        // transport never reports an exit, so kill the guest here.
+        self.kill().await;
+
+        // Best-effort bounded stderr drain after the kill: the pump's stderr
+        // write half closes on exit, turning the read into EOF. A wedged pipe
+        // must not block the caller, so bound it and keep what we captured.
+        let mut stderr = Vec::new();
+        if let Some(mut reader) = self.stderr.take() {
+            let _ = tokio::time::timeout(POST_ENVELOPE_STDERR_TIMEOUT, async {
+                reader.read_to_end(&mut stderr).await
+            })
+            .await;
+        }
+
+        let code = semantic_envelope_code(envelope.as_ref());
+
+        Ok(SandboxOutput {
+            code,
+            stdout,
+            stderr,
+        })
+    }
+
     /// Kill the guest process. Idempotent; a finished process is a no-op, and
     /// the kill itself is reported by the pump task, not awaited here.
     pub(crate) async fn kill(&mut self) {
@@ -357,6 +441,21 @@ pub(crate) enum SandboxProcessError {
     /// the runtime is shutting down.
     #[error("the guest exec session ended without reporting an exit code")]
     PumpGone,
+}
+/// Derive the semantic exit for a parsed `--output-format json` envelope.
+///
+/// The transport exit is meaningless after break-on-result + kill, so the
+/// envelope's own `is_error` is authoritative: `1` for `is_error: true`,
+/// `0` for a parsed non-error envelope (`is_error` absent or false), and
+/// `-1` when no envelope was observed (guest wedged before emitting a result).
+fn semantic_envelope_code(envelope: Option<&serde_json::Value>) -> i32 {
+    match envelope {
+        Some(value) if value.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) => {
+            1
+        }
+        Some(_) => 0,
+        None => -1,
+    }
 }
 
 /// One step of the event pump.
@@ -580,6 +679,25 @@ mod tests {
     use std::task::Poll;
 
     use super::*;
+
+    #[test]
+    fn semantic_envelope_code_maps_envelope_state() {
+        let error: serde_json::Value =
+            serde_json::from_str(r#"{"type":"result","is_error":true}"#).unwrap();
+        let success: serde_json::Value =
+            serde_json::from_str(r#"{"type":"result","is_error":false}"#).unwrap();
+        // A success envelope may omit `is_error` entirely — still not an error.
+        let no_flag: serde_json::Value = serde_json::from_str(
+            r#"{"session_id":"abc","result":"","structured_output":{"content":"ok"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(semantic_envelope_code(Some(&error)), 1);
+        assert_eq!(semantic_envelope_code(Some(&success)), 0);
+        assert_eq!(semantic_envelope_code(Some(&no_flag)), 0);
+        // No envelope observed — guest wedged before emitting a result.
+        assert_eq!(semantic_envelope_code(None), -1);
+    }
 
     struct ForwarderDropSignal(Option<oneshot::Sender<()>>);
 

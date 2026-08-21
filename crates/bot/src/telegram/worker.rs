@@ -5346,7 +5346,7 @@ async fn invoke_cc(
                 );
             }
             Err(_) => {
-                tracing::error!(
+                tracing::debug!(
                     chat_id = log_ctx.chat_id,
                     eff_thread_id = log_ctx.eff_thread_id,
                     key = ?log_ctx.key(),
@@ -5355,7 +5355,7 @@ async fn invoke_cc(
                     child_pid,
                     bytes_so_far = buf.len(),
                     elapsed_ms = read_started.elapsed().as_millis() as u64,
-                    "stderr read timed out — pipe write-end held by another process (ssh master forwarding?)",
+                    "post-break: stderr drain timed out (transport keeps the pipe open after the terminal result; benign)",
                 );
             }
         }
