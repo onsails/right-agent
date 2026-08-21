@@ -371,10 +371,22 @@ impl SandboxChild {
         // must not block the caller, so bound it and keep what we captured.
         let mut stderr = Vec::new();
         if let Some(mut reader) = self.stderr.take() {
-            let _ = tokio::time::timeout(POST_ENVELOPE_STDERR_TIMEOUT, async {
+            match tokio::time::timeout(POST_ENVELOPE_STDERR_TIMEOUT, async {
                 reader.read_to_end(&mut stderr).await
             })
-            .await;
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::debug!("post-envelope stderr drain read failed: {e}");
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        "post-envelope stderr drain timed out after {:?} (transport keeps the pipe open; benign)",
+                        POST_ENVELOPE_STDERR_TIMEOUT
+                    );
+                }
+            }
         }
 
         let code = semantic_envelope_code(envelope.as_ref());
