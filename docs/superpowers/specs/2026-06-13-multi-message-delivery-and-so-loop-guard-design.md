@@ -5,7 +5,7 @@
 
 ## Problem
 
-Agent `agent-a` appeared to hang mid-turn. Root-cause investigation
+Agent `riskoff` appeared to hang mid-turn. Root-cause investigation
 (host stream NDJSON + in-sandbox transcript) showed it was not hung but
 stuck in an invisible, unbounded retry loop.
 

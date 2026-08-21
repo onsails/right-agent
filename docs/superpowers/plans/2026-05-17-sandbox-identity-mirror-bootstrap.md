@@ -851,14 +851,14 @@ Only if OpenShell and the local Right runtime are available:
 
 ```bash
 devenv shell -- cargo run -p right -- agent ssh right -- ls -l /sandbox/IDENTITY.md /sandbox/SOUL.md /sandbox/USER.md
-devenv shell -- cargo run -p right -- agent ssh agent-b -- ls -l /sandbox/IDENTITY.md /sandbox/SOUL.md /sandbox/USER.md
+devenv shell -- cargo run -p right -- agent ssh him -- ls -l /sandbox/IDENTITY.md /sandbox/SOUL.md /sandbox/USER.md
 devenv shell -- cargo run -p right -- doctor
 ```
 
 Expected:
-- `right` and `agent-b` sandbox files exist.
+- `right` and `him` sandbox files exist.
 - Host mirrors exist after restore/startup reconciliation.
-- `right doctor` no longer warns about missing `SOUL.md` or `USER.md` for `right` / `agent-b`.
+- `right doctor` no longer warns about missing `SOUL.md` or `USER.md` for `right` / `him`.
 - Any unrelated `test` sandbox warning is not part of this plan.
 
 - [ ] **Step 6: Final commit if verification required changes**

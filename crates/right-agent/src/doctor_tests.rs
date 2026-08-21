@@ -166,8 +166,8 @@ async fn run_doctor_always_checks_all_three_binaries() {
     );
     assert!(binary_names.contains(&"claude"), "missing claude check");
     assert!(
-        binary_names.contains(&"openshell"),
-        "missing openshell check"
+        !binary_names.contains(&"openshell"),
+        "openshell is no longer a Right dependency and must not be probed"
     );
 }
 

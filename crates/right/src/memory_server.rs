@@ -698,7 +698,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "DO NOT CALL in stdio mode — provider capabilities require the HTTP aggregator and OpenShell sandbox gateway. This stub exists only so the schema matches the HTTP server's tool list; every call returns provider_capabilities_unavailable."
+        description = "DO NOT CALL in stdio mode — provider capabilities require the HTTP aggregator's provider store. This stub exists only so the schema matches the HTTP server's tool list; every call returns provider_capabilities_unavailable."
     )]
     async fn provider_capabilities(
         &self,
@@ -706,7 +706,7 @@ impl MemoryServer {
     ) -> Result<CallToolResult, McpError> {
         Ok(tool_error(
             "provider_capabilities_unavailable",
-            "provider_capabilities requires HTTP aggregator + sandbox gateway context",
+            "provider_capabilities requires the HTTP aggregator's provider store",
             None,
         ))
     }
@@ -783,8 +783,8 @@ impl rmcp::ServerHandler for MemoryServer {
                  ## Conversation Focus\n\
                  - mcp__right__thread_focus_set: Set your standing focus for the CURRENT conversation; shown to you every future turn here. Empty string clears it. Scope is server-enforced. DO NOT call in stdio mode — requires the HTTP aggregator scope.\n\n\
                  ## Providers\n\
-                 - mcp__right__provider_capabilities: List attached providers, including env-var placeholder names only, allowed binaries, and valid hosts. On provider 401/403, call this before concluding the credential is invalid.\n\
-                 DO NOT call in stdio mode because provider capabilities require HTTP aggregator + sandbox gateway.\n\n\
+                 - mcp__right__provider_capabilities: List attached providers, including env-var placeholder names only and the hosts each credential is valid for. On provider 401/403, call this before concluding the credential is invalid.\n\
+                 DO NOT call in stdio mode because provider capabilities require the HTTP aggregator's provider store.\n\n\
                  ## Learning\n\
                  - mcp__right__skill_learning_start: Stage 1 foreground metadata/progress for learned skill create/update. Call before writing or patching skill package files. action=create and action=update both require rightx-* skill names. Accepts skill names only, never paths.\n\
                  - mcp__right__skill_learning_finish: Stage 1 foreground metadata/receipt for skill create/update completion. Successful statuses require a non-empty LLM-authored message argument, verify the skill package exists at .claude/skills/<skill_name>/SKILL.md, and send learned/updated receipts. Does not move files. Optional field hint_outcome: \"applied_as_hinted\" | \"applied_differently\" | \"refused\" — probe-writer must include this when a prefilter hint was provided.",
@@ -1034,7 +1034,7 @@ mod tests {
         );
         assert!(
             instructions
-                .contains("provider capabilities require HTTP aggregator + sandbox gateway"),
+                .contains("provider capabilities require the HTTP aggregator's provider store"),
             "stdio instructions should mention provider_capabilities HTTP aggregator caveat: {instructions}"
         );
 

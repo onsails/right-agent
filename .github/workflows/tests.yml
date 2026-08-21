@@ -5,13 +5,6 @@ on:
   push:
     branches: ["master"]
   workflow_dispatch:
-  # Daily OpenShell-latest compatibility run. PR/push keep the pinned
-  # OPENSHELL_VERSION for reproducible gating; on `schedule` the ignored job
-  # resolves the newest OpenShell release instead, so upstream proto/API drift
-  # (e.g. the 0.0.56 Sandbox.phase -> SandboxStatus.phase move) surfaces in CI
-  # within a day rather than in production.
-  schedule:
-    - cron: "17 6 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -93,9 +86,8 @@ jobs:
           cmd-format: devenv shell -- {0}
           # Stable per-job key (drops the auto-appended job suffix) so the
           # cache entry is reused across PRs/pushes for the same lockfile.
-          # NOT shared with `ignored` — that job builds with
-          # `--features right-openshell/test-support`, so a shared target/
-          # would double-build many crates.
+          # NOT shared with `ignored`/`sandbox` — those jobs build different
+          # test binaries, so a shared target/ would thrash.
           shared-key: "tests-workspace"
       - name: Disk usage after Rust cache
         if: always()
@@ -122,7 +114,7 @@ jobs:
               ;;
             *" tunnel "*" create "*)
               for last do :; done
-              printf '{}\n' > "$cf_dir/$uuid.json"
+              printf '{"TunnelID":"%s"}\n' "$uuid" > "$cf_dir/$uuid.json"
               printf '{"id":"%s","name":"%s"}\n' "$uuid" "$last"
               ;;
             *)
@@ -148,17 +140,9 @@ jobs:
         run: devenv shell -- cargo test --doc --workspace --locked
 
   ignored:
-    name: ignored tests
+    name: ignored tests (STT)
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      # Pinned floor for PR/push gating. Must be >= MIN_OPENSHELL_VERSION
-      # (crates/right-openshell/src/preflight.rs). The `schedule` run overrides
-      # this with the latest release (see "Resolve OpenShell version" below).
-      OPENSHELL_VERSION: "v0.0.105"
-      OPENSHELL_DRIVERS: "docker"
-      RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS: "360"
-      RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS: "120"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -166,11 +150,9 @@ jobs:
       # Same Determinate Nix + Devenv + FlakeHub Cache combo as the workspace
       # job. Replaces cachix/install-nix-action + manual devenv install.
       - uses: onsails/nix-action@v2.2.0
-      # Same aggressive root-fs cleanup as the workspace job. This job is the
-      # one that ENOSPC'd on a 72 GB runner: it also installs OpenShell +
-      # Docker images and creates k3s sandboxes later, so disk pressure is
-      # highest here. docker-images: true is safe — the runner's preinstalled
-      # images are cleared now; OpenShell pulls its own images after this step.
+      # Same aggressive root-fs cleanup as the workspace job: the whisper
+      # model cache plus a full target/ leave little headroom on the 72 GB
+      # runner variant.
       - name: Free up runner disk space
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
@@ -236,96 +218,73 @@ jobs:
           devenv shell -- cargo run --bin right --locked -- stt preload --model tiny
 
       - name: Run STT ignored tests
-        id: stt_tests
-        continue-on-error: true
         run: |
           devenv shell -- cargo nextest run --profile ci-ignored --workspace --locked --run-ignored=only -E 'test(/ci_stt_/)'
-      - name: Disk usage before OpenShell install
-        if: always()
-        run: |
-          df -h
-          du -sh target/devenv ~/.cargo ~/.right ~/.right/cache/whisper /nix /tmp /home/runner/work 2>/dev/null || true
-
-      - name: Check Docker runtime
-        run: |
-          docker version
-          docker info
-
-      - name: Resolve OpenShell version (latest on schedule)
-        if: github.event_name == 'schedule'
-        run: |
-          set -euo pipefail
-          latest="$(curl -fsSL https://api.github.com/repos/NVIDIA/OpenShell/releases/latest | jq -r '.tag_name')"
-          if [ -n "$latest" ] && [ "$latest" != "null" ]; then
-            echo "OPENSHELL_VERSION=$latest" >> "$GITHUB_ENV"
-            echo "OpenShell-latest compat run: tracking $latest"
-          else
-            echo "::warning::could not resolve latest OpenShell tag; falling back to pinned $OPENSHELL_VERSION"
-          fi
-
-      - name: Install OpenShell
-        run: |
-          secret="$(openssl rand -hex 32)"
-          echo "OPENSHELL_SSH_HANDSHAKE_SECRET=$secret" >> "$GITHUB_ENV"
-          systemctl --user set-environment OPENSHELL_SSH_HANDSHAKE_SECRET="$secret"
-          systemctl --user set-environment OPENSHELL_DRIVERS="$OPENSHELL_DRIVERS"
-          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION="$OPENSHELL_VERSION" OPENSHELL_SSH_HANDSHAKE_SECRET="$secret" sh
-          openshell --version
-          openshell --help
-
-      - name: Wait for OpenShell gateway
-        run: |
-          for attempt in $(seq 1 90); do
-            if openshell status >/dev/null 2>&1 \
-              && test -f "$HOME/.config/openshell/gateways/openshell/mtls/ca.crt" \
-              && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.crt" \
-              && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.key"; then
-              openshell status
-              exit 0
-            fi
-            echo "waiting for OpenShell gateway ($attempt/90)"
-            sleep 2
-          done
-          systemctl --user status openshell-gateway --no-pager || true
-          journalctl --user -u openshell-gateway --no-pager -n 80 || true
-          exit 1
-
-      - name: OpenShell doctor
-        run: openshell doctor check
-
-      - name: Run Claude + OpenShell ignored tests
-        id: sandbox_tests
-        continue-on-error: true
-        env:
-          RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "2"
-          RIGHT_TEST_RUN_ID: "${{ github.run_id }}-${{ github.run_attempt }}"
-        run: |
-          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo nextest run --profile ci-ignored --workspace --features right-openshell/test-support --locked --run-ignored=only -E 'test(/ci_claude_/) | test(/ci_openshell_/)'"
-
-      - name: Dump OpenShell diagnostics
-        if: ${{ failure() || steps.sandbox_tests.outcome == 'failure' }}
-        run: |
-          openshell status || true
-          journalctl --user -u openshell-gateway --no-pager -n 200 || true
-          docker ps -a || true
 
       - name: Disk usage summary
         if: always()
         run: |
           df -h
           du -sh target/devenv ~/.cargo ~/.right ~/.right/cache/whisper /nix /tmp /home/runner/work 2>/dev/null || true
-          docker system df || true
 
-      - name: Check ignored test results
+  # Live-microVM lane: `ci_msb_` boots real Agent Sandboxes and `ci_claude_`
+  # runs a full Claude Code turn inside one. Both need a runner exposing
+  # /dev/kvm; GitHub-hosted ubuntu-latest does not. The job is therefore
+  # opt-in through the repository variable SANDBOX_RUNNER — set it to the
+  # label of a nested-virtualization runner and the suite runs as-is. Skipping
+  # is the honest default: on a hypervisor-less host every one of these tests
+  # fails on HypervisorUnavailable, which says nothing about the code.
+  sandbox:
+    name: live sandbox tests
+    if: vars.SANDBOX_RUNNER != ''
+    runs-on: ${{ vars.SANDBOX_RUNNER }}
+    timeout-minutes: 60
+    env:
+      # Cap on concurrently live microVMs, read by the test harness's slot
+      # gate. Matches the per-prefix groups in .config/nextest.toml.
+      RT_MSB_MAX_CONCURRENT_VMS: "2"
+      RIGHT_TEST_RUN_ID: "${{ github.run_id }}-${{ github.run_attempt }}"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: true
+      - uses: onsails/nix-action@v2.2.0
+      - name: Free up runner disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - name: Cache devenv eval layer
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/nix
+            .devenv
+          key: devenv-eval-${{ runner.os }}-${{ hashFiles('devenv.lock', 'devenv.nix', 'devenv.yaml') }}
+          restore-keys: |
+            devenv-eval-${{ runner.os }}-
+      - name: Warm devenv shell
+        run: devenv shell -- true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/devenv"
+          cmd-format: devenv shell -- {0}
+          shared-key: "tests-sandbox"
+      - name: Confirm the host can run microVMs
+        run: |
+          test -r /dev/kvm || { echo "::error::runner exposes no readable /dev/kvm"; exit 1; }
+      # Nothing else to provision: the microsandbox runtime installs itself on
+      # first use via right_sandbox::ensure_runtime_installed.
+      - name: Run Claude + microVM ignored tests
+        run: |
+          devenv shell -- cargo nextest run --profile ci-ignored --workspace --locked --run-ignored=only -E 'test(/ci_claude_/) | test(/ci_msb_/)'
+      - name: Disk usage summary
         if: always()
         run: |
-          failed=0
-          if test "${{ steps.stt_tests.outcome }}" != "success"; then
-            echo "::error::STT ignored tests failed"
-            failed=1
-          fi
-          if test "${{ steps.sandbox_tests.outcome }}" != "success"; then
-            echo "::error::Claude/OpenShell ignored tests failed"
-            failed=1
-          fi
-          exit "$failed"
+          df -h
+          du -sh target/devenv ~/.cargo ~/.right /nix /tmp 2>/dev/null || true

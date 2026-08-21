@@ -279,7 +279,7 @@ All must pass before merge:
 
 ## Out of scope (user-side actions)
 
-- Local working directory rename (`/Users/developer/dev/rightclaw` → `right-agent`).
+- Local working directory rename (`/Users/molt/dev/rightclaw` → `right-agent`).
 - `git remote set-url`.
 - User shell rc files exporting `RIGHTCLAW_HOME`.
 - Renaming the user's existing OpenShell sandboxes.

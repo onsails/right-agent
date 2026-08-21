@@ -783,7 +783,7 @@ import type { UsageOverviewResponse } from '../types'
 
 function usage(): UsageOverviewResponse {
   return {
-    agent: 'agent-b',
+    agent: 'him',
     generated_at: '2026-05-31T00:00:00Z',
     selected_window: 'today',
     windows: [{

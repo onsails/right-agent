@@ -14,6 +14,7 @@ pub(crate) mod learning_probe_writer;
 pub(crate) mod lifecycle;
 pub(crate) mod login;
 pub(crate) mod reflection;
+pub(crate) mod sandbox;
 pub(crate) mod sandbox_copy;
 pub mod sandbox_runtime;
 pub(crate) mod sandbox_supervisor;
@@ -22,6 +23,8 @@ pub(crate) mod sync;
 pub mod telegram;
 mod upgrade;
 pub use keepalive::{InitAuthProbe, validate_init_auth};
+pub use sandbox::Sandbox;
+pub use sandbox_supervisor::agent_sandbox_spec_for;
 pub use telegram::tg_bot::validate_telegram_token_live;
 
 use right_agent::agent::allowlist::{self, AllowlistHandle, AllowlistState};
@@ -156,56 +159,6 @@ pub struct BotArgs {
 /// restarted (the caller is expected to exit with [`CONFIG_RESTART_EXIT_CODE`]).
 pub async fn run(args: BotArgs) -> miette::Result<bool> {
     run_async(args).await
-}
-
-/// Backoff delays (ms) between retry attempts on the bot-startup
-/// `resolve_host_ips` call. The first attempt is immediate; failures
-/// sleep `BACKOFFS_MS[attempt - 1]` before the next attempt. Length of
-/// the slice is `attempts - 1`.
-pub(crate) const RESOLVE_HOST_IPS_BACKOFFS_MS: &[u64] = &[200, 500, 1000];
-
-/// Drive `attempt_fn` until it succeeds or `backoffs_ms.len() + 1` attempts
-/// have failed. Logs a `warn` per failed attempt and a final `error` if all
-/// attempts fail. The last error is propagated unchanged — FAIL FAST after
-/// retry budget is exhausted.
-///
-/// Only used at the bot-startup callsite of `resolve_host_ips`: a transient
-/// DNS hiccup, sandbox NSS warmup race, or OpenShell-alias rename should
-/// not brick the bot. Init/restore/migration callsites in `right` are
-/// interactive and intentionally fail fast.
-pub(crate) async fn run_with_backoff<T>(
-    op_name: &str,
-    agent: &str,
-    backoffs_ms: &[u64],
-    mut attempt_fn: impl AsyncFnMut() -> miette::Result<T>,
-) -> miette::Result<T> {
-    let max_attempts = backoffs_ms.len() + 1;
-    let mut last_err: Option<miette::Report> = None;
-    for attempt in 1..=max_attempts {
-        match attempt_fn().await {
-            Ok(val) => return Ok(val),
-            Err(e) => {
-                tracing::warn!(
-                    agent = %agent,
-                    attempt,
-                    max_attempts,
-                    "{op_name} failed: {e:#}",
-                );
-                last_err = Some(e);
-                if attempt < max_attempts {
-                    let delay_ms = backoffs_ms[attempt - 1];
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                }
-            }
-        }
-    }
-    let err = last_err.expect("loop runs at least once");
-    tracing::error!(
-        agent = %agent,
-        attempts = max_attempts,
-        "{op_name} exhausted retries: {err:#}",
-    );
-    Err(err)
 }
 
 async fn run_async(args: BotArgs) -> miette::Result<bool> {
@@ -421,15 +374,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Re-install skills with correct memory variant.
     right_codegen::skills::install_builtin_skills(&agent_dir, &memory_provider)?;
 
-    let is_sandboxed = matches!(
-        config.sandbox_mode(),
-        right_agent::agent::types::SandboxMode::Openshell
-    );
-
     let bootstrap_pending = agent_dir.join("BOOTSTRAP.md").exists();
     tracing::info!(
         agent = %args.agent,
-        sandbox_mode = ?config.sandbox_mode(),
         model = config.model.as_deref().unwrap_or("inherit"),
         restart = ?config.restart,
         network_policy = %config.network_policy,
@@ -526,6 +473,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // handler share the same Arc. The watcher writes; the handler reads.
     let model_arc: Arc<arc_swap::ArcSwap<Option<String>>> =
         Arc::new(arc_swap::ArcSwap::from_pointee(config.model.clone()));
+    // Provider-only reloads publish accepted YAML here. The supervisor reads a
+    // fresh snapshot for every recovery rather than retaining startup config.
+    let provider_config: Arc<arc_swap::ArcSwap<right_agent::agent::types::AgentConfig>> =
+        Arc::new(arc_swap::ArcSwap::from_pointee(config.clone()));
     let (providers_tx, providers_rx) =
         tokio::sync::mpsc::unbounded_channel::<Box<right_agent::agent::types::AgentConfig>>();
     config_watcher::spawn_config_watcher(
@@ -602,89 +553,24 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // below, once all handler dependencies exist, then nested onto the bot.sock
     // UDS axum app so cloudflared can POST updates.
 
-    // Resolve sandbox name once — used throughout the bot lifetime.
-    // None when running without sandbox (mode: none).
-    let resolved_sandbox: Option<String> = if is_sandboxed {
-        let explicit_sandbox_name = config.sandbox.as_ref().and_then(|s| s.name.as_deref());
-        Some(right_openshell::openshell::resolve_sandbox_name(
-            &args.agent,
-            explicit_sandbox_name,
-        ))
-    } else {
-        None
+    // Deterministic sandbox name, resolved once and used for the bot's life.
+    // An explicit `sandbox.name` is fitted into the SDK's name space rather
+    // than rejected, so an over-long legacy name still resolves.
+    let sandbox_name = match config.sandbox.as_ref().and_then(|s| s.name.as_deref()) {
+        Some(explicit) => right_sandbox::fit_sandbox_name(explicit),
+        None => right_sandbox::sandbox_name(&args.agent),
     };
 
-    // Complete or reject any crash-interrupted bootstrap finalization before
-    // Telegram dispatch is constructed. Recovery verifies authoritative
-    // identity state and fails startup rather than exposing false Normal mode.
-    telegram::worker::recover_bootstrap_finalization(&agent_dir, resolved_sandbox.as_deref())
-        .await
-        .map_err(|error| miette::miette!("failed to recover bootstrap finalization: {error:#}"))?;
-
-    // Drain providers-reconcile signals from the config watcher (no restart path).
-    {
-        // The watcher has already advanced past this change, so there is no
-        // automatic retry elsewhere: bound a few in-task attempts to ride out a
-        // transient gateway hiccup during profile ensure, attach/detach, or
-        // provider-profile policy reload. The durable state remains in
-        // agent.yaml and the gateway profiles, so persistent failure leaves the
-        // live sandbox's attachment/composition state stale until the next
-        // restart or another re-save of agent.yaml.
-        const HOT_RECONCILE_BACKOFFS_MS: [u64; 2] = [500, 2000];
-        let mut providers_rx = providers_rx;
-        let agent = args.agent.clone();
-        let agent_dir = agent_dir.clone();
-        let resolved_sandbox = resolved_sandbox.clone();
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            loop {
-                // Don't start a fresh reconcile once shutdown begins: a queued
-                // providers change is superseded by the restart's own bring_up,
-                // which re-ensures profiles, reconciles attachments, and reloads
-                // provider-profile composition.
-                let new_cfg = tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => break,
-                    msg = providers_rx.recv() => match msg {
-                        Some(c) => c,
-                        None => break, // watcher dropped the sender (restart/shutdown)
-                    },
-                };
-                let Some(sandbox) = resolved_sandbox.as_deref() else {
-                    continue; // mode: none — no sandbox to reconcile
-                };
-                tracing::info!("hot-reconciling providers from agent.yaml change");
-                let mut attempt = 0usize;
-                loop {
-                    match sandbox_supervisor::hot_reconcile_providers(
-                        &agent, &agent_dir, sandbox, &new_cfg,
-                    )
-                    .await
-                    {
-                        Ok(()) => break,
-                        Err(e) if attempt >= HOT_RECONCILE_BACKOFFS_MS.len() => {
-                            tracing::warn!(error = %format!("{e:#}"),
-                                "providers hot-reconcile failed after retries; live sandbox provider attachments/composition may stay stale until next bot restart — re-edit sandbox.providers or restart to retry");
-                            break;
-                        }
-                        Err(e) => {
-                            let backoff = HOT_RECONCILE_BACKOFFS_MS[attempt];
-                            tracing::warn!(error = %format!("{e:#}"),
-                                "providers hot-reconcile attempt {} failed; retrying in {}ms",
-                                attempt + 1, backoff);
-                            // Abort the backoff promptly if shutdown begins.
-                            tokio::select! {
-                                biased;
-                                _ = shutdown.cancelled() => return,
-                                _ = tokio::time::sleep(std::time::Duration::from_millis(backoff)) => {}
-                            }
-                            attempt += 1;
-                        }
-                    }
-                }
-            }
-        });
-    }
+    // Provider credentials reach the sandbox as source-ref secrets; the store
+    // is the only reader of a stored credential.
+    let providers = std::sync::Arc::new(
+        right_providers::ProviderStore::open(&home)
+            .await
+            .map_err(|e| miette::miette!("failed to open the provider store: {e:#}"))?,
+    );
+    // Serializes config-watcher and dashboard provider operations that mutate
+    // provider state or address the sandbox.
+    let provider_mutation = Arc::new(tokio::sync::Mutex::new(()));
 
     // Shared flag for healthz "webhook_set"; flipped by Task 10's register loop.
     let webhook_set_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -727,145 +613,177 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // One-time migration: oauth-state.json → SQLite
     migrate_oauth_state_to_db(&agent_dir).await;
 
-    // --- OpenShell sandbox lifecycle (when sandbox mode is active) ---
+    // --- Agent Sandbox lifecycle ---
     //
-    // Bring-up runs once here via `sandbox_supervisor::bring_up_sandbox`. On a
-    // backend-availability diagnosis the bot starts DEGRADED (logged at ERROR)
-    // rather than crashing — the supervisor then auto-recovers. Hard config
-    // errors still propagate via `?` and crash startup (they can't self-heal).
+    // Bring-up runs once here via `sandbox_supervisor::bring_up_sandbox`. On an
+    // availability diagnosis the bot starts DEGRADED (logged at ERROR) rather
+    // than crashing — the supervisor then auto-recovers. Hard config errors
+    // still propagate via `?` and crash startup (they can't self-heal).
     //
     // The supervisor (monitor + recovery) owns the long-lived sync task from
-    // here on; on the happy path it is seeded with the startup sync task.
-    //
-    // `sandbox_runtime` is always present (sandboxed or not). For non-sandboxed
-    // agents the gate treats health as irrelevant (always Proceed), so Ready is
-    // the correct initial value.
-    let sandbox_runtime: Arc<sandbox_runtime::SandboxRuntimeHandle>;
-    let (ssh_config_path, health_sandbox_exec, supervisor_handle) = if is_sandboxed {
-        // SAFETY: resolved_sandbox is always Some when is_sandboxed is true.
-        let resolved = resolved_sandbox.clone().unwrap();
-
-        // Stable, deterministic ssh-config path. Valid whether or not bring-up
-        // succeeds: bring-up regenerates the file at exactly this path (same
-        // formula), so threaded snapshots keep working across degrade/recovery.
-        // Nothing invokes CC while the backend is Unavailable (Task 9 health
-        // gate + the structural host-exec backstop), so holding the path while
-        // degraded is safe.
-        let ssh_config_dir = home.join("run").join("ssh");
-        let stable_ssh_config = ssh_config_dir.join(format!("{resolved}.ssh-config"));
-
-        let bring_up_ctx = sandbox_supervisor::BringUpCtx {
-            agent: &args.agent,
-            home: &home,
-            agent_dir: &agent_dir,
-            resolved_sandbox: &resolved,
-            config: &config,
-        };
-        let bring_up_result = match sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await {
-            Ok(res) => res,
-            Err(e) => {
-                // The supervisor migrated an over-long sandbox.name in
-                // agent.yaml; this process still keys everything on the old
-                // name, so trigger the same graceful restart the config
-                // watcher would — the restarted process re-resolves the
-                // fitted name and brings the sandbox up cleanly.
-                if let Some(m) = e.downcast_ref::<sandbox_supervisor::SandboxNameMigrated>() {
-                    tracing::info!(
-                        agent = %args.agent,
-                        old = %m.old,
-                        new = %m.new,
-                        "sandbox name migrated — initiating graceful restart"
-                    );
-                    config_changed.store(true, Ordering::Release);
-                    shutdown.cancel();
-                    return Ok(true);
-                }
-                return Err(e);
-            }
-        };
-        let (initial_health, sbox_opt) = match bring_up_result {
-            Ok(sandbox_supervisor::SandboxBringUp {
-                sandbox: sbox,
-                ssh_config_path: generated_ssh_config,
-            }) => {
-                // The path bring-up generated MUST equal the stable path
-                // (same formula). We thread `stable_ssh_config` below so
-                // degrade/recovery share one snapshot; assert they agree.
-                debug_assert_eq!(
-                    generated_ssh_config, stable_ssh_config,
-                    "bring-up ssh-config path diverged from the stable path formula"
-                );
-                (sandbox_runtime::SandboxHealth::Ready, Some(sbox))
-            }
-            Err(diag) => {
-                tracing::error!(
-                    agent = %args.agent,
-                    cause = ?diag.cause,
-                    fixes = ?diag.fixes,
-                    "sandbox backend unavailable — starting DEGRADED (auto-recovers): {}",
-                    diag.summary
-                );
-                (
-                    sandbox_runtime::SandboxHealth::Unavailable {
-                        diagnosis: std::sync::Arc::new(diag),
-                    },
-                    None,
-                )
-            }
-        };
-
-        let (handle, failure_rx) = sandbox_runtime::SandboxRuntimeHandle::new(initial_health);
-        if let Some(ref sbox) = sbox_opt {
-            // Populate handle.current_sandbox() on the Ready path. (new() seeds
-            // health from initial_health but leaves the sandbox slot empty.)
-            handle.set_ready(sbox.clone());
+    // here on; startup takes the same authoritative per-agent provider lock
+    // used by every later sandbox mutation.
+    let _startup_provider_guard = providers
+        .agent_lock(&args.agent)
+        .await
+        .map_err(|error| miette::miette!("failed to lock startup provider reconcile: {error:#}"))?;
+    let bring_up_ctx = sandbox_supervisor::BringUpCtx {
+        agent: &args.agent,
+        agent_dir: &agent_dir,
+        sandbox_name: &sandbox_name,
+        config: &config,
+        providers: &providers,
+    };
+    let startup_bring_up = sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await;
+    drop(_startup_provider_guard);
+    let initial_sandbox = match startup_bring_up? {
+        Ok(sandbox_supervisor::SandboxBringUp { sandbox }) => Ok(sandbox),
+        Err(diagnosis) => {
+            tracing::error!(
+                agent = %args.agent,
+                cause = ?diagnosis.cause,
+                fixes = ?diagnosis.fixes,
+                "sandbox unavailable — starting DEGRADED (auto-recovers): {}",
+                diagnosis.summary
+            );
+            Err(std::sync::Arc::new(diagnosis))
         }
-        let sync_seed = sbox_opt.as_ref().map(|sbox| {
-            tokio::spawn(sync::run_sync_task(
-                agent_dir.clone(),
-                sbox.clone(),
-                Some(std::sync::Arc::clone(&handle)),
-                shutdown.clone(),
-            ))
-        });
-        sandbox_runtime = handle;
-
-        // Spawn the supervisor (monitor + recovery), seeded with the startup
-        // sync task it now owns.
-        let deps = sandbox_supervisor::SupervisorDeps::new(
-            args.agent.clone(),
-            home.clone(),
-            agent_dir.clone(),
-            resolved.clone(),
-            config.clone(),
-            shutdown.clone(),
-        );
-        let supervisor_bot = telegram::bot::build_bot(token.clone());
-        let sup = sandbox_supervisor::spawn_supervisor(
-            std::sync::Arc::clone(&sandbox_runtime),
-            failure_rx,
-            supervisor_bot,
-            deps,
-            sync_seed,
-        );
-
-        (Some(stable_ssh_config), sbox_opt, Some(sup))
-    } else {
-        let (handle, _failure_rx) =
-            sandbox_runtime::SandboxRuntimeHandle::new(sandbox_runtime::SandboxHealth::Ready);
-        sandbox_runtime = handle;
-        (None, None, None)
     };
 
-    // Snapshot for shutdown teardown — the originals are moved into run_telegram below.
-    let shutdown_ssh_config = ssh_config_path.clone();
-    let shutdown_sandbox = resolved_sandbox.clone();
+    // The runtime handle is the single source of the live sandbox from here
+    // on: it is seeded with bring-up's outcome and the supervisor republishes
+    // a new handle on every recovery. Startup one-shots below read it once;
+    // long-lived tasks re-read it per unit of work.
+    let (sandbox_runtime, failure_rx) = sandbox_runtime::SandboxRuntimeHandle::new(initial_sandbox);
+    let sandbox = sandbox_runtime.current_sandbox();
+    let sync_seed = sandbox.as_ref().map(|sbox| {
+        tokio::spawn(sync::run_sync_task(
+            agent_dir.clone(),
+            std::sync::Arc::clone(sbox),
+            Some(std::sync::Arc::clone(&sandbox_runtime)),
+            shutdown.clone(),
+        ))
+    });
 
-    // Build the dashboard router AFTER health_sandbox_exec exists so the
-    // dashboard can reuse the long-lived SandboxExec instead of opening a
-    // fresh gRPC channel per request. Spawn axum here and wait for its UDS
-    // bind before continuing with the rest of startup.
-    let dashboard_sandbox_exec = health_sandbox_exec.clone();
+    // Spawn the supervisor (monitor + recovery), seeded with the startup sync
+    // task it now owns.
+    let supervisor_handle = sandbox_supervisor::spawn_supervisor(
+        std::sync::Arc::clone(&sandbox_runtime),
+        failure_rx,
+        telegram::bot::build_bot(token.clone()),
+        sandbox_supervisor::SupervisorDeps::new(
+            args.agent.clone(),
+            agent_dir.clone(),
+            sandbox_name.clone(),
+            Arc::clone(&provider_config),
+            std::sync::Arc::clone(&providers),
+            Arc::clone(&provider_mutation),
+            shutdown.clone(),
+        ),
+        sync_seed,
+    );
+
+    // Complete or reject any crash-interrupted bootstrap finalization before
+    // Telegram dispatch is constructed. Recovery verifies authoritative
+    // identity state and fails startup rather than exposing false Normal mode.
+    // A degraded backend has no sandbox to probe, so recovery is deferred to
+    // the next start rather than guessed at.
+    telegram::worker::recover_bootstrap_finalization(&agent_dir, sandbox.as_ref())
+        .await
+        .map_err(|error| miette::miette!("failed to recover bootstrap finalization: {error:#}"))?;
+
+    // Drain providers-reconcile signals from the config watcher. Existing
+    // bindings rotate live; a newly usable binding is added through the SDK's
+    // restart-backed modify path without deleting the sandbox.
+    {
+        // The watcher has already advanced past this change, so there is no
+        // automatic retry elsewhere: bound a few in-task attempts to ride out a
+        // transient failure. The durable state remains in the provider store,
+        // so persistent failure leaves the live sandbox's credentials stale
+        // until the next bot restart or another re-save of agent.yaml.
+        const HOT_RECONCILE_BACKOFFS_MS: [u64; 2] = [500, 2000];
+        let mut providers_rx = providers_rx;
+        let agent = args.agent.clone();
+        let store = std::sync::Arc::clone(&providers);
+        let runtime = std::sync::Arc::clone(&sandbox_runtime);
+        let shutdown = shutdown.clone();
+        let provider_mutation = Arc::clone(&provider_mutation);
+        let provider_config = Arc::clone(&provider_config);
+        tokio::spawn(async move {
+            loop {
+                // Don't start a fresh reconcile once shutdown begins: a queued
+                // providers change is superseded by the restart's own bring-up.
+                let new_cfg = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    msg = providers_rx.recv() => match msg {
+                        Some(c) => c,
+                        None => break, // watcher dropped the sender (restart/shutdown)
+                    },
+                };
+                let _mutation = provider_mutation.lock().await;
+                let _agent_guard = match store.agent_lock(&agent).await {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        tracing::error!(error = %format!("{error:#}"),
+                            "providers hot-reconcile could not acquire the agent mutation lock");
+                        continue;
+                    }
+                };
+                // Capture the previously accepted provider declarations before
+                // publishing the new durable truth. Reconcile needs that union
+                // to identify bindings removed by this edit without ever
+                // considering unrelated sandbox secrets.
+                let previous_cfg = provider_config.load_full();
+                provider_config.store(Arc::new((*new_cfg).clone()));
+                let Some(sandbox) = runtime.current_sandbox() else {
+                    tracing::warn!(
+                        "providers changed while the sandbox is unavailable; \
+                         the next bring-up applies them"
+                    );
+                    continue;
+                };
+                tracing::info!("hot-reconciling providers from agent.yaml change");
+                let mut attempt = 0usize;
+                loop {
+                    match sandbox_supervisor::hot_reconcile_providers(
+                        &agent,
+                        std::slice::from_ref(previous_cfg.as_ref()),
+                        &new_cfg,
+                        &store,
+                        &sandbox,
+                    )
+                    .await
+                    {
+                        Ok(()) => break,
+                        Err(e) if attempt >= HOT_RECONCILE_BACKOFFS_MS.len() => {
+                            tracing::warn!(error = %format!("{e:#}"),
+                                "providers hot-reconcile failed after retries; live sandbox credentials may stay stale until next bot restart — obsolete credentials remain a security failure, re-edit sandbox.providers or restart to retry");
+                            break;
+                        }
+                        Err(e) => {
+                            let backoff = HOT_RECONCILE_BACKOFFS_MS[attempt];
+                            tracing::warn!(error = %format!("{e:#}"),
+                                "providers hot-reconcile attempt {} failed; retrying in {}ms",
+                                attempt + 1, backoff);
+                            // Abort the backoff promptly if shutdown begins.
+                            tokio::select! {
+                                biased;
+                                _ = shutdown.cancelled() => return,
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(backoff)) => {}
+                            }
+                            attempt += 1;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Build the dashboard router AFTER the runtime handle exists so the
+    // dashboard resolves the live sandbox per request instead of attaching
+    // per request or holding a startup snapshot. Spawn axum here and wait for
+    // its UDS bind before continuing with the rest of startup.
     let dashboard_router =
         telegram::dashboard::build_dashboard_router(telegram::dashboard::DashboardState {
             agent_name: args.agent.clone(),
@@ -875,12 +793,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             )),
             home: home.clone(),
             agent_dir: agent_dir.clone(),
-            resolved_sandbox: resolved_sandbox.clone(),
-            sandbox_exec: dashboard_sandbox_exec,
+            sandbox_name: sandbox_name.clone(),
             sandbox_runtime: std::sync::Arc::clone(&sandbox_runtime),
             allowlist: allowlist.clone(),
             foreground: Arc::clone(&dashboard_foreground),
             internal_client: Arc::clone(&internal_client),
+            providers: Some(Arc::clone(&providers)),
+            provider_mutation: Arc::clone(&provider_mutation),
+            provider_config: Arc::clone(&provider_config),
             pending_auth: Arc::clone(&pending_auth),
             oauth_status: oauth_status.clone(),
             #[cfg(test)]
@@ -896,8 +816,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // context. These are constructed here (once) and the resulting `Arc`s are
     // shared with the cron/delivery/keepalive tasks spawned later.
 
-    // Per-main-session mutex map and per-(chat,thread) bg-request flags.
-    // Shared across worker, delivery, and callback handlers.
     let session_locks: crate::telegram::SessionLocks = Arc::new(dashmap::DashMap::new());
 
     // Shared idle timestamp: tracks last handler/worker interaction for async delivery gating.
@@ -916,10 +834,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let claude_health = keepalive::ClaudeHealth::new(
         args.agent.clone(),
         agent_dir.clone(),
-        ssh_config_path.clone(),
-        resolved_sandbox.clone(),
-        health_sandbox_exec.clone(),
-        Some(std::sync::Arc::clone(&sandbox_runtime)),
+        std::sync::Arc::clone(&sandbox_runtime),
     );
 
     // Build STT context once at startup — shared across all worker sessions via Arc.
@@ -949,13 +864,11 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         agent_dir.clone(),
         Arc::clone(&debug_flag),
         home.clone(),
-        ssh_config_path.clone(),
         config.show_thinking,
         Arc::clone(&model_arc),
         shutdown.clone(),
         Arc::clone(&idle_timestamp),
         Arc::clone(&internal_client),
-        resolved_sandbox.clone(),
         hindsight_wrapper.clone(),
         prefetch_cache.clone(),
         Arc::clone(&upgrade_lock),
@@ -1000,27 +913,17 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Wait for axum to bind (ensures callback socket is ready) before registering the webhook
     let _ = axum_ready_rx.await;
 
-    // Spawn periodic attachment cleanup task
-    {
-        let cleanup_agent_dir = agent_dir.clone();
-        let cleanup_ssh_config = ssh_config_path.clone();
-        let cleanup_sandbox = resolved_sandbox.clone();
-        let cleanup_retention = config.attachments.retention_days;
-        telegram::attachments::spawn_cleanup_task(
-            cleanup_agent_dir,
-            cleanup_ssh_config,
-            cleanup_sandbox,
-            cleanup_retention,
-        );
-    }
+    // Periodic attachment cleanup: resolves the live sandbox per sweep.
+    telegram::attachments::spawn_cleanup_task(
+        agent_dir.clone(),
+        std::sync::Arc::clone(&sandbox_runtime),
+        config.attachments.retention_days,
+    );
 
     // Startup upgrade: runs before cron/telegram — no lock contention.
     // (`upgrade_lock` is built above, before `setup_telegram`.)
-    if let Some(ref cfg_path) = ssh_config_path {
-        // SAFETY: ssh_config_path is Some only when is_sandboxed is true, and
-        // resolved_sandbox is always Some when is_sandboxed is true.
-        let sandbox = resolved_sandbox.as_deref().unwrap();
-        upgrade::run_startup_upgrade(cfg_path, &args.agent, sandbox).await;
+    if let Some(sandbox) = sandbox.as_ref() {
+        upgrade::run_startup_upgrade(sandbox, &args.agent).await;
     }
 
     // CRON-01: spawn cron task alongside the Telegram webhook handler.
@@ -1028,25 +931,23 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let cron_agent_dir = agent_dir.clone();
     let cron_agent_name = args.agent.clone();
     let cron_model = Arc::clone(&model_arc);
-    let cron_ssh_config = ssh_config_path.clone();
     let cron_internal_client = Arc::clone(&internal_client);
     let cron_shutdown = shutdown.clone();
-    let cron_sandbox = resolved_sandbox.clone();
     let cron_upgrade_lock = Arc::clone(&upgrade_lock);
     let cron_debug = Arc::clone(&debug_flag);
     let cron_learning = config.learning.clone();
     let cron_session_locks = Arc::clone(&session_locks);
     let cron_progress_state = progress_state.clone();
+    let cron_sandbox_runtime = std::sync::Arc::clone(&sandbox_runtime);
 
     let cron_handle = tokio::spawn(async move {
         cron::run_cron_task(
             cron_agent_dir,
             cron_agent_name,
             cron_model,
-            cron_ssh_config,
+            cron_sandbox_runtime,
             cron_internal_client,
             cron_shutdown,
-            cron_sandbox,
             cron_upgrade_lock,
             cron_debug,
             cron_learning,
@@ -1088,10 +989,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_bot = telegram::bot::build_bot(token.clone());
     let delivery_allowlist = allowlist.clone();
     let delivery_idle_ts = Arc::clone(&idle_timestamp);
-    let delivery_ssh_config = ssh_config_path.clone();
+    let delivery_sandbox_runtime = std::sync::Arc::clone(&sandbox_runtime);
     let delivery_internal_client = Arc::clone(&internal_client);
     let delivery_shutdown = shutdown.clone();
-    let delivery_sandbox = resolved_sandbox.clone();
     let delivery_upgrade_lock = Arc::clone(&upgrade_lock);
     let delivery_session_locks = Arc::clone(&session_locks);
     let delivery_debug = Arc::clone(&debug_flag);
@@ -1103,9 +1003,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         delivery_bot.clone(),
         delivery_allowlist.clone(),
         Arc::clone(&delivery_idle_ts),
-        delivery_ssh_config.clone(),
+        std::sync::Arc::clone(&delivery_sandbox_runtime),
         Arc::clone(&delivery_internal_client),
-        delivery_sandbox.clone(),
         Arc::clone(&delivery_upgrade_lock),
         Arc::clone(&delivery_session_locks),
         Arc::clone(&delivery_debug),
@@ -1118,10 +1017,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             delivery_bot,
             delivery_allowlist,
             delivery_idle_ts,
-            delivery_ssh_config,
+            delivery_sandbox_runtime,
             delivery_internal_client,
             delivery_shutdown,
-            delivery_sandbox,
             delivery_upgrade_lock,
             delivery_session_locks,
             delivery_debug,
@@ -1135,8 +1033,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let curator_agent_dir = agent_dir.clone();
         let curator_agent_db_dir = agent_dir.clone();
         let curator_agent_name = args.agent.clone();
-        let curator_ssh_config = ssh_config_path.clone();
-        let curator_resolved = resolved_sandbox.clone();
+        let curator_sandbox_runtime = std::sync::Arc::clone(&sandbox_runtime);
         let curator_learning = config.learning.clone();
         let curator_debug = Arc::clone(&debug_flag);
         let curator_session_locks = Arc::clone(&session_locks);
@@ -1164,8 +1061,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                     agent_dir: curator_agent_dir.clone(),
                     agent_db_dir: curator_agent_db_dir.clone(),
                     agent_name: curator_agent_name.clone(),
-                    ssh_config_path: curator_ssh_config.clone(),
-                    resolved_sandbox: curator_resolved.clone(),
+                    // Resolved per tick: the curator ticker outlives any one
+                    // sandbox handle.
+                    sandbox: curator_sandbox_runtime.current_sandbox(),
                     internal_client: Arc::clone(&curator_internal_client),
                     model: curator_model_str,
                     debug_flag: Arc::clone(&curator_debug),
@@ -1196,19 +1094,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         });
     }
 
-    // Spawn periodic claude upgrade task (sandbox-only).
-    let upgrade_handle = ssh_config_path.as_ref().map(|cfg_path| {
-        // SAFETY: ssh_config_path is Some only when is_sandboxed is true, and
-        // resolved_sandbox is always Some when is_sandboxed is true.
-        let sandbox = resolved_sandbox.clone().unwrap();
-        upgrade::spawn_upgrade_task(
-            cfg_path.clone(),
-            args.agent.clone(),
-            sandbox,
-            shutdown.clone(),
-            Arc::clone(&upgrade_lock),
-        )
-    });
+    // Spawn periodic claude upgrade task. It resolves the live sandbox per
+    // upgrade attempt, so it keeps working across a recovery.
+    let upgrade_handle = upgrade::spawn_upgrade_task(
+        std::sync::Arc::clone(&sandbox_runtime),
+        args.agent.clone(),
+        shutdown.clone(),
+        Arc::clone(&upgrade_lock),
+    );
 
     // Token keepalive: periodic `claude -p "hi"` to prevent OAuth token
     // expiration. `claude_health` was built above (before `setup_telegram`).
@@ -1276,9 +1169,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         flush_bot,
         flush_allowlist,
         flush_idle_ts,
-        flush_ssh_config,
+        flush_sandbox,
         flush_internal_client,
-        flush_resolved_sandbox,
         flush_upgrade_lock,
         flush_session_locks,
         flush_debug,
@@ -1291,9 +1183,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             flush_bot,
             flush_allowlist,
             flush_idle_ts,
-            flush_ssh_config,
+            flush_sandbox,
             flush_internal_client,
-            flush_resolved_sandbox,
             flush_upgrade_lock,
             flush_session_locks,
             flush_debug,
@@ -1303,27 +1194,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Await the supervisor so its in-flight bring-up/monitor work and the sync
     // task it owns resolve before the runtime drops (same rationale as the
     // keepalive_handle await below).
-    if let Some(handle) = supervisor_handle {
-        tracing::info!("waiting for sandbox supervisor to finish");
-        let _ = handle.await;
-    }
+    tracing::info!("waiting for sandbox supervisor to finish");
+    let _ = supervisor_handle.await;
     // Await keepalive/upgrade so their in-flight Interval::tick() futures
     // resolve before the tokio runtime is dropped. Without this, the runtime
     // drop panics: "A Tokio 1.x context was found, but it is being shutdown."
     let _ = keepalive_handle.await;
-    if let Some(handle) = upgrade_handle {
-        let _ = handle.await;
-    }
-
-    // Without this, the master ssh process outlives the bot and only gets
-    // cleaned up by `clean_stale_control_master` on the next start.
-    if let (Some(cfg_path), Some(sandbox_name)) = (shutdown_ssh_config, shutdown_sandbox) {
-        let ssh_config_dir = home.join("run").join("ssh");
-        let socket =
-            right_openshell::openshell::control_master_socket_path(&ssh_config_dir, &sandbox_name);
-        let host = right_openshell::openshell::ssh_host_for_sandbox(&sandbox_name);
-        right_openshell::openshell::tear_down_control_master(&cfg_path, &host, &socket).await;
-    }
+    let _ = upgrade_handle.await;
 
     tracing::info!("graceful shutdown complete");
 
@@ -1531,52 +1408,6 @@ mod tests {
     //! would hang to timeout.
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
-
-    use super::{RESOLVE_HOST_IPS_BACKOFFS_MS, run_with_backoff};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// Helper retries on transient failures and returns the first success.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn retry_succeeds_after_transient_failures() {
-        let attempts = AtomicUsize::new(0);
-        let result: miette::Result<u32> =
-            run_with_backoff("test_op", "test-agent", &[10, 20, 40], async || {
-                let n = attempts.fetch_add(1, Ordering::SeqCst) + 1;
-                if n < 3 {
-                    Err(miette::miette!("transient {n}"))
-                } else {
-                    Ok(42u32)
-                }
-            })
-            .await;
-        assert_eq!(result.expect("must succeed"), 42);
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-    }
-
-    /// Helper exhausts retry budget and propagates the last error.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn retry_propagates_last_error_after_exhaustion() {
-        let attempts = AtomicUsize::new(0);
-        let result: miette::Result<u32> =
-            run_with_backoff("test_op", "test-agent", &[10, 20, 40], async || {
-                let n = attempts.fetch_add(1, Ordering::SeqCst) + 1;
-                Err(miette::miette!("attempt {n} failed"))
-            })
-            .await;
-        let err = result.expect_err("must fail after exhausting retries");
-        // Three backoffs == four attempts total.
-        assert_eq!(attempts.load(Ordering::SeqCst), 4);
-        assert!(
-            format!("{err:#}").contains("attempt 4 failed"),
-            "expected last error message preserved, got: {err:#}",
-        );
-    }
-
-    /// Production constants stay sane (3 retries, in ms, ascending).
-    #[tokio::test]
-    async fn resolve_host_ips_backoff_constants() {
-        assert_eq!(RESOLVE_HOST_IPS_BACKOFFS_MS, &[200u64, 500, 1000]);
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn drain_loop_pattern_exits_on_shutdown() {

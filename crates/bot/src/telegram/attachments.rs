@@ -762,19 +762,13 @@ pub(crate) async fn download_attachments(
     message_id: i32,
     bot: &super::BotType,
     agent_dir: &std::path::Path,
-    ssh_config_path: Option<&std::path::Path>,
-    resolved_sandbox: Option<&str>,
+    sandbox: &crate::sandbox::Sandbox,
     chat_id: i64,
     eff_thread_id: i64,
     stt: Option<&crate::stt::SttContext>,
 ) -> Result<(Vec<ResolvedAttachment>, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
     let tmp_dir = agent_dir.join("tmp/inbox");
     tokio::fs::create_dir_all(&tmp_dir).await?;
-
-    let sandboxed = ssh_config_path.is_some();
-    if !sandboxed {
-        tokio::fs::create_dir_all(agent_dir.join("inbox")).await?;
-    }
 
     let mut resolved = Vec::with_capacity(attachments.len());
     let mut markers = Vec::new();
@@ -844,20 +838,12 @@ pub(crate) async fn download_attachments(
             }
         }
 
-        let final_path = if sandboxed {
-            // Upload to sandbox, then clean up host temp file
-            let sandbox = resolved_sandbox.unwrap();
-            right_openshell::openshell::upload_file(sandbox, &host_path, SANDBOX_INBOX).await?;
-            if let Err(e) = tokio::fs::remove_file(&host_path).await {
-                tracing::warn!("Failed to remove temp file {}: {e}", host_path.display());
-            }
-            PathBuf::from(format!("{SANDBOX_INBOX}{file_name}"))
-        } else {
-            // Move to inbox
-            let dest = agent_dir.join("inbox").join(&file_name);
-            tokio::fs::rename(&host_path, &dest).await?;
-            dest
-        };
+        // Upload to the sandbox, then clean up the host temp file.
+        crate::sandbox::upload_into_dir(sandbox, &host_path, SANDBOX_INBOX).await?;
+        if let Err(e) = tokio::fs::remove_file(&host_path).await {
+            tracing::warn!("Failed to remove temp file {}: {e}", host_path.display());
+        }
+        let final_path = PathBuf::from(format!("{SANDBOX_INBOX}{file_name}"));
 
         resolved.push(ResolvedAttachment {
             kind: att.kind,
@@ -877,37 +863,26 @@ pub(crate) async fn send_attachments(
     chat_id: i64,
     eff_thread_id: i64,
     agent_dir: &std::path::Path,
-    ssh_config_path: Option<&std::path::Path>,
-    resolved_sandbox: Option<&str>,
+    sandbox: &crate::sandbox::Sandbox,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let sandboxed = ssh_config_path.is_some();
     let host_outbox = agent_dir.join("outbox").to_string_lossy().into_owned();
 
-    // Pre-create tmp/outbox for sandboxed downloads (avoids repeated create_dir_all in loop)
-    if sandboxed {
-        tokio::fs::create_dir_all(agent_dir.join("tmp/outbox")).await?;
-    }
+    // Pre-create tmp/outbox for sandbox downloads (avoids repeated
+    // create_dir_all in the loop).
+    tokio::fs::create_dir_all(agent_dir.join("tmp/outbox")).await?;
 
     // Canonicalize the host outbox dir once per call. Eliminates N repeated
     // blocking syscalls in groups of ≤10. Used for host-local resolution:
-    // every non-sandboxed attachment, and cron/background deliveries that
-    // pre-stage files under the host outbox even for sandboxed agents. A
-    // sandboxed agent with no staged host-local attachments may legitimately
-    // lack this dir, so a missing dir is only a hard error when non-sandboxed.
+    // cron/background deliveries pre-stage files under the host outbox. An
+    // agent with no staged host-local attachments may legitimately lack this
+    // dir, so a missing dir is not an error.
     let host_outbox_canonical = match std::fs::canonicalize(agent_dir.join("outbox")) {
         Ok(p) => Some(p),
         Err(e) => {
-            if sandboxed {
-                tracing::debug!(
-                    "Host outbox dir {} not present: {e} — host-local attachments unavailable",
-                    agent_dir.join("outbox").display(),
-                );
-            } else {
-                tracing::warn!(
-                    "Failed to canonicalize outbox dir {}: {e} — all outbound attachments will be skipped",
-                    agent_dir.join("outbox").display(),
-                );
-            }
+            tracing::debug!(
+                "Host outbox dir {} not present: {e} — host-local attachments unavailable",
+                agent_dir.join("outbox").display(),
+            );
             None
         }
     };
@@ -917,8 +892,7 @@ pub(crate) async fn send_attachments(
         chat_id,
         eff_thread_id,
         agent_dir,
-        resolved_sandbox,
-        sandboxed,
+        sandbox,
         host_outbox: &host_outbox,
         host_outbox_canonical,
     };
@@ -1003,8 +977,7 @@ struct SendCtx<'a> {
     chat_id: i64,
     eff_thread_id: i64,
     agent_dir: &'a std::path::Path,
-    resolved_sandbox: Option<&'a str>,
-    sandboxed: bool,
+    sandbox: &'a crate::sandbox::Sandbox,
     host_outbox: &'a str,
     host_outbox_canonical: Option<PathBuf>,
 }
@@ -1119,10 +1092,10 @@ enum OutboxResolution {
 /// `resolve_host_path` canonicalizes the path and re-confines it to the host
 /// outbox; that component-wise containment is the load-bearing security
 /// boundary against traversal/escape, not this function.
-fn classify_outbox_path(raw_path: &str, host_outbox: &str, sandboxed: bool) -> OutboxResolution {
+fn classify_outbox_path(raw_path: &str, host_outbox: &str) -> OutboxResolution {
     if !host_outbox.is_empty() && path_is_within_dir(raw_path, host_outbox) {
         OutboxResolution::HostLocal
-    } else if sandboxed && raw_path.starts_with(SANDBOX_OUTBOX) {
+    } else if raw_path.starts_with(SANDBOX_OUTBOX) {
         OutboxResolution::SandboxDownload
     } else {
         OutboxResolution::Reject
@@ -1151,7 +1124,7 @@ async fn resolve_host_path(
     ctx: &SendCtx<'_>,
     log_suffix: &str,
 ) -> Result<PathBuf, String> {
-    let host: PathBuf = match classify_outbox_path(&att.path, ctx.host_outbox, ctx.sandboxed) {
+    let host: PathBuf = match classify_outbox_path(&att.path, ctx.host_outbox) {
         OutboxResolution::Reject => {
             let msg = format!(
                 "Outbound attachment path {} is outside outbox prefix {} — {log_suffix}",
@@ -1168,12 +1141,9 @@ async fn resolve_host_path(
                 .to_string_lossy()
                 .into_owned();
             let dest = tmp_dir.join(&file_name);
-            let sandbox = ctx.resolved_sandbox.unwrap();
-            if let Err(e) =
-                right_openshell::openshell::download_file(sandbox, &att.path, &dest).await
-            {
+            if let Err(e) = ctx.sandbox.fs_copy_to_host(&att.path, &dest).await {
                 let msg = format!(
-                    "download_file failed for {}: {:#} — {log_suffix}",
+                    "downloading {} from the sandbox failed: {:#} — {log_suffix}",
                     att.path, e
                 );
                 tracing::warn!("{msg}");
@@ -1222,8 +1192,7 @@ async fn resolve_host_path(
         Err(e) => {
             let msg = format!("metadata failed for {}: {e} — {log_suffix}", host.display());
             tracing::warn!("{msg}");
-            if ctx.sandboxed
-                && let Err(e) = tokio::fs::remove_file(&host).await
+            if let Err(e) = tokio::fs::remove_file(&host).await
                 && e.kind() != std::io::ErrorKind::NotFound
             {
                 tracing::warn!("failed to remove temp file {}: {e}", host.display());
@@ -1242,8 +1211,7 @@ async fn resolve_host_path(
             meta.len() as f64 / (1024.0 * 1024.0),
         );
         tracing::warn!("{msg}");
-        if ctx.sandboxed
-            && let Err(e) = tokio::fs::remove_file(&host).await
+        if let Err(e) = tokio::fs::remove_file(&host).await
             && e.kind() != std::io::ErrorKind::NotFound
         {
             tracing::warn!("failed to remove temp file {}: {e}", host.display());
@@ -1355,8 +1323,7 @@ async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), 
         send_single_attempt(ctx, &host_path, att.kind, thread_id, None, false).await
     };
 
-    if ctx.sandboxed
-        && let Err(e) = tokio::fs::remove_file(&host_path).await
+    if let Err(e) = tokio::fs::remove_file(&host_path).await
         && e.kind() != std::io::ErrorKind::NotFound
     {
         tracing::warn!("failed to remove temp file {}: {e}", host_path.display());
@@ -1480,14 +1447,14 @@ async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(
         match resolve_host_path(att, ctx, "skipping media group").await {
             Ok(p) => host_paths.push(p),
             Err(msg) => {
-                cleanup_host_paths(&host_paths, ctx.sandboxed).await;
+                cleanup_host_paths(&host_paths).await;
                 return Err(SendError::Skip(msg));
             }
         }
     }
 
     if let Some(reason) = document_group_preflight_fallback_reason(items, &host_paths).await {
-        cleanup_host_paths(&host_paths, ctx.sandboxed).await;
+        cleanup_host_paths(&host_paths).await;
         return Err(SendError::FallbackToSingles { reason });
     }
 
@@ -1549,14 +1516,12 @@ async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(
         }
     };
 
-    cleanup_host_paths(&host_paths, ctx.sandboxed).await;
+    cleanup_host_paths(&host_paths).await;
     result
 }
 
-async fn cleanup_host_paths(paths: &[std::path::PathBuf], sandboxed: bool) {
-    if !sandboxed {
-        return;
-    }
+/// Delete the temp copies pulled out of the sandbox for a send.
+async fn cleanup_host_paths(paths: &[std::path::PathBuf]) {
     for p in paths {
         if let Err(e) = tokio::fs::remove_file(p).await
             && e.kind() != std::io::ErrorKind::NotFound
@@ -1567,24 +1532,24 @@ async fn cleanup_host_paths(paths: &[std::path::PathBuf], sandboxed: bool) {
 }
 
 /// Spawn a background task that periodically cleans up old attachment files.
+///
+/// The sandbox is resolved per sweep: this task outlives individual handles,
+/// which the supervisor replaces on every recovery. A sweep with no sandbox
+/// published is skipped — the guest side has nothing reachable to prune.
 pub fn spawn_cleanup_task(
     agent_dir: std::path::PathBuf,
-    ssh_config_path: Option<std::path::PathBuf>,
-    resolved_sandbox: Option<String>,
+    sandbox_runtime: std::sync::Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     retention_days: u32,
 ) {
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(CLEANUP_INTERVAL_SECS);
         loop {
             tokio::time::sleep(interval).await;
-            if let Err(e) = run_cleanup(
-                &agent_dir,
-                ssh_config_path.as_deref(),
-                resolved_sandbox.as_deref(),
-                retention_days,
-            )
-            .await
-            {
+            let Some(sandbox) = sandbox_runtime.current_sandbox() else {
+                tracing::debug!("skipping attachment cleanup — sandbox unavailable");
+                continue;
+            };
+            if let Err(e) = run_cleanup(&agent_dir, &sandbox, retention_days).await {
                 tracing::warn!("attachment cleanup failed: {e:#}");
             }
         }
@@ -1593,43 +1558,35 @@ pub fn spawn_cleanup_task(
 
 async fn run_cleanup(
     agent_dir: &std::path::Path,
-    ssh_config_path: Option<&std::path::Path>,
-    resolved_sandbox: Option<&str>,
+    sandbox: &crate::sandbox::Sandbox,
     retention_days: u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
-        let mtime_arg = format!("+{retention_days}");
-        // Use find to delete files older than retention_days in sandbox inbox/outbox
-        right_openshell::openshell::ssh_exec(
-            ssh_config,
-            &ssh_host,
-            &[
-                "find",
-                SANDBOX_INBOX,
-                SANDBOX_OUTBOX,
-                "-type",
-                "f",
-                "-mtime",
-                &mtime_arg,
-                "-delete",
-            ],
-            30,
-        )
-        .await?;
-        // Also clean local tmp dirs (host-side, regardless of sandbox)
-        for subdir in &["tmp/inbox", "tmp/outbox"] {
-            let dir = agent_dir.join(subdir);
-            if dir.exists() {
-                cleanup_local_dir(&dir, retention_days).await?;
-            }
-        }
-    } else {
-        for subdir in &["inbox", "outbox", "tmp/inbox", "tmp/outbox"] {
-            let dir = agent_dir.join(subdir);
-            if dir.exists() {
-                cleanup_local_dir(&dir, retention_days).await?;
-            }
+    let mtime_arg = format!("+{retention_days}");
+    // Use find to delete files older than retention_days in the guest's
+    // inbox/outbox.
+    let (output, exit_code) = crate::sandbox::exec_argv_with_timeout(
+        sandbox,
+        &[
+            "find",
+            SANDBOX_INBOX,
+            SANDBOX_OUTBOX,
+            "-type",
+            "f",
+            "-mtime",
+            &mtime_arg,
+            "-delete",
+        ],
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    if exit_code != 0 {
+        return Err(format!("sandbox attachment cleanup exited {exit_code}: {output}").into());
+    }
+    // Also clean the host-side temp dirs.
+    for subdir in &["tmp/inbox", "tmp/outbox"] {
+        let dir = agent_dir.join(subdir);
+        if dir.exists() {
+            cleanup_local_dir(&dir, retention_days).await?;
         }
     }
     Ok(())
@@ -1783,33 +1740,33 @@ mod tests {
         )));
     }
 
-    const HOST_OUTBOX: &str = "/Users/x/.right/agents/agent-a/outbox";
+    const HOST_OUTBOX: &str = "/Users/x/.right/agents/riskoff/outbox";
 
     #[test]
-    fn sandboxed_cron_host_outbox_path_is_host_local() {
+    fn cron_host_outbox_path_is_host_local() {
         // Regression: cron/background pre-download attachments to the host
-        // outbox; a sandboxed agent must use them directly, not re-download
-        // from /sandbox/outbox (which produced the "outside outbox prefix" skip
-        // and an undeliverable image).
+        // outbox; the agent must use them directly, not re-download from
+        // /sandbox/outbox (which produced the "outside outbox prefix" skip and
+        // an undeliverable image).
         let path = format!("{HOST_OUTBOX}/cron/run-123/post_illustration.png");
         assert_eq!(
-            classify_outbox_path(&path, HOST_OUTBOX, true),
+            classify_outbox_path(&path, HOST_OUTBOX),
             OutboxResolution::HostLocal
         );
     }
 
     #[test]
-    fn sandboxed_normal_outbox_path_is_sandbox_download() {
+    fn normal_outbox_path_is_sandbox_download() {
         assert_eq!(
-            classify_outbox_path("/sandbox/outbox/img.png", HOST_OUTBOX, true),
+            classify_outbox_path("/sandbox/outbox/img.png", HOST_OUTBOX),
             OutboxResolution::SandboxDownload
         );
     }
 
     #[test]
-    fn sandboxed_arbitrary_path_is_rejected() {
+    fn arbitrary_path_is_rejected() {
         assert_eq!(
-            classify_outbox_path("/etc/passwd", HOST_OUTBOX, true),
+            classify_outbox_path("/etc/passwd", HOST_OUTBOX),
             OutboxResolution::Reject
         );
     }
@@ -1820,25 +1777,7 @@ mod tests {
         // rejects the prefix collision before downstream canonicalization.
         let path = format!("{HOST_OUTBOX}EVIL/secret.png");
         assert_eq!(
-            classify_outbox_path(&path, HOST_OUTBOX, true),
-            OutboxResolution::Reject
-        );
-    }
-
-    #[test]
-    fn non_sandboxed_host_outbox_path_is_host_local() {
-        let path = format!("{HOST_OUTBOX}/inbox-staged.png");
-        assert_eq!(
-            classify_outbox_path(&path, HOST_OUTBOX, false),
-            OutboxResolution::HostLocal
-        );
-    }
-
-    #[test]
-    fn non_sandboxed_sandbox_path_is_rejected() {
-        // A non-sandboxed agent has no sandbox to download from.
-        assert_eq!(
-            classify_outbox_path("/sandbox/outbox/img.png", HOST_OUTBOX, false),
+            classify_outbox_path(&path, HOST_OUTBOX),
             OutboxResolution::Reject
         );
     }

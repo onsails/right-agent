@@ -10,10 +10,10 @@ max_restarts: 5
 # Seconds to wait between restarts
 backoff_seconds: 10
 
-# Sandbox mode: openshell (container isolation) or none (direct host access)
+# Sandbox. Every agent runs inside a microsandbox VM; only the name is
+# configurable and `right agent init` writes it below.
 # sandbox:
-#   mode: openshell
-#   policy_file: policy.yaml
+#   name: right-<agent>
 
 # Network policy: restrictive = Anthropic/Claude only, permissive = all HTTPS
 # network_policy: restrictive

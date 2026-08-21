@@ -6,7 +6,6 @@ set -euo pipefail
 # Installs:
 #   1. right            - Multi-agent runtime CLI
 #   2. process-compose  - Process orchestrator with TUI
-#   3. NVIDIA OpenShell - Sandbox runtime for AI agents
 #
 # Prerequisites (install separately before running this script):
 #   - Claude Code CLI     https://docs.anthropic.com/en/docs/claude-code
@@ -159,26 +158,7 @@ install_process_compose() {
   fi
 }
 
-# ── Step 3: Install OpenShell ──────────────────────────────────────
-
-install_openshell() {
-  if command -v openshell >/dev/null 2>&1; then
-    info "Updating OpenShell..."
-  else
-    info "Installing OpenShell..."
-  fi
-
-  echo "  using official installer..."
-  curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
-
-  if command -v openshell >/dev/null 2>&1; then
-    ok "OpenShell installed"
-  else
-    fail "OpenShell installation failed — install manually: https://github.com/NVIDIA/OpenShell"
-  fi
-}
-
-# ── Step 3.5: Ensure PATH ──────────────────────────────────────────
+# ── Step 3: Ensure PATH ────────────────────────────────────────────
 
 run_path_setup() {
   info "Ensuring $INSTALL_DIR is on your PATH..."
@@ -228,7 +208,6 @@ main() {
   echo ""
   install_right
   install_process_compose
-  install_openshell
 
   echo ""
   run_path_setup

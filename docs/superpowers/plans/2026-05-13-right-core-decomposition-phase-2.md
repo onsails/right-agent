@@ -32,7 +32,7 @@ Out of scope:
 
 ## Execution Notes
 
-- Work in `/Users/developer/dev/rightclaw/.worktrees/right-core-decomposition-phase-1`.
+- Work in `/Users/molt/dev/rightclaw/.worktrees/right-core-decomposition-phase-1`.
 - Prefix commands with `devenv shell --`.
 - The `rust-dev:rust-dev` skill is required by project instructions before writing Rust, but it was unavailable in the previous session. If it is still unavailable, state that and follow `AGENTS.rust.md`.
 - Use `apply_patch` for manual edits.

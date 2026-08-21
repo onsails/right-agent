@@ -5,7 +5,7 @@
 **Scope:** `right-codegen` (prompt rule), `bot` (notice injectors + async delivery),
 `right-db` (optional column), `PROMPT_SYSTEM.md`.
 
-## 1. Origin: the agent-a incident
+## 1. Origin: the riskoff incident
 
 A manually-triggered `sources-update` cron delivered this to Telegram:
 
@@ -34,7 +34,7 @@ platform↔operator trust boundaries are not made explicit — so they ship toge
 
 ## 2. Evidence base (what is proven vs inferred)
 
-Established empirically on the live `agent-a` agent via `claude -p`, and by code
+Established empirically on the live `riskoff` agent via `claude -p`, and by code
 reading. Honesty about confidence matters for the design choices below.
 
 **Proven:**
@@ -247,6 +247,6 @@ the full workspace suite after every edit.
 
 ## 11. Operational action item (out of band)
 
-Rotate the `agent-a` Claude OAuth token: it transited the assistant transcript
+Rotate the `riskoff` Claude OAuth token: it transited the assistant transcript
 during reproduction (a failed helper rebuild printed it). Not part of the code
 change; do via the bot login flow.

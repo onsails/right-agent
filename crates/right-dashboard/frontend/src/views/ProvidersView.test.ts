@@ -53,8 +53,7 @@ function provider(overrides: Partial<ProviderView> = {}): ProviderView {
       upstream_path_prefix: '/v1',
     },
     updated_at: null,
-    composed: true,
-    status: { kind: 'healthy' },
+    status: { kind: 'ready' },
     ...overrides,
   }
 }
@@ -308,13 +307,13 @@ describe('ProvidersView', () => {
 
   it('renders a borrowed provider read-only: shared-from label + Unshare, no owner actions', async () => {
     apiMocks.providerList.mockResolvedValue({
-      providers: [provider({ name: 'borrowed-fal', shared_from: 'agent-a' })],
+      providers: [provider({ name: 'borrowed-fal', shared_from: 'riskoff' })],
     })
     const { app, root } = mountProvidersView()
     await flushAsync()
 
     try {
-      expect(root.textContent).toContain('Shared from agent-a')
+      expect(root.textContent).toContain('Shared from riskoff')
       expect(buttonsByText(root, 'Unshare').length).toBe(1)
       // The owner-only actions must not render for a borrowed provider.
       expect(buttonsByText(root, 'Rotate').length).toBe(0)
@@ -328,7 +327,7 @@ describe('ProvidersView', () => {
 
   it('unshares a borrowed provider and refreshes', async () => {
     apiMocks.providerList.mockResolvedValue({
-      providers: [provider({ name: 'borrowed-fal', shared_from: 'agent-a' })],
+      providers: [provider({ name: 'borrowed-fal', shared_from: 'riskoff' })],
     })
     const { app, root } = mountProvidersView()
     await flushAsync()
@@ -351,7 +350,7 @@ describe('ProvidersView', () => {
     apiMocks.providerList.mockResolvedValue({ providers: [] })
     apiMocks.providerPeers.mockResolvedValue({
       peers: [{
-        agent: 'agent-a',
+        agent: 'riskoff',
         network_policy: 'permissive',
         providers: [{ name: 'fal', type: 'right-fal', env_var: 'FAL_KEY', label: null, generic: null }],
       }],
@@ -364,14 +363,14 @@ describe('ProvidersView', () => {
       const listCallsAtMount = apiMocks.providerList.mock.calls.length
       clickButton(root, 'Borrow…') // open the borrow section from the header
       await flushAsync()
-      expect(root.textContent).toContain('from agent-a')
+      expect(root.textContent).toContain('from riskoff')
 
       clickButton(root, 'Borrow') // the per-candidate borrow button
       await flushAsync()
       await flushAsync()
 
       expect(apiMocks.providerBorrow).toHaveBeenCalledTimes(1)
-      expect(apiMocks.providerBorrow.mock.calls[0][0]).toEqual({ owner_agent: 'agent-a', provider: 'fal' })
+      expect(apiMocks.providerBorrow.mock.calls[0][0]).toEqual({ owner_agent: 'riskoff', provider: 'fal' })
       // A successful borrow refreshes the provider list (and peers).
       expect(apiMocks.providerList.mock.calls.length).toBe(listCallsAtMount + 1)
     } finally {
@@ -383,7 +382,7 @@ describe('ProvidersView', () => {
     apiMocks.providerList.mockResolvedValue({ providers: [provider({ name: 'fal' })] })
     apiMocks.providerPeers.mockResolvedValue({
       peers: [{
-        agent: 'agent-a',
+        agent: 'riskoff',
         network_policy: 'permissive',
         providers: [{ name: 'fal', type: 'right-fal', env_var: 'FAL_KEY', label: null, generic: null }],
       }],
@@ -408,7 +407,7 @@ describe('ProvidersView', () => {
   it('pre-fills generic re-create forms with the prior upstream_hosts', async () => {
     apiMocks.providerList.mockResolvedValue({
       providers: [provider({
-        status: { kind: 'missing' },
+        status: { kind: 'error', message: 'credential gone' },
         generic: {
           env_var: 'FAL_KEY',
           upstream_hosts: ['fal.run', 'queue.fal.run', 'rest.fal.ai'],

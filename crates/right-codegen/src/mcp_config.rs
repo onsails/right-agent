@@ -305,7 +305,7 @@ mod tests {
         );
     }
 
-    // --- HTTP right MCP server tests (OpenShell sandbox mode) ---
+    // --- HTTP right MCP server tests (sandboxed aggregator mode) ---
 
     #[test]
     fn generates_http_right_entry() {
@@ -314,7 +314,7 @@ mod tests {
         generate_mcp_config_http(
             dir.path(),
             "brain",
-            "http://host.openshell.internal:8100/mcp",
+            "http://host.microsandbox.internal:8100/mcp",
             token,
         )
         .unwrap();
@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(content["mcpServers"]["right"]["type"], "http");
         assert_eq!(
             content["mcpServers"]["right"]["url"],
-            "http://host.openshell.internal:8100/mcp"
+            "http://host.microsandbox.internal:8100/mcp"
         );
         assert_eq!(
             content["mcpServers"]["right"]["headers"]["Authorization"],
@@ -377,7 +377,7 @@ mod tests {
         generate_mcp_config_http(
             dir.path(),
             "brain",
-            "http://host.openshell.internal:8100/mcp",
+            "http://host.microsandbox.internal:8100/mcp",
             "new-token",
         )
         .unwrap();
@@ -390,7 +390,7 @@ mod tests {
             "only 'right' should remain after overwrite"
         );
         assert_eq!(
-            content["mcpServers"]["right"]["url"], "http://host.openshell.internal:8100/mcp",
+            content["mcpServers"]["right"]["url"], "http://host.microsandbox.internal:8100/mcp",
             "right URL must be updated"
         );
         assert_eq!(

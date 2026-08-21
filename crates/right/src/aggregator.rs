@@ -632,8 +632,8 @@ impl rmcp::ServerHandler for Aggregator {
                  ## Conversation Focus\n\
                  - mcp__right__thread_focus_set: Set your standing focus for the CURRENT conversation; shown to you every future turn here. Empty string clears it. Scope is server-enforced.\n\n\
                  ## Providers\n\
-                 - mcp__right__provider_capabilities: List the sandbox's attached providers, including injected env-var placeholder names only, which binaries may use each credential, and valid hosts. Scope is server-enforced to this sandbox; takes no args.\n\
-                 On provider 401/403, call this before concluding the credential is invalid; the gateway substitutes the secret only for listed binaries and hosts.\n\n\
+                 - mcp__right__provider_capabilities: List the sandbox's attached providers, including injected env-var placeholder names only, and the hosts each credential is valid for. Scope is server-enforced to this sandbox; takes no args.\n\
+                 On provider 401/403, call this before concluding the credential is invalid; the value is substituted only for the listed hosts.\n\n\
                  ## Learning\n\
                  - mcp__right__skill_learning_start: Stage 1 foreground metadata/progress for learned skill create/update. Call before writing or patching skill package files. action=create and action=update both require rightx-* skill names. Accepts skill names only, never paths.\n\
                  - mcp__right__skill_learning_finish: Stage 1 foreground metadata/receipt for skill create/update completion. Successful statuses require a non-empty LLM-authored message argument, verify the skill package exists at .claude/skills/<skill_name>/SKILL.md, and send learned/updated receipts. Does not move files. Optional field hint_outcome: \"applied_as_hinted\" | \"applied_differently\" | \"refused\" — probe-writer must include this when a prefilter hint was provided.\n\n\
@@ -715,7 +715,7 @@ impl rmcp::ServerHandler for Aggregator {
 ///
 /// Since rmcp v1.4.0, the default config enforces a DNS-rebinding Host-header
 /// allowlist (`localhost`, `127.0.0.1`, `::1` only). Sandbox clients reach the
-/// aggregator as `host.openshell.internal:<port>` and other non-loopback names,
+/// aggregator as `host.microsandbox.internal:<port>` and other non-loopback names,
 /// so the default 403s every authenticated request. This helper:
 /// - empty `allowed_hosts` → `.disable_allowed_hosts()` (host check off). Safe
 ///   because per-agent Bearer already authenticates every request; DNS
@@ -751,6 +751,7 @@ pub(crate) async fn run_aggregator_http(
     dispatcher: Arc<ToolDispatcher>,
     agents_dir: PathBuf,
     home: PathBuf,
+    providers: Arc<right_providers::ProviderStore>,
     refresh_senders: RefreshSenders,
     reconnect_managers: ReconnectManagers,
     allowed_hosts: Vec<String>,
@@ -769,9 +770,13 @@ pub(crate) async fn run_aggregator_http(
         axum::middleware::from_fn_with_state(token_map, bearer_auth_middleware),
     );
 
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+    // Loopback, not 0.0.0.0: the guest reaches this through the
+    // `host.microsandbox.internal` alias, which resolves to a host loopback
+    // address (stage-1 assumption 5). Binding every interface would expose the
+    // aggregator to the local network for no benefit.
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
         .await
-        .map_err(|e| miette::miette!("bind to 0.0.0.0:{port} failed: {e:#}"))?;
+        .map_err(|e| miette::miette!("bind to 127.0.0.1:{port} failed: {e:#}"))?;
 
     // Start internal REST API on Unix domain socket
     let socket_path = home.join("run/internal.sock");
@@ -791,6 +796,7 @@ pub(crate) async fn run_aggregator_http(
         token_map_for_reload,
         token_map_path,
         agents_dir.clone(),
+        providers,
     );
     let uds_listener = tokio::net::UnixListener::bind(&socket_path)
         .map_err(|e| miette::miette!("bind UDS {}: {e:#}", socket_path.display()))?;
@@ -1330,7 +1336,7 @@ mod tests {
         // Regression: rmcp 1.4.0 added a DNS-rebinding check and
         // `StreamableHttpServerConfig::default()` ships with
         // `["localhost", "127.0.0.1", "::1"]`. That breaks every sandbox
-        // request (Host: host.openshell.internal:<port>) with
+        // request (Host: host.microsandbox.internal:<port>) with
         // 403 "Forbidden: Host header is not allowed".
         // The empty-list helper must NOT leak that default through.
         let config = build_streamable_config(CancellationToken::new(), &[]);

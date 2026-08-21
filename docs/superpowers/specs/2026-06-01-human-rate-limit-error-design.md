@@ -25,10 +25,10 @@ Two issues:
 
 ## Investigation result (the second ask: "are we hammering Claude?")
 
-Read-only check of live agents `right` and `agent-b` (`usage_events`,
+Read-only check of live agents `right` and `him` (`usage_events`,
 stream logs, process-compose logs):
 
-- **Not a request storm.** Steady state: `agent-b` ~4 req/hr (only the
+- **Not a request storm.** Steady state: `him` ~4 req/hr (only the
   `obsidian-agents-share-sync` cron every 15 min), `right` ~0/hr.
 - The 429 is **upstream Anthropic account-level throttling** during a
   legitimate high-activity window (a live group conversation + heavy

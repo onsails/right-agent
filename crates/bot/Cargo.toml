@@ -11,7 +11,8 @@ right-codegen = { path = "../right-codegen", version = "*" }
 right-config = { path = "../right-config", version = "*" }
 right-dashboard = { path = "../right-dashboard", version = "*" }
 right-lifecycle = { path = "../right-lifecycle", version = "*" }
-right-openshell = { path = "../right-openshell", version = "*" }
+right-sandbox = { path = "../right-sandbox", version = "*" }
+right-providers = { path = "../right-providers", version = "*" }
 right-process = { path = "../right-process", version = "*" }
 right-db = { path = "../right-db", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
@@ -66,7 +67,6 @@ whisper-rs = { version = "0.16", default-features = false, features = ["metal"] 
 base64 = { workspace = true }
 right-agent = { path = "../right-agent", version = "*" }
 right-db = { path = "../right-db", version = "*", features = ["test-support"] }
-right-openshell = { path = "../right-openshell", version = "*", features = ["test-support"] }
 rustls = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tower = "0.5"

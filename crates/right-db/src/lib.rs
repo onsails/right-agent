@@ -247,6 +247,21 @@ pub async fn open_database_path_readonly(db_path: impl AsRef<Path>) -> Result<Co
     Ok(conn)
 }
 
+/// Open an explicit SQLite database path in read-write mode, creating the
+/// file if it does not exist.
+///
+/// No migrations are run: the caller owns the schema of the database it
+/// names. This exists for the standalone, non-per-agent databases Right
+/// keeps under `~/.right` (currently `providers.db`), which must still go
+/// through this crate so `right-db` stays the only owner of driver details.
+/// Use [`open_connection`] for the per-agent `data.db`.
+pub async fn open_database_path(db_path: impl AsRef<Path>) -> Result<Connection, DbError> {
+    let db_path = db_path.as_ref().to_path_buf();
+    let conn = Connection::open_local(db_path, true).await?;
+    conn.apply_connection_pragmas().await?;
+    Ok(conn)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

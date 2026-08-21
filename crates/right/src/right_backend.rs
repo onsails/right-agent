@@ -143,17 +143,36 @@ pub(crate) struct ProviderCapabilitiesParams {}
 #[derive(Clone)]
 pub struct RightBackend {
     agents_dir: PathBuf,
-    mtls_dir: Option<PathBuf>,
+    /// Right's provider credential store, when the caller wired one. `None`
+    /// only in constructions that never serve `provider_capabilities` (tests,
+    /// and the stdio path that stubs the tool out) — the tool reports the
+    /// store as unavailable rather than answering with an empty inventory.
+    providers: Option<std::sync::Arc<right_providers::ProviderStore>>,
+    skill_probe: crate::learning::SkillPackageProbe,
     progress: crate::progress::ProgressRegistry,
 }
 
 impl RightBackend {
-    pub fn new(agents_dir: PathBuf, mtls_dir: Option<PathBuf>) -> Self {
+    pub fn new(
+        agents_dir: PathBuf,
+        providers: Option<std::sync::Arc<right_providers::ProviderStore>>,
+    ) -> Self {
         Self {
             agents_dir,
-            mtls_dir,
+            providers,
+            skill_probe: crate::learning::SkillPackageProbe::Sandbox,
             progress: crate::progress::ProgressRegistry::default(),
         }
+    }
+
+    /// Test-only: answer skill-package probes with `exists` instead of asking
+    /// the agent's sandbox, so the learning bookkeeping around the probe can be
+    /// exercised without a live VM. Reads no filesystem — a host read would be
+    /// a different answer than the guest's, not a cheaper one.
+    #[cfg(test)]
+    pub(crate) fn with_canned_skill_probe(mut self, exists: bool) -> Self {
+        self.skill_probe = crate::learning::SkillPackageProbe::Canned(exists);
+        self
     }
 
     pub(crate) fn progress_registry(&self) -> crate::progress::ProgressRegistry {
@@ -308,7 +327,7 @@ impl RightBackend {
             ),
             Tool::new(
                 "provider_capabilities",
-                "List providers attached to your own sandbox, showing env-var placeholder names only, allowed binaries, valid hosts, and usage hints. Scope is server-enforced, and this tool accepts no arguments. On provider/API 401/403, call this before concluding a credential is invalid because a specific binary/host may be required for gateway substitution.",
+                "List providers attached to your own sandbox, showing env-var placeholder names only, valid hosts, and usage hints. Scope is server-enforced, and this tool accepts no arguments. On provider/API 401/403, call this before concluding a credential is invalid because the value is substituted only for the listed hosts.",
                 schema_for_type::<ProviderCapabilitiesParams>(),
             ),
         ]).clone()
@@ -1083,8 +1102,8 @@ impl RightBackend {
             crate::learning::LearningActionParam::Update => SkillPackageExpectation::MustExist,
         };
         if let Err(result) = crate::learning::validate_skill_package_state(
+            self.skill_probe,
             agent_name,
-            self.mtls_dir.as_deref(),
             agent_dir,
             &params.skill_name,
             expectation,
@@ -1214,8 +1233,8 @@ impl RightBackend {
 
         if params.status.is_success()
             && let Err(result) = crate::learning::validate_skill_package_state(
+                self.skill_probe,
                 agent_name,
-                self.mtls_dir.as_deref(),
                 agent_dir,
                 &params.skill_name,
                 SkillPackageExpectation::MustExist,
@@ -1970,6 +1989,12 @@ impl RightBackend {
         )]))
     }
 
+    /// Report the agent's own provider inventory, credential values excluded.
+    ///
+    /// Reads the provider store, which is the authority for what an agent
+    /// holds. Nothing here touches a credential: the guest only ever sees a
+    /// placeholder, and the substitution is what makes the real value reach
+    /// the allowed hosts.
     async fn call_provider_capabilities(
         &self,
         agent_name: &str,
@@ -1983,67 +2008,67 @@ impl RightBackend {
             ));
         }
 
-        let Some(mtls_dir) = &self.mtls_dir else {
-            let json = serde_json::json!({
-                "providers": [],
-                "note": "This agent has no sandbox; gateway providers are not available."
-            });
-            return Ok(CallToolResult::success(vec![Content::text(
-                json.to_string(),
-            )]));
+        // An unwired store is not an empty inventory: reporting "no providers"
+        // would send the agent looking for a bug in its own request instead of
+        // at a server that cannot answer.
+        let Some(providers) = &self.providers else {
+            return Ok(tool_error(
+                "provider_capabilities_failed",
+                "provider store unavailable in this server mode",
+                None,
+            ));
         };
 
-        let agent_dir = self.agents_dir.join(agent_name);
-        let sandbox_name = match right_agent::agent::parse_agent_config(&agent_dir)
-            .map_err(|e| anyhow::anyhow!("{e:#}"))
-            .context("provider_capabilities: failed to parse agent config")?
-        {
-            Some(config) => {
-                let explicit_sandbox_name = config.sandbox.as_ref().and_then(|s| s.name.as_deref());
-                right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name)
+        let records = match providers.list(agent_name).await {
+            Ok(records) => records,
+            Err(e) => {
+                return Ok(tool_error(
+                    "provider_capabilities_failed",
+                    format!("could not read provider capabilities: {e:#}"),
+                    None,
+                ));
             }
-            None => right_openshell::openshell::resolve_sandbox_name(agent_name, None),
         };
 
-        let mut client = right_openshell::openshell::connect_grpc(mtls_dir)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e:#}"))
-            .context("provider_capabilities: failed to connect to OpenShell gRPC")?;
-
-        let capabilities =
-            match right_openshell::provider_capabilities::provider_capabilities_for_sandbox(
-                &mut client,
-                &sandbox_name,
-            )
-            .await
-            {
-                Ok(capabilities) => capabilities,
-                Err(e) => {
-                    return Ok(tool_error(
-                        "provider_capabilities_failed",
-                        format!("could not read provider capabilities: {e:#}"),
-                        None,
-                    ));
-                }
-            };
-
-        let providers: Vec<serde_json::Value> = capabilities
-            .into_iter()
-            .map(|capability| {
-                serde_json::json!({
-                    "display_name": capability.display_name,
-                    "env_vars": capability.env_vars,
-                    "allowed_binaries": capability.allowed_binaries,
-                    "endpoint_hosts": capability.endpoint_hosts,
-                    "usage_hint": capability.usage_hint,
-                })
-            })
-            .collect();
+        let providers: Vec<serde_json::Value> = records.iter().map(provider_capability).collect();
         let json = serde_json::json!({ "providers": providers });
         Ok(CallToolResult::success(vec![Content::text(
             json.to_string(),
         )]))
     }
+}
+
+/// One agent-facing capability record.
+///
+/// A record whose type no longer resolves still appears, carrying the reason:
+/// an agent hitting a 401 needs to learn that its provider is broken, not that
+/// it does not exist.
+fn provider_capability(record: &right_providers::ProviderRecord) -> serde_json::Value {
+    let hosts = record.kind.allowed_hosts();
+    let usage_hint = match (&hosts, record.status) {
+        (Err(error), _) => format!(
+            "unusable: provider type '{}' does not resolve ({error}). Re-create it from the dashboard: /providers.",
+            record.kind.slug()
+        ),
+        (Ok(_), right_providers::ProviderStatus::NeedsValue) => format!(
+            "{} is declared but holds no credential yet. Add one from the dashboard: /providers.",
+            record.env_var
+        ),
+        (Ok(hosts), _) => format!(
+            "Read the credential from ${}. Its value is substituted only on requests to {}; every other destination sees the placeholder.",
+            record.env_var,
+            hosts.join(", ")
+        ),
+    };
+    serde_json::json!({
+        "name": record.name,
+        "display_name": record.label,
+        "type": record.kind.slug(),
+        "env_vars": [record.env_var],
+        "allowed_hosts": hosts.unwrap_or_default(),
+        "status": record.status,
+        "usage_hint": usage_hint,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]

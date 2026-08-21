@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -198,9 +199,10 @@ pub(crate) async fn select_delivery_candidate(
 /// See docs/superpowers/specs/2026-04-15-cron-delivery-verbatim-relay.md.
 const CRON_DELIVERY_INSTRUCTION_SUCCESS: &str = "\
 You are delivering a cron job result to the user.
-The `content` field below is the FINAL user-facing message — send it VERBATIM in your response.
+The `content` field below is the FINAL user-facing message — place it VERBATIM in your reply's `content` field.
 Do NOT summarize, rephrase, or omit any part of the content.
 You MAY prepend a short contextual intro (1 sentence max) if recent conversation was on a different topic, so the message feels natural.
+Do NOT call `mcp__right__send_message` or any other send/notify tool. The platform delivers your reply to Telegram itself — writing `content` (and optionally `attachments`) is the only way to reach the user.
 Re-emit any attachments from the report in your reply's `attachments` array. `content` and an attachment `caption` are delivered as SEPARATE messages — never repeat the content text in a caption.
 
 Here is the YAML report of the cron job:
@@ -214,28 +216,34 @@ Here is the YAML report of the cron job:
 const DELIVERY_INSTRUCTION_FAILURE: &str = "\
 The cron job below did not complete successfully. The `content` field contains
 a platform-generated summary of the failure (produced by the agent's reflection
-pass). Relay it to the user in natural prose — you MAY rephrase lightly for
-flow with the recent conversation, but keep all factual claims intact. Do not
-invent details. Ignore the attachments field.
+pass). Place your natural-prose version in your reply's `content` field — you
+MAY rephrase lightly for flow with the recent conversation, but keep all
+factual claims intact. Do not invent details.
+Do NOT call `mcp__right__send_message` or any other send/notify tool. The
+platform delivers your reply to Telegram itself — writing `content` is the only
+way to reach the user. Ignore the attachments field.
 
 Here is the YAML report of the cron job:
 ";
 
 const BACKGROUND_DELIVERY_INSTRUCTION_SUCCESS: &str = "\
 You are delivering a background task result to the user.
-The `content` field below is the FINAL user-facing message - send it VERBATIM in your response.
+The `content` field below is the FINAL user-facing message - place it VERBATIM in your reply's `content` field.
 Do NOT summarize, rephrase, or omit any part of the content.
 You MAY prepend a short contextual intro (1 sentence max) if recent conversation was on a different topic, so the message feels natural.
+Do NOT call `mcp__right__send_message` or any other send/notify tool. The platform delivers your reply to Telegram itself - writing `content` (and optionally `attachments`) is the only way to reach the user.
 Re-emit any attachments from the report in your reply's `attachments` array. `content` and an attachment `caption` are delivered as SEPARATE messages - never repeat the content text in a caption.
 
 Here is the YAML report of the background task:
 ";
-
 const BACKGROUND_DELIVERY_INSTRUCTION_FAILURE: &str = "\
 The background task below did not complete successfully. The `content` field contains
-a platform-generated summary of the failure. Relay it to the user in natural prose -
-you MAY rephrase lightly for flow with the recent conversation, but keep all factual
-claims intact. Do not invent details. Ignore the attachments field.
+a platform-generated summary of the failure. Place your natural-prose version in your
+reply's `content` field - you MAY rephrase lightly for flow with the recent conversation,
+but keep all factual claims intact. Do not invent details.
+Do NOT call `mcp__right__send_message` or any other send/notify tool. The platform
+delivers your reply to Telegram itself - writing `content` is the only way to reach
+the user. Ignore the attachments field.
 
 Here is the YAML report of the background task:
 ";
@@ -368,11 +376,38 @@ const TELEGRAM_SEND_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::f
 const DELIVERY_INTERRUPTED_BY_SHUTDOWN: &str = "delivery interrupted by shutdown";
 const DELIVERY_SEND_OUTCOME_UNKNOWN_AFTER_SHUTDOWN: &str =
     "delivery send outcome unknown after shutdown";
+const DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const DELIVERY_TIMEOUT_ERROR: &str = "delivery CC subprocess timed out after 120s";
 
 #[derive(Debug, Clone, Copy)]
 struct DeliveryShutdownControl<'a> {
     token: Option<&'a tokio_util::sync::CancellationToken>,
     deadline: Option<tokio::time::Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeliveryDeadlineControl<'a> {
+    shutdown: DeliveryShutdownControl<'a>,
+    deadline_error: &'static str,
+}
+
+fn delivery_subprocess_control<'a>(
+    shutdown: DeliveryShutdownControl<'a>,
+    delivery_deadline: tokio::time::Instant,
+) -> DeliveryDeadlineControl<'a> {
+    match shutdown.deadline {
+        Some(caller_deadline) if caller_deadline <= delivery_deadline => DeliveryDeadlineControl {
+            shutdown,
+            deadline_error: DELIVERY_INTERRUPTED_BY_SHUTDOWN,
+        },
+        _ => DeliveryDeadlineControl {
+            shutdown: DeliveryShutdownControl {
+                token: shutdown.token,
+                deadline: Some(delivery_deadline),
+            },
+            deadline_error: DELIVERY_TIMEOUT_ERROR,
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,9 +485,8 @@ async fn run_delivery_once(
     bot: &crate::telegram::BotType,
     allowlist: &right_agent::agent::allowlist::AllowlistHandle,
     idle_ts: &Arc<IdleTimestamp>,
-    ssh_config_path: Option<&Path>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
     internal_client: &Arc<right_mcp::internal_client::InternalClient>,
-    resolved_sandbox: Option<&str>,
     upgrade_lock: &Arc<tokio::sync::RwLock<()>>,
     session_locks: &crate::telegram::SessionLocks,
     debug: &Arc<std::sync::atomic::AtomicBool>,
@@ -594,11 +628,10 @@ async fn run_delivery_once(
         bot,
         target_chat_id,
         target_thread_id,
-        ssh_config_path,
+        sandbox,
         crate::snapshot_model(model),
         session_id,
         internal_client,
-        resolved_sandbox,
         upgrade_lock,
         session_locks.clone(),
         Arc::clone(debug),
@@ -703,10 +736,9 @@ pub(crate) async fn run_delivery_loop(
     bot: crate::telegram::BotType,
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
     idle_ts: Arc<IdleTimestamp>,
-    ssh_config_path: Option<PathBuf>,
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: std::sync::Arc<right_mcp::internal_client::InternalClient>,
     shutdown: tokio_util::sync::CancellationToken,
-    resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     session_locks: crate::telegram::SessionLocks,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -732,6 +764,10 @@ pub(crate) async fn run_delivery_loop(
             }
         }
 
+        // Resolved per poll: the loop outlives any one sandbox handle, and a
+        // recovery between polls retires the previous one.
+        let sandbox = sandbox_runtime.current_sandbox();
+
         run_delivery_once(
             &mut conn,
             &mut state,
@@ -742,9 +778,8 @@ pub(crate) async fn run_delivery_loop(
             &bot,
             &allowlist,
             &idle_ts,
-            ssh_config_path.as_deref(),
+            sandbox.as_ref(),
             &internal_client,
-            resolved_sandbox.as_deref(),
             &upgrade_lock,
             &session_locks,
             &debug,
@@ -757,24 +792,38 @@ pub(crate) async fn run_delivery_loop(
     }
 }
 
-async fn run_or_delivery_shutdown<T>(
-    control: DeliveryShutdownControl<'_>,
-    future: impl std::future::Future<Output = T>,
+async fn run_or_delivery_deadline<T>(
+    control: DeliveryDeadlineControl<'_>,
+    future: impl Future<Output = T>,
 ) -> Result<T, String> {
     tokio::select! {
         biased;
         _ = async {
-            if let Some(token) = control.token {
+            if let Some(token) = control.shutdown.token {
                 token.cancelled().await;
             }
-        }, if control.token.is_some() => Err(DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()),
+        }, if control.shutdown.token.is_some() => Err(DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()),
         _ = async {
-            if let Some(deadline) = control.deadline {
+            if let Some(deadline) = control.shutdown.deadline {
                 tokio::time::sleep_until(deadline).await;
             }
-        }, if control.deadline.is_some() => Err(DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()),
+        }, if control.shutdown.deadline.is_some() => Err(control.deadline_error.to_owned()),
         result = future => Ok(result),
     }
+}
+
+async fn run_or_delivery_shutdown<T>(
+    control: DeliveryShutdownControl<'_>,
+    future: impl Future<Output = T>,
+) -> Result<T, String> {
+    run_or_delivery_deadline(
+        DeliveryDeadlineControl {
+            shutdown: control,
+            deadline_error: DELIVERY_INTERRUPTED_BY_SHUTDOWN,
+        },
+        future,
+    )
+    .await
 }
 
 fn is_delivery_shutdown_interruption(error: &str) -> bool {
@@ -864,9 +913,8 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
     bot: crate::telegram::BotType,
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
     idle_ts: Arc<IdleTimestamp>,
-    ssh_config_path: Option<PathBuf>,
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     internal_client: Arc<right_mcp::internal_client::InternalClient>,
-    resolved_sandbox: Option<String>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     session_locks: crate::telegram::SessionLocks,
     debug: Arc<std::sync::atomic::AtomicBool>,
@@ -885,6 +933,7 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
             tracing::warn!("async delivery shutdown flush timed out");
             return;
         }
+        let sandbox = sandbox_runtime.current_sandbox();
         let delivered = run_delivery_once(
             &mut conn,
             &mut state,
@@ -895,9 +944,8 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
             &bot,
             &allowlist,
             &idle_ts,
-            ssh_config_path.as_deref(),
+            sandbox.as_ref(),
             &internal_client,
-            resolved_sandbox.as_deref(),
             &upgrade_lock,
             &session_locks,
             &debug,
@@ -995,18 +1043,15 @@ async fn deliver_through_session(
     bot: &crate::telegram::BotType,
     target_chat_id: i64,
     target_thread_id: Option<i64>,
-    ssh_config_path: Option<&Path>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
     configured_model: Option<String>,
     session_id: Option<String>,
     internal_client: &right_mcp::internal_client::InternalClient,
-    resolved_sandbox: Option<&str>,
     upgrade_lock: &tokio::sync::RwLock<()>,
     session_locks: crate::telegram::SessionLocks,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     shutdown: DeliveryShutdownControl<'_>,
 ) -> Result<DeliverySendReport, String> {
-    use std::process::Stdio;
-
     // Block while upgrade is running.
     let _upgrade_guard = run_or_delivery_shutdown(shutdown, upgrade_lock.read()).await?;
 
@@ -1024,7 +1069,7 @@ async fn deliver_through_session(
         None => None,
     };
 
-    let mcp_path = crate::cc::invocation::mcp_config_path(ssh_config_path, agent_dir);
+    let mcp_path = crate::sandbox::SANDBOX_MCP_JSON_PATH.to_owned();
 
     let reply_schema_path = agent_dir.join(".claude").join("reply-schema.json");
     let json_schema = std::fs::read_to_string(&reply_schema_path).unwrap_or_default();
@@ -1037,19 +1082,7 @@ async fn deliver_through_session(
         Some(debug),
     );
 
-    // Derive sandbox_mode and home_dir from ssh_config_path.
-    let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
-        (
-            right_agent::agent::types::SandboxMode::Openshell,
-            "/sandbox".to_owned(),
-        )
-    } else {
-        (
-            right_agent::agent::types::SandboxMode::None,
-            agent_dir.to_string_lossy().into_owned(),
-        )
-    };
-    let base_prompt = right_codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+    let base_prompt = right_codegen::generate_system_prompt(agent_name, "/sandbox");
 
     // Fetch MCP instructions from aggregator (non-fatal).
     let mcp_instructions: Option<String> =
@@ -1076,91 +1109,53 @@ async fn deliver_through_session(
     // Delivery sessions skip memory injection — same rationale as cron jobs.
     let memory_mode: Option<crate::cc::prompt::MemoryMode> = None;
 
-    crate::cc::invocation::guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)
+    let sandbox = crate::cc::invocation::guard_no_sandboxed_host_exec(agent_name, sandbox)
         .map_err(|e| format!("{e:#}"))?;
 
-    let mut cmd = if let Some(ssh_config) = ssh_config_path {
-        let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            crate::cc::prompt::PromptMode::Normal,
-            "/sandbox",
-            "/tmp/right-system-prompt.md",
-            "/sandbox",
-            &claude_args,
-            mcp_instructions.as_deref(),
-            memory_mode.as_ref(),
-            None,
-            None,
-            None,
-        );
-        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
-            let escaped = token.replace('\'', "'\\''");
-            assembly_script =
-                format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
-        }
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
-        let mut c = tokio::process::Command::new("ssh");
-        c.arg("-F").arg(ssh_config);
-        c.arg(&ssh_host);
-        c.arg("--");
-        c.arg(assembly_script);
-        c
-    } else {
-        let agent_dir_str = agent_dir.to_string_lossy();
-        let prompt_path = agent_dir.join(".claude").join("delivery-system-prompt.md");
-        let prompt_path_str = prompt_path.to_string_lossy();
-        let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            crate::cc::prompt::PromptMode::Normal,
-            &agent_dir_str,
-            &prompt_path_str,
-            &agent_dir_str,
-            &claude_args,
-            mcp_instructions.as_deref(),
-            memory_mode.as_ref(),
-            None,
-            None,
-            None,
-        );
-        let cc_bin = which::which("claude")
-            .or_else(|_| which::which("claude-bun"))
-            .map_err(|_| "claude binary not found in PATH".to_string())?;
-        let _ = cc_bin; // Existence check only — bash -c runs the script
-        let mut c = tokio::process::Command::new("bash");
-        c.arg("-c");
-        c.arg(&assembly_script);
-        c.env("HOME", agent_dir);
-        c.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
-            c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
-        }
-        c.current_dir(agent_dir);
-        c
-    };
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
+    let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
+        &base_prompt,
+        crate::cc::prompt::PromptMode::Normal,
+        "/sandbox",
+        &crate::cc::prompt::sandbox_prompt_file_path("system-prompt"),
+        "/sandbox",
+        &claude_args,
+        mcp_instructions.as_deref(),
+        memory_mode.as_ref(),
+        None,
+        None,
+        None,
+    );
 
     let mut child =
-        right_process::ProcessGroupChild::spawn(cmd).map_err(|e| format!("spawn failed: {e:#}"))?;
+        crate::cc::invocation::build_claude_script_command(assembly_script, agent_dir, sandbox)
+            .await
+            .stdin_piped()
+            .stdout(crate::cc::sandbox_process::Capture::Pipe)
+            .stderr(crate::cc::sandbox_process::Capture::Pipe)
+            .spawn()
+            .await
+            .map_err(|e| format!("spawn failed: {e:#}"))?;
 
+    let delivery =
+        delivery_subprocess_control(shutdown, tokio::time::Instant::now() + DELIVERY_TIMEOUT);
     if let Some(mut stdin) = child.stdin() {
-        use tokio::io::AsyncWriteExt;
-        run_or_delivery_shutdown(shutdown, stdin.write_all(yaml_input.as_bytes()))
+        run_or_delivery_deadline(delivery, stdin.write_all(yaml_input.as_bytes()))
             .await?
             .map_err(|e| format!("stdin write: {e:#}"))?;
+        run_or_delivery_deadline(delivery, stdin.close())
+            .await?
+            .map_err(|e| format!("stdin close: {e:#}"))?;
     }
 
-    const DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-    let output = run_or_delivery_shutdown(
-        shutdown,
-        tokio::time::timeout(DELIVERY_TIMEOUT, child.wait_with_output()),
-    )
-    .await?
-    .map_err(|_| "delivery CC subprocess timed out after 120s".to_string())?
-    .map_err(|e| format!("wait_with_output: {e:#}"))?;
+    // Any deadline error returns from this function and drops `child`; the
+    // SandboxChild drop contract kills the still-running guest process.
+    // Break on the terminal JSON envelope and kill the guest, never waiting
+    // for EOF — the SDK may not report an exit after a stdin-piped resume.
+    let output = run_or_delivery_deadline(delivery, child.wait_for_json_envelope())
+        .await?
+        .map_err(|e| format!("wait_for_json_envelope: {e:#}"))?;
 
-    if !output.status.success() {
+    if !output.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         // CC writes errors to stdout (as JSON) when using --output-format json.
@@ -1173,7 +1168,10 @@ async fn deliver_through_session(
         } else {
             "(no output)".into()
         };
-        return Err(format!("CC exited with {}: {detail}", output.status));
+        return Err(format!(
+            "CC delivery failed (code {}): {detail}",
+            output.code
+        ));
     }
 
     let raw = String::from_utf8_lossy(&output.stdout);
@@ -1276,8 +1274,7 @@ async fn deliver_through_session(
                 target_chat_id,
                 target_thread_id.unwrap_or(0),
                 agent_dir,
-                ssh_config_path,
-                resolved_sandbox,
+                sandbox,
             ),
         )
         .await?;
@@ -1339,6 +1336,50 @@ mod tests {
     async fn delivery_mode_shutdown_flush_skips_idle_gate() {
         assert!(should_wait_for_idle(DeliveryMode::Normal, 10));
         assert!(!should_wait_for_idle(DeliveryMode::ShutdownFlush, 10));
+    }
+
+    #[test]
+    fn subprocess_deadline_merges_with_caller_control_and_preserves_diagnostic() {
+        let token = tokio_util::sync::CancellationToken::new();
+        let now = tokio::time::Instant::now();
+        let internal_deadline = now + DELIVERY_TIMEOUT;
+        let caller_deadline = now + std::time::Duration::from_secs(10);
+        let caller_control = DeliveryShutdownControl {
+            token: Some(&token),
+            deadline: Some(caller_deadline),
+        };
+
+        let caller_bounded = delivery_subprocess_control(caller_control, internal_deadline);
+        assert_eq!(caller_bounded.shutdown.deadline, Some(caller_deadline));
+        assert!(std::ptr::eq(caller_bounded.shutdown.token.unwrap(), &token));
+        assert_eq!(
+            caller_bounded.deadline_error,
+            DELIVERY_INTERRUPTED_BY_SHUTDOWN
+        );
+
+        let delivery_bounded = delivery_subprocess_control(
+            DeliveryShutdownControl {
+                token: Some(&token),
+                deadline: None,
+            },
+            internal_deadline,
+        );
+        assert_eq!(delivery_bounded.shutdown.deadline, Some(internal_deadline));
+        assert!(std::ptr::eq(
+            delivery_bounded.shutdown.token.unwrap(),
+            &token
+        ));
+        assert_eq!(delivery_bounded.deadline_error, DELIVERY_TIMEOUT_ERROR);
+
+        let later_caller = delivery_subprocess_control(
+            DeliveryShutdownControl {
+                token: None,
+                deadline: Some(internal_deadline + std::time::Duration::from_secs(1)),
+            },
+            internal_deadline,
+        );
+        assert_eq!(later_caller.shutdown.deadline, Some(internal_deadline));
+        assert_eq!(later_caller.deadline_error, DELIVERY_TIMEOUT_ERROR);
     }
 
     #[tokio::test]
@@ -1875,7 +1916,8 @@ mod tests {
         let output = format_async_yaml(&pending, 2).unwrap();
         // Instruction prefix assertions
         assert!(output.starts_with("You are delivering a cron job result"));
-        assert!(output.contains("VERBATIM"));
+        assert!(output.contains("place it VERBATIM in your reply's `content` field"));
+        assert!(output.contains("Do NOT call `mcp__right__send_message`"));
         assert!(output.contains("never repeat the content text in a caption"));
         assert!(output.contains("Here is the YAML report of the cron job:"));
         // YAML content assertions

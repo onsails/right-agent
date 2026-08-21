@@ -224,32 +224,21 @@ and a one-sentence `rationale`. Do NOT propose touching skills with \
 /// This replaces CC's default system prompt via `--system-prompt-file`.
 /// Content: agent identity, Right Agent description, sandbox info, MCP reference.
 /// Behavior-specific instructions come from the agent definition (`--agent`).
-pub fn generate_system_prompt(
-    agent_name: &str,
-    sandbox_mode: &right_agent_config::SandboxMode,
-    home_dir: &str,
-) -> String {
-    let sandbox_desc = match sandbox_mode {
-        right_agent_config::SandboxMode::Openshell => {
-            "OpenShell sandbox (k3s container with network and filesystem policies)"
-        }
-        right_agent_config::SandboxMode::None => "no sandbox (direct host access)",
-    };
-
+pub fn generate_system_prompt(agent_name: &str, home_dir: &str) -> String {
     let mut prompt = format!(
         "\
 You are {agent_name}, an agent running on Right Agent.
 
-Right Agent is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Each agent runs \
-as an independent Claude Code session inside its own sandbox with declarative YAML policies. \
-Agents have persistent memory, scheduled tasks (cron), and tool management via MCP.
+Right Agent is a multi-agent runtime for Claude Code built on microsandbox. Each agent runs \
+as an independent Claude Code session inside its own hardware-isolated microVM with a network \
+egress policy. Agents have persistent memory, scheduled tasks (cron), and tool management via MCP.
 
 Source: https://github.com/onsails/right-agent
 
 ## Environment
 
 - Agent name: {agent_name}
-- Sandbox: {sandbox_desc}
+- Sandbox: microsandbox microVM (hardware-isolated VM with a network egress policy)
 - Home / working directory: {home_dir}
 
 ## MCP
@@ -287,9 +276,8 @@ promise backed by neither action nor a schedule leaves the turn incomplete.
 "
     );
 
-    if matches!(sandbox_mode, right_agent_config::SandboxMode::Openshell) {
-        prompt.push_str(
-            "
+    prompt.push_str(
+        "
 ## User-Installed CLI Tools
 
 - Put manually installed executables in `/sandbox/.local/bin`.
@@ -299,31 +287,7 @@ promise backed by neither action nor a schedule leaves the turn incomplete.
 - npm global installs are configured with `NPM_CONFIG_PREFIX=/sandbox/.local`, so `npm install -g <pkg>` exposes bins in `/sandbox/.local/bin`.
 - npm cache is configured with `NPM_CONFIG_CACHE=/sandbox/.npm`.
 ",
-        );
-    }
-
-    if matches!(sandbox_mode, right_agent_config::SandboxMode::Openshell) {
-        prompt.push_str(&format!(
-            "
-## User SSH Access
-
-If an operation requires an interactive terminal (TUI, interactive prompts, \
-password input) that you cannot perform from within your sandbox — tell the \
-user to run:
-
-  right agent ssh {agent_name}
-  right agent ssh {agent_name} -- <command>
-
-Examples:
-- `gh auth login`
-- `gcloud auth login`
-- `npm login`
-- Any command with interactive prompts or TUI
-
-Always provide the exact command with the `--` separator when passing a specific command.
-"
-        ));
-    }
+    );
 
     prompt
 }

@@ -19,14 +19,16 @@ import type {
   ProviderPeer,
 } from '../types'
 import SecretInput from '../components/SecretInput.vue'
+import AsyncState from '../components/AsyncState.vue'
 import ProviderTypeList from './ProviderTypeList.vue'
 import {
   validateSlug,
   validateEnvVar,
   validateUpstreamHosts,
   evaluateCredentialSubmit,
-  providerCompositionClass,
-  providerCompositionLabel,
+  providerStatusClass,
+  providerStatusLabel,
+  isGhost,
   isBorrowed,
   borrowedOwnerLabel,
   shareTargetState,
@@ -380,30 +382,11 @@ function reCreate(provider: ProviderView): void {
   }
 }
 
-function statusClass(provider: ProviderView): string {
-  const k = provider.status.kind
-  if (k === 'healthy') return 'ok'
-  if (k === 'missing') return 'active'
-  return 'bad'
-}
-
-function statusLabel(provider: ProviderView): string {
-  const s = provider.status
-  if (s.kind === 'healthy') return 'Healthy'
-  if (s.kind === 'missing') return 'Missing'
-  if (s.kind === 'unknown_builtin') {
-    return `Unknown built-in: ${s.slug} (config migration required)`
-  }
-  return `Error: ${s.message}`
-}
-
+// User-friendly display_name label from the types catalog; never a raw slug
+// unless the catalog itself doesn't know the type.
 function typeLabel(provider: ProviderView): string {
   const profile = types.value.find((t) => t.type === provider.type)
   return profile?.display_name ?? provider.type
-}
-
-function isGhost(provider: ProviderView): boolean {
-  return provider.status.kind === 'missing' || provider.status.kind === 'gateway_error'
 }
 
 // Peer (other-agent) state for sharing
@@ -755,10 +738,9 @@ watch(rotateCredential, () => {
       </div>
     </section>
 
-    <p v-if="error" class="notice inline">{{ error }}</p>
-    <p v-if="loading" class="muted-line">Loading</p>
+    <AsyncState :loading="loading" :error="error" :empty="providers.length === 0" empty-text="No providers configured">
 
-    <div v-if="!loading" class="data-list">
+    <div class="data-list">
       <article v-for="provider in providers" :key="provider.name" class="data-row providers-row static">
         <div class="row-main providers-row-main">
           <strong>{{ provider.name }}</strong>
@@ -768,11 +750,8 @@ watch(rotateCredential, () => {
           <small v-if="isBorrowed(provider)" class="borrowed-label">{{ borrowedOwnerLabel(provider) }}</small>
         </div>
         <div class="row-side">
-          <span class="status-pill" :class="statusClass(provider)">
-            {{ statusLabel(provider) }}
-          </span>
-          <span class="status-pill" :class="providerCompositionClass(provider)">
-            {{ providerCompositionLabel(provider) }}
+          <span class="status-pill" :class="providerStatusClass(provider)">
+            {{ providerStatusLabel(provider) }}
           </span>
           <small>{{ provider.updated_at ? new Date(provider.updated_at).toLocaleDateString() : '—' }}</small>
         </div>
@@ -830,8 +809,8 @@ watch(rotateCredential, () => {
           </button>
         </div>
       </article>
-      <p v-if="providers.length === 0 && !loading" class="muted-line">No providers configured</p>
     </div>
+    </AsyncState>
   </section>
 </template>
 

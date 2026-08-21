@@ -4,7 +4,6 @@
 //! Spec: docs/superpowers/specs/2026-05-22-skill-learning-writer-curator-design.md
 
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -38,8 +37,9 @@ pub(crate) struct ProbeWriterContext {
     pub agent_dir: PathBuf,
     pub agent_db_dir: PathBuf,
     pub agent_name: String,
-    pub ssh_config_path: Option<PathBuf>,
-    pub resolved_sandbox: Option<String>,
+    /// `None` when the sandbox backend is degraded — the fork simply does not
+    /// run; there is no host fallback.
+    pub sandbox: Option<crate::sandbox::Sandbox>,
     pub internal_client: Arc<right_mcp::internal_client::InternalClient>,
     pub model: String,
     pub debug_flag: Arc<AtomicBool>,
@@ -156,14 +156,23 @@ fn finish_status_to_spend_kind(status: &str) -> Option<&'static str> {
 /// Returns when fork is established (system/init received); detached task drains
 /// the remainder.
 pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_index: String) {
+    let sandbox = match crate::cc::invocation::guard_no_sandboxed_host_exec(
+        &ctx.agent_name,
+        ctx.sandbox.as_ref(),
+    ) {
+        Ok(sandbox) => Arc::clone(sandbox),
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "skipping probe-writer: {e:#}");
+            return;
+        }
+    };
     let probe_session_id = uuid::Uuid::new_v4().to_string();
     let user_prompt = build_user_prompt(&anchor, &skill_index, &ctx.incoming_hint);
     let active_invocation = match crate::cc::invocation::register_non_foreground_invocation(
         crate::cc::invocation::NonForegroundInvocationRegistration {
             agent_name: ctx.agent_name.clone(),
             agent_dir: ctx.agent_dir.clone(),
-            ssh_config_path: ctx.ssh_config_path.clone(),
-            resolved_sandbox: ctx.resolved_sandbox.clone(),
+            sandbox: Arc::clone(&sandbox),
             internal_client: Arc::clone(&ctx.internal_client),
             kind: right_mcp::internal_client::ProgressInvocationKindDto::ProbeWriter,
             chat_id: Some(ctx.chat_id),
@@ -199,27 +208,12 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
         .clone();
     let _guard = lock.lock().await;
 
-    let mut cmd = match crate::cc::invocation::build_claude_command(
-        &args,
-        &ctx.agent_dir,
-        ctx.ssh_config_path.as_deref(),
-        ctx.resolved_sandbox.as_deref(),
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "skipping probe-writer: {e:#}");
-            drop(_guard);
-            active_invocation.cleanup().await;
-            return;
-        }
-    };
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
+    let command = crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, &sandbox)
+        .await
+        .stdout(crate::cc::sandbox_process::Capture::Pipe)
+        .stderr(crate::cc::sandbox_process::Capture::Pipe);
 
-    let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
+    let mut child = match command.spawn().await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -236,7 +230,7 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
         Some(s) => s,
         None => {
             tracing::warn!(agent = %ctx.agent_name, "probe-writer child has no stdout");
-            let _ = child.kill().await;
+            child.kill().await;
             drop(child);
             drop(_guard);
             active_invocation.cleanup().await;
@@ -261,7 +255,7 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
             agent = %ctx.agent_name,
             "probe-writer never emitted system/init, killing"
         );
-        let _ = child.kill().await;
+        child.kill().await;
         drop(child);
         active_invocation.cleanup().await;
         return;
@@ -291,9 +285,9 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
         })
         .await;
         match completed {
-            Ok((_, Ok(status))) => {
-                if !status.success() {
-                    tracing::warn!(agent = %agent_name, ?status, "probe-writer exited non-zero");
+            Ok((_, Ok(code))) => {
+                if code != 0 {
+                    tracing::warn!(agent = %agent_name, code, "probe-writer exited non-zero");
                 }
             }
             Ok((_, Err(e))) => {
@@ -305,7 +299,7 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
                     "probe-writer timed out after {}s",
                     PROBE_WRITER_TIMEOUT.as_secs()
                 );
-                let _ = child.kill().await;
+                child.kill().await;
             }
         }
 
@@ -469,8 +463,7 @@ mod tests {
             agent_dir,
             agent_db_dir: PathBuf::from("/tmp/db"),
             agent_name: "agent-1".into(),
-            ssh_config_path: None,
-            resolved_sandbox: None,
+            sandbox: None,
             internal_client: std::sync::Arc::new(right_mcp::internal_client::InternalClient::new(
                 "/tmp/fake.sock",
             )),

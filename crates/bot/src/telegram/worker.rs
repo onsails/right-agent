@@ -7,9 +7,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
@@ -52,6 +50,8 @@ const MEDIA_GROUP_HARD_CAP_MS: u64 = 2500;
 
 /// Maximum time to wait for a CC subprocess to complete.
 const CC_TIMEOUT_SECS: u64 = 600;
+/// Maximum time a foreground invocation may produce no API progress after stdin is delivered.
+pub(crate) const FOREGROUND_API_PROGRESS_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Bound on `child.wait()` after we've already broken from the streaming
 /// loop. The slave should be either gone (deadline/stop SIGKILL) or about
@@ -63,6 +63,55 @@ const POST_BREAK_WAIT_TIMEOUT_SECS: u64 = 5;
 /// when the pipe is wedged (FD held by some other process) we'd rather
 /// log the wedge and continue with an empty buffer than block the worker.
 const POST_BREAK_STDERR_TIMEOUT_SECS: u64 = 2;
+fn stream_event_is_api_progress(event: &crate::cc::stream::StreamEvent) -> bool {
+    matches!(
+        event,
+        crate::cc::stream::StreamEvent::Text(_)
+            | crate::cc::stream::StreamEvent::Thinking
+            | crate::cc::stream::StreamEvent::ToolUse { .. }
+            | crate::cc::stream::StreamEvent::Result(_)
+    )
+}
+
+fn stream_event_is_terminal(event: &crate::cc::stream::StreamEvent) -> bool {
+    matches!(event, crate::cc::stream::StreamEvent::Result(_))
+}
+
+/// Derive the foreground turn's semantic exit from CC's terminal result.
+///
+/// The result contract is authoritative even when killing a wedged SDK session
+/// makes the transport report no process exit. Malformed or absent results
+/// retain the transport's actual exit, with `-1` representing no reported exit.
+fn effective_exit_code(result_line: Option<&str>, actual_exit_code: Option<i32>) -> i32 {
+    let result_is_error = result_line.and_then(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()?
+            .get("is_error")?
+            .as_bool()
+    });
+    match result_is_error {
+        Some(false) => 0,
+        Some(true) => 1,
+        None => actual_exit_code.unwrap_or(-1),
+    }
+}
+
+fn should_recover_auth(
+    input_delivered: bool,
+    saw_api_progress: bool,
+    init_deadline_fired: bool,
+) -> bool {
+    input_delivered && init_deadline_fired && !saw_api_progress
+}
+
+fn stdin_delivery_timeout_detail(input_delivered: bool) -> Option<String> {
+    (!input_delivered).then(|| {
+        format!(
+            "stdin delivery timed out after {}s",
+            FOREGROUND_API_PROGRESS_TIMEOUT.as_secs(),
+        )
+    })
+}
 
 /// Maximum character count for Hindsight recall queries (~530 tokens, safely under the 500-token API limit).
 const RECALL_MAX_CHARS: usize = 800;
@@ -294,15 +343,11 @@ pub struct WorkerContext {
     /// Hot-reloadable debug flag. When true, CC subprocesses run with --debug --debug-file=...
     /// Shared with AgentSettings so /debug Telegram command takes effect immediately.
     pub debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Path to the SSH config file for this agent's OpenShell sandbox (None when --no-sandbox).
-    pub ssh_config_path: Option<PathBuf>,
-    /// Guard: true when an auth watcher task is active for this agent. Prevents duplicates.
-    pub auth_watcher_active: Arc<AtomicBool>,
-    /// Slot for auth code sender — when login flow is waiting for a code from Telegram,
-    /// the oneshot::Sender is stored here. Message handler checks this before routing to worker.
-    pub auth_code_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
-    /// Resolved sandbox name (None when running without sandbox).
-    pub resolved_sandbox: Option<String>,
+    /// Live Agent Sandbox handle. `None` once the backend has degraded: nothing
+    /// runs without it (see `guard_no_sandboxed_host_exec`).
+    pub sandbox: Option<crate::sandbox::Sandbox>,
+    /// Single pending setup-token request shared by every conversation for this agent.
+    pub(crate) pending_auth: super::handler::PendingAuthRequests,
     /// Show live thinking indicator in Telegram.
     pub show_thinking: bool,
     /// Claude model override (passed as --model). None = inherit CLI default.
@@ -378,28 +423,22 @@ async fn verify_bootstrap_for_worker(
     verify_bootstrap_for_paths(
         &conn,
         &ctx.agent_dir,
-        ctx.resolved_sandbox.as_deref(),
+        ctx.sandbox.as_ref(),
         chat_id,
         thread_id,
     )
     .await
 }
 
-async fn probe_sandbox_bootstrap_identity(sandbox_name: String) -> miette::Result<(String, i32)> {
-    let mtls_dir = match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-        status => {
-            return Err(miette::miette!(
-                "OpenShell preflight not ready for bootstrap identity probe: {status:?}"
-            ));
-        }
-    };
-    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-    let sandbox_id =
-        right_openshell::openshell::resolve_sandbox_id(&mut client, &sandbox_name).await?;
-    right_openshell::openshell::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
+/// Probe the guest for the three authoritative identity files.
+///
+/// Takes the live handle, not a name: there is no lookup step left, and a name
+/// could not be resolved to a running sandbox without one anyway.
+async fn probe_sandbox_bootstrap_identity(
+    sandbox: crate::sandbox::Sandbox,
+) -> miette::Result<(String, i32)> {
+    crate::sandbox::exec_argv(
+        &sandbox,
         &[
             "sh",
             "-c",
@@ -409,7 +448,6 @@ async fn probe_sandbox_bootstrap_identity(sandbox_name: String) -> miette::Resul
             "/sandbox/SOUL.md",
             "/sandbox/USER.md",
         ],
-        right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
     )
     .await
 }
@@ -417,7 +455,7 @@ async fn probe_sandbox_bootstrap_identity(sandbox_name: String) -> miette::Resul
 async fn verify_bootstrap_for_paths(
     conn: &right_db::Connection,
     agent_dir: &Path,
-    resolved_sandbox: Option<&str>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
     chat_id: i64,
     thread_id: i64,
 ) -> BootstrapVerification {
@@ -426,7 +464,7 @@ async fn verify_bootstrap_for_paths(
         Ok(_) => {
             verify_bootstrap_for_paths_with_probe(
                 agent_dir,
-                resolved_sandbox,
+                sandbox,
                 probe_sandbox_bootstrap_identity,
             )
             .await
@@ -439,20 +477,19 @@ async fn verify_bootstrap_for_paths(
 
 async fn verify_bootstrap_for_paths_with_probe<P, Fut>(
     agent_dir: &Path,
-    resolved_sandbox: Option<&str>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
     probe: P,
 ) -> BootstrapVerification
 where
-    P: FnOnce(String) -> Fut,
+    P: FnOnce(crate::sandbox::Sandbox) -> Fut,
     Fut: Future<Output = miette::Result<(String, i32)>>,
 {
-    match resolved_sandbox {
-        Some(sandbox_name) => match probe(sandbox_name.to_owned()).await {
+    match sandbox {
+        Some(sandbox) => match probe(Arc::clone(sandbox)).await {
             Ok((output, 0)) if output == "missing" => BootstrapVerification::IdentityMissing,
             Ok((output, 0)) if output == "verified" => {
                 match right_agent::identity_mirror::sync_identity_mirror_from_sandbox(
-                    agent_dir,
-                    sandbox_name,
+                    agent_dir, sandbox,
                 )
                 .await
                 {
@@ -475,26 +512,14 @@ where
                 "probe sandbox bootstrap identity files: {error:#}"
             )),
         },
-        None => {
-            for filename in right_agent::identity_mirror::IDENTITY_MIRROR_FILES {
-                match std::fs::metadata(agent_dir.join(filename)) {
-                    Ok(metadata) if metadata.is_file() => {}
-                    Ok(_) => return BootstrapVerification::IdentityMissing,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        return BootstrapVerification::IdentityMissing;
-                    }
-                    Err(error) => {
-                        return BootstrapVerification::InfrastructureError(
-                            anyhow::Error::from(error).context(format!(
-                                "inspect bootstrap identity file {}",
-                                agent_dir.join(filename).display()
-                            )),
-                        );
-                    }
-                }
-            }
-            BootstrapVerification::Verified
-        }
+        // Sandboxless mode is gone: every agent runs in a microVM, so a
+        // missing handle is a backend failure, not a cue to read the host
+        // mirror. Answering "Verified" from host files here would be exactly
+        // the host fallback `guard_no_sandboxed_host_exec` exists to prevent —
+        // the mirror is a stale copy, not the agent's live identity.
+        None => BootstrapVerification::InfrastructureError(anyhow::anyhow!(
+            "bootstrap identity cannot be verified: the agent's sandbox is unavailable"
+        )),
     }
 }
 
@@ -698,7 +723,7 @@ async fn restore_bootstrap_continuity(
 /// continuity is restored and startup fails rather than entering Normal mode.
 pub(crate) async fn recover_bootstrap_finalization(
     agent_dir: &Path,
-    resolved_sandbox: Option<&str>,
+    sandbox: Option<&crate::sandbox::Sandbox>,
 ) -> anyhow::Result<()> {
     let Some(intent) = read_bootstrap_finalization_intent(agent_dir)? else {
         return Ok(());
@@ -706,15 +731,25 @@ pub(crate) async fn recover_bootstrap_finalization(
     let conn = right_db::open_connection(agent_dir, false)
         .await
         .context("open lifecycle database for bootstrap finalization recovery")?;
-    match verify_bootstrap_for_paths(
-        &conn,
-        agent_dir,
-        resolved_sandbox,
-        intent.chat_id,
-        intent.thread_id,
-    )
-    .await
-    {
+    let verification =
+        verify_bootstrap_for_paths(&conn, agent_dir, sandbox, intent.chat_id, intent.thread_id)
+            .await;
+    finish_bootstrap_recovery(agent_dir, &conn, &intent, verification).await
+}
+
+/// The recovery bookkeeping that follows an identity verdict.
+///
+/// Verification itself needs a live microVM, but everything after it — the
+/// session lookup, marker restoration, and continuity repair — is pure
+/// database and filesystem work, so it is split out to stay testable without
+/// one.
+async fn finish_bootstrap_recovery(
+    agent_dir: &Path,
+    conn: &right_db::Connection,
+    intent: &BootstrapFinalizationIntent,
+    verification: BootstrapVerification,
+) -> anyhow::Result<()> {
+    match verification {
         BootstrapVerification::Verified => {
             let session_id = match find_bootstrap_session_id(&conn, &intent).await? {
                 Some(session_id) => session_id,
@@ -1827,90 +1862,37 @@ async fn invoke_bootstrap_question_model(
         Some(Arc::clone(&ctx.debug)),
     );
     let claude_args = invocation.into_args();
-    let (sandbox_mode, home_dir) = if ctx.ssh_config_path.is_some() {
-        (
-            right_agent_config::SandboxMode::Openshell,
-            "/sandbox".to_owned(),
-        )
-    } else {
-        (
-            right_agent_config::SandboxMode::None,
-            ctx.agent_dir.to_string_lossy().into_owned(),
-        )
-    };
-    let base_prompt =
-        right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
+    let base_prompt = right_codegen::generate_system_prompt(&ctx.agent_name, "/sandbox");
     let prompt_mode = crate::cc::prompt::PromptMode::BootstrapQuestion(state);
-    let mut command = if let Some(ssh_config) = &ctx.ssh_config_path {
-        let sandbox = ctx
-            .resolved_sandbox
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("sandbox name is unresolved for bootstrap question"))?;
-        let mut script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            prompt_mode,
-            "/sandbox",
-            "/tmp/right-bootstrap-question-prompt.md",
-            "/sandbox",
-            &claude_args,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
-            script = format!(
-                "export CLAUDE_CODE_OAUTH_TOKEN='{}'\n{script}",
-                token.replace('\'', "'\\''")
-            );
-        }
-        let mut command = tokio::process::Command::new("ssh");
-        command
-            .arg("-F")
-            .arg(ssh_config)
-            .arg(right_openshell::openshell::ssh_host_for_sandbox(sandbox))
-            .arg("--")
-            .arg(script);
-        command
-    } else {
-        let agent_dir = ctx.agent_dir.to_string_lossy();
-        let prompt_path = ctx.agent_dir.join(".claude/bootstrap-question-prompt.md");
-        let script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            prompt_mode,
-            &agent_dir,
-            &prompt_path.to_string_lossy(),
-            &agent_dir,
-            &claude_args,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        let mut command = tokio::process::Command::new("bash");
-        command.arg("-c").arg(script).current_dir(&ctx.agent_dir);
-        command
-            .env("HOME", &ctx.agent_dir)
-            .env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
-            command.env("CLAUDE_CODE_OAUTH_TOKEN", token);
-        }
-        command
-    };
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let sandbox =
+        crate::cc::invocation::guard_no_sandboxed_host_exec(&ctx.agent_name, ctx.sandbox.as_ref())?;
+    let script = crate::cc::prompt::build_prompt_assembly_script(
+        &base_prompt,
+        prompt_mode,
+        "/sandbox",
+        &crate::cc::prompt::sandbox_prompt_file_path("bootstrap-question-prompt"),
+        "/sandbox",
+        &claude_args,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let command =
+        crate::cc::invocation::build_claude_script_command(script, &ctx.agent_db_dir, sandbox)
+            .await
+            .stdout(crate::cc::sandbox_process::Capture::Pipe)
+            .stderr(crate::cc::sandbox_process::Capture::Pipe)
+            .timeout(BOOTSTRAP_QUESTION_TIMEOUT);
     let output = tokio::time::timeout(BOOTSTRAP_QUESTION_TIMEOUT, command.output())
         .await
         .context("bootstrap question model timed out")?
         .context("run bootstrap question model")?;
-    if !output.status.success() {
+    if !output.success() {
         anyhow::bail!(
             "bootstrap question model exited {}: {}",
-            output.status,
+            output.code,
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -2273,7 +2255,7 @@ fn clear_foreground_handoff_controls(
 /// `SendError` and removes the entry + respawns (Pitfall 7 mitigation).
 pub fn spawn_worker(
     key: SessionKey,
-    ctx: WorkerContext,
+    mut ctx: WorkerContext,
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
 ) -> mpsc::Sender<DebounceMsg> {
     let (tx, mut rx) = mpsc::channel::<DebounceMsg>(32); // bounded — safe for debounce
@@ -2297,6 +2279,15 @@ pub fn spawn_worker(
             );
             let batch = collect_batch(first, &mut rx).await;
             super::wait_for_bg_handoff_gate(&ctx.bg_handoff_gates, key).await;
+            // Re-resolve the sandbox handle for this batch, after the debounce
+            // and handoff waits so the window between resolving and using it
+            // stays as small as possible. The supervisor publishes a NEW
+            // handle on recovery, so a snapshot taken when the worker spawned
+            // goes stale: a worker born during a degraded window would hold
+            // `None` forever and refuse every turn even after the backend came
+            // back, and one born while Ready would keep addressing a VM that
+            // recovery has since replaced.
+            ctx.sandbox = ctx.sandbox_runtime.current_sandbox();
             if ctx.shutdown.is_cancelled() {
                 tracing::warn!(
                     ?key,
@@ -2334,10 +2325,39 @@ pub fn spawn_worker(
                 reply_to_voice_markers: Vec<String>,
             }
 
-            // Download attachments for all messages in batch.
+            // Download attachments for all messages in batch. Inbound files are
+            // uploaded into the guest, so a degraded backend has nowhere to put
+            // them — refuse the batch instead of forwarding a message whose
+            // attachments silently vanished.
             let mut pending_inputs = Vec::with_capacity(batch.len());
             let mut skip_batch = false;
+            let batch_sandbox = match crate::cc::invocation::guard_no_sandboxed_host_exec(
+                &ctx.agent_name,
+                ctx.sandbox.as_ref(),
+            ) {
+                Ok(sandbox) => Some(sandbox),
+                Err(e) => {
+                    let has_attachments = batch.iter().any(|msg| {
+                        !msg.attachments.is_empty() || !msg.reply_to_attachments.is_empty()
+                    });
+                    if has_attachments {
+                        tracing::error!(?key, "attachment download refused: {e:#}");
+                        let _ = send_tg(
+                            &ctx.bot,
+                            tg_chat_id,
+                            eff_thread_id,
+                            "⚠️ The sandbox is unavailable, so attachments cannot be received.\nYour message was not forwarded.",
+                        )
+                        .await;
+                        skip_batch = true;
+                    }
+                    None
+                }
+            };
             for msg in &batch {
+                if skip_batch {
+                    break;
+                }
                 let (resolved, voice_markers) = if msg.attachments.is_empty() {
                     (vec![], vec![])
                 } else {
@@ -2346,8 +2366,7 @@ pub fn spawn_worker(
                         msg.message_id,
                         &ctx.bot,
                         &ctx.agent_dir,
-                        ctx.ssh_config_path.as_deref(),
-                        ctx.resolved_sandbox.as_deref(),
+                        batch_sandbox.expect("attachment batch holds a live sandbox"),
                         tg_chat_id,
                         eff_thread_id,
                         ctx.stt.as_deref(),
@@ -2379,8 +2398,7 @@ pub fn spawn_worker(
                         reply_to_msg_id,
                         &ctx.bot,
                         &ctx.agent_dir,
-                        ctx.ssh_config_path.as_deref(),
-                        ctx.resolved_sandbox.as_deref(),
+                        batch_sandbox.expect("attachment batch holds a live sandbox"),
                         tg_chat_id,
                         eff_thread_id,
                         ctx.stt.as_deref(),
@@ -2487,9 +2505,8 @@ pub fn spawn_worker(
             // its backend is unavailable (would otherwise execute on the host).
             {
                 use crate::sandbox_runtime::{GateDecision, sandbox_gate};
-                let is_sandboxed = ctx.resolved_sandbox.is_some();
                 if let GateDecision::Reply { diagnosis } =
-                    sandbox_gate(is_sandboxed, &ctx.sandbox_runtime.health())
+                    sandbox_gate(&ctx.sandbox_runtime.health())
                 {
                     ctx.sandbox_runtime.note_affected(tg_chat_id, eff_thread_id);
                     if let Err(e) = send_tg_html(
@@ -2510,6 +2527,36 @@ pub fn spawn_worker(
                 }
             }
 
+            // Check only local token presence and syntax before session preparation.
+            // The foreground turn itself is the sole runtime API validator.
+            match crate::keepalive::runtime_auth_status(&ctx.agent_db_dir).await {
+                Ok(crate::keepalive::RuntimeAuthStatus::Valid) => {}
+                Ok(crate::keepalive::RuntimeAuthStatus::Missing)
+                | Ok(crate::keepalive::RuntimeAuthStatus::Invalid) => {
+                    if let Err(error) = start_token_request(&ctx, tg_chat_id, eff_thread_id).await {
+                        tracing::warn!(
+                            ?key,
+                            "failed to start or remind about authentication: {error:#}"
+                        );
+                    }
+                    cancel_token.cancel();
+                    typing_task.await.ok();
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(?key, "Claude authentication status check failed: {error:#}");
+                    cancel_token.cancel();
+                    typing_task.await.ok();
+                    let _ = send_tg(
+                        &ctx.bot,
+                        tg_chat_id,
+                        eff_thread_id,
+                        "⚠️ Claude authentication could not be checked because the credential store is unavailable. Please try again.",
+                    )
+                    .await;
+                    continue;
+                }
+            }
             // Idle-compaction: any foreground turn is activity — cancel a
             // pending compaction so it cannot fire during this turn.
             crate::idle_compaction::cancel(&ctx.compact_timers, chat_id, eff_thread_id);
@@ -2604,6 +2651,7 @@ pub fn spawn_worker(
             // The completed interview keeps the bootstrap lock while preparing
             // and invoking its single finalization turn.
             let first_text = batch.first().and_then(|m| m.text.as_deref());
+
             let prepared =
                 match prepare_cc_invocation(&ctx.agent_dir, chat_id, eff_thread_id, first_text)
                     .await
@@ -2749,9 +2797,7 @@ pub fn spawn_worker(
                     Some(session_guard),
                 ),
                 Err(failure) => {
-                    if ctx.resolved_sandbox.is_some() {
-                        ctx.sandbox_runtime.report_suspected_failure();
-                    }
+                    ctx.sandbox_runtime.report_suspected_failure();
                     let uuid = match &failure {
                         InvokeCcFailure::Reflectable { session_uuid, .. } => session_uuid.clone(),
                         InvokeCcFailure::Backgrounded {
@@ -2787,8 +2833,9 @@ pub fn spawn_worker(
             if bootstrap_mode && reply_result.is_err() {
                 tracing::debug!(?key, "bootstrap invocation failed; preserving marker");
             }
-            if ctx.ssh_config_path.is_some() && !bootstrap_mode {
-                let sandbox = ctx.resolved_sandbox.clone().unwrap();
+            if let Some(sandbox) = ctx.sandbox.clone()
+                && !bootstrap_mode
+            {
                 let agent_dir = ctx.agent_dir.clone();
                 let agent_name = ctx.agent_name.clone();
                 tokio::spawn(async move {
@@ -2937,8 +2984,7 @@ pub fn spawn_worker(
                             limits: crate::reflection::ReflectionLimits::NULL_REPAIR,
                             agent_name: ctx.agent_name.clone(),
                             agent_dir: ctx.agent_dir.clone(),
-                            ssh_config_path: ctx.ssh_config_path.clone(),
-                            resolved_sandbox: ctx.resolved_sandbox.clone(),
+                            sandbox: ctx.sandbox.clone(),
                             parent_source: crate::reflection::ParentSource::Worker {
                                 chat_id,
                                 thread_id: eff_thread_id,
@@ -3121,8 +3167,11 @@ pub fn spawn_worker(
 
                     // Send outbound attachments
                     #[allow(clippy::collapsible_if)]
+                    // Outbound attachments live in the guest outbox; without a
+                    // live sandbox there is nothing to fetch them from.
                     if let Some(ref atts) = output.attachments
                         && !atts.is_empty()
+                        && let Some(sandbox) = ctx.sandbox.as_ref()
                     {
                         if let Err(e) = super::attachments::send_attachments(
                             atts,
@@ -3130,8 +3179,7 @@ pub fn spawn_worker(
                             tg_chat_id,
                             eff_thread_id,
                             &ctx.agent_dir,
-                            ctx.ssh_config_path.as_deref(),
-                            ctx.resolved_sandbox.as_deref(),
+                            sandbox,
                         )
                         .await
                         {
@@ -3230,8 +3278,7 @@ pub fn spawn_worker(
                         limits: crate::reflection::ReflectionLimits::WORKER,
                         agent_name: ctx.agent_name.clone(),
                         agent_dir: ctx.agent_dir.clone(),
-                        ssh_config_path: ctx.ssh_config_path.clone(),
-                        resolved_sandbox: ctx.resolved_sandbox.clone(),
+                        sandbox: ctx.sandbox.clone(),
                         parent_source: crate::reflection::ParentSource::Worker {
                             chat_id,
                             thread_id: eff_thread_id,
@@ -3459,9 +3506,8 @@ pub fn spawn_worker(
                         ctx.agent_dir.clone(),
                         ctx.agent_name.clone(),
                         crate::snapshot_model(&ctx.model),
-                        ctx.ssh_config_path.clone(),
+                        ctx.sandbox.clone(),
                         Arc::clone(&ctx.internal_client),
-                        ctx.resolved_sandbox.clone(),
                         Arc::clone(&ctx.upgrade_lock),
                         session_guard,
                         Arc::clone(&ctx.debug),
@@ -3516,8 +3562,7 @@ pub fn spawn_worker(
                     agent_dir: ctx.agent_dir.clone(),
                     agent_db_dir: ctx.agent_db_dir.clone(),
                     agent_name: ctx.agent_name.clone(),
-                    ssh_config_path: ctx.ssh_config_path.clone(),
-                    resolved_sandbox: ctx.resolved_sandbox.clone(),
+                    sandbox: ctx.sandbox.clone(),
                     internal_client: Arc::clone(&ctx.internal_client),
                     session_locks: ctx.session_locks.clone(),
                     debug_flag: Arc::clone(&ctx.debug),
@@ -3546,8 +3591,7 @@ pub fn spawn_worker(
                     agent_dir: ctx.agent_dir.clone(),
                     agent_db_dir: ctx.agent_db_dir.clone(),
                     agent_name: ctx.agent_name.clone(),
-                    ssh_config_path: ctx.ssh_config_path.clone(),
-                    resolved_sandbox: ctx.resolved_sandbox.clone(),
+                    sandbox: ctx.sandbox.clone(),
                     session_locks: ctx.session_locks.clone(),
                     debug: Arc::clone(&ctx.debug),
                     chat_id,
@@ -3665,22 +3709,57 @@ pub(crate) async fn send_tg_html(
     send_tg_inner(bot, chat_id, eff_thread_id, text, true).await
 }
 
-/// Spawn a background task that requests a setup-token from the user.
-///
-/// 1. Sends instruction to user via Telegram.
-/// 2. Waits for token from Telegram message intercept.
-/// 3. Saves token to data.db.
-fn spawn_token_request(ctx: &WorkerContext, tg_chat_id: i64, eff_thread_id: i64) {
+/// Atomically start a setup-token request, or remind this conversation where
+/// the existing request must be completed.
+async fn start_token_request(
+    ctx: &WorkerContext,
+    tg_chat_id: i64,
+    eff_thread_id: i64,
+) -> Result<(), super::tg_bot::TgError> {
+    let scope = super::handler::AuthRequestScope::new(tg_chat_id, eff_thread_id);
+    let start = ctx.pending_auth.lock().await.start_if_idle(scope);
+    match start {
+        super::handler::AuthRequestStart::Started {
+            request_id,
+            receiver,
+        } => {
+            spawn_token_request(ctx, scope, request_id, receiver);
+            Ok(())
+        }
+        super::handler::AuthRequestStart::AlreadyPending { owner } => {
+            let message = if owner == scope {
+                "Authentication setup is already pending in this conversation. Send the setup token here."
+            } else {
+                "Authentication setup is already pending in another conversation. Complete it there before trying again."
+            };
+            send_tg(&ctx.bot, tg_chat_id, eff_thread_id, message).await
+        }
+    }
+}
+
+/// Spawn the owner task for an already-reserved setup-token request.
+/// The reservation is installed before this function can send instructions, so
+/// even an immediate Telegram reply reaches the correct receiver. This task
+/// owns both the bounded token wait and subsequent persistence.
+fn spawn_token_request(
+    ctx: &WorkerContext,
+    scope: super::handler::AuthRequestScope,
+    request_id: u64,
+    token_rx: tokio::sync::oneshot::Receiver<String>,
+) {
     let agent_name = ctx.agent_name.clone();
     let bot = ctx.bot.clone();
     let agent_db_dir = ctx.agent_db_dir.clone();
-    let active_flag = Arc::clone(&ctx.auth_watcher_active);
-    let auth_code_tx_slot = Arc::clone(&ctx.auth_code_tx);
+    let pending_auth = Arc::clone(&ctx.pending_auth);
+    let shutdown = ctx.shutdown.clone();
 
     tokio::spawn(async move {
-        // Send instruction to user (with HTML parse mode for <pre> formatting)
+        const TOKEN_SUBMISSION_TIMEOUT: Duration = Duration::from_secs(300);
+
+        let tg_chat_id = scope.chat_id;
+        let eff_thread_id = scope.effective_thread_id;
         let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
-        let send_result = bot
+        if let Err(e) = bot
             .send_message_opts(
                 tg_chat_id,
                 crate::login::auth_instruction_message(),
@@ -3689,69 +3768,110 @@ fn spawn_token_request(ctx: &WorkerContext, tg_chat_id: i64, eff_thread_id: i64)
                 None,
                 None,
             )
-            .await;
-        if let Err(e) = send_result {
+            .await
+        {
             tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
-            active_flag.store(false, Ordering::SeqCst);
+            pending_auth.lock().await.cleanup_if_owned(request_id);
             return;
         }
 
-        // Create channel for token from Telegram
-        let (token_tx, token_rx) = tokio::sync::oneshot::channel::<String>();
-        auth_code_tx_slot.lock().await.replace(token_tx);
-
-        // Create event channel
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::login::LoginEvent>(4);
-
-        // Spawn token request task
-        let agent_for_login = agent_name.clone();
-        tokio::spawn(async move {
-            crate::login::request_token(&agent_db_dir, &agent_for_login, event_tx, token_rx).await;
-        });
-
-        // Process events with timeout
-        let timeout = tokio::time::sleep(Duration::from_secs(300));
-        tokio::pin!(timeout);
-
-        tokio::select! {
-            event = event_rx.recv() => {
-                match event {
-                    Some(crate::login::LoginEvent::Done) => {
+        let token = tokio::select! {
+            () = shutdown.cancelled() => None,
+            result = tokio::time::timeout(TOKEN_SUBMISSION_TIMEOUT, token_rx) => {
+                match result {
+                    Ok(Ok(token)) => Some(token),
+                    Ok(Err(_)) => {
+                        tracing::warn!(agent = %agent_name, "token request: token channel closed");
                         if let Err(e) = send_tg(
-                            &bot, tg_chat_id, eff_thread_id,
-                            "Token saved. You can continue chatting.",
+                            &bot,
+                            tg_chat_id,
+                            eff_thread_id,
+                            "Token setup was cancelled. Send another message to retry.",
                         ).await {
                             tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
                         }
+                        None
                     }
-                    Some(crate::login::LoginEvent::Error(msg)) => {
-                        tracing::error!(agent = %agent_name, "token request: {msg}");
+                    Err(_) => {
+                        tracing::warn!(agent = %agent_name, "token request: timed out after 5 min");
                         if let Err(e) = send_tg(
-                            &bot, tg_chat_id, eff_thread_id,
-                            &format!("Token setup failed: {msg}"),
+                            &bot,
+                            tg_chat_id,
+                            eff_thread_id,
+                            "Token request timed out after 5 minutes. Send another message to retry.",
                         ).await {
                             tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
                         }
-                    }
-                    None => {
-                        tracing::info!(agent = %agent_name, "token request: task exited");
+                        None
                     }
                 }
             }
-            _ = &mut timeout => {
-                tracing::warn!(agent = %agent_name, "token request: timed out after 5 min");
-                if let Err(e) = send_tg(
-                    &bot, tg_chat_id, eff_thread_id,
-                    "Token request timed out after 5 minutes. Send another message to retry.",
-                ).await {
-                    tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
+        };
+
+        if let Some(token) = token {
+            let (event_tx, mut event_rx) =
+                tokio::sync::mpsc::channel::<crate::login::LoginEvent>(4);
+            let login =
+                crate::login::validate_submitted_token(&agent_db_dir, &agent_name, event_tx, token);
+            let events = async {
+                loop {
+                    match event_rx.recv().await {
+                        Some(crate::login::LoginEvent::Saving(delivered)) => {
+                            match send_tg(&bot, tg_chat_id, eff_thread_id, "Saving token…").await
+                            {
+                                Ok(()) => {
+                                    if delivered.send(()).is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
+                                    break;
+                                }
+                            }
+                        }
+                        Some(crate::login::LoginEvent::Done) => {
+                            if let Err(e) = send_tg(
+                                &bot,
+                                tg_chat_id,
+                                eff_thread_id,
+                                "Token saved. Send your message again.",
+                            )
+                            .await
+                            {
+                                tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
+                            }
+                            break;
+                        }
+                        Some(crate::login::LoginEvent::Error(msg)) => {
+                            tracing::error!(agent = %agent_name, "token request: {msg}");
+                            if let Err(e) = send_tg(
+                                &bot,
+                                tg_chat_id,
+                                eff_thread_id,
+                                &format!("Token setup failed: {msg}"),
+                            )
+                            .await
+                            {
+                                tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
+                            }
+                            break;
+                        }
+                        None => {
+                            tracing::info!(agent = %agent_name, "token request: task exited");
+                            break;
+                        }
+                    }
                 }
+            };
+
+            tokio::select! {
+                () = shutdown.cancelled() => {}
+                _ = async { tokio::join!(login, events); } => {}
             }
         }
 
-        // Cleanup
-        auth_code_tx_slot.lock().await.take();
-        active_flag.store(false, Ordering::SeqCst);
+        pending_auth.lock().await.cleanup_if_owned(request_id);
     });
 }
 
@@ -3946,8 +4066,7 @@ async fn start_progress_invocation(
             chat_id,
             thread_id: eff_thread_id,
             agent_dir: ctx.agent_dir.clone(),
-            ssh_config_path: ctx.ssh_config_path.clone(),
-            resolved_sandbox: ctx.resolved_sandbox.clone(),
+            sandbox: ctx.sandbox.clone(),
             channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         });
 
@@ -3975,33 +4094,23 @@ async fn start_progress_invocation(
             }
         };
 
-    let (claude_mcp_config_path, sandbox_mcp_config_path) = if ctx.ssh_config_path.is_some() {
-        let Some(sandbox) = ctx.resolved_sandbox.as_deref() else {
-            tracing::warn!(
-                invocation_id,
-                "progress disabled: sandbox name is unresolved"
-            );
-            cleanup_partial_progress(ctx, &invocation_id, Some(&local_mcp_config_path)).await;
-            return None;
-        };
-        if let Err(e) = right_openshell::openshell::upload_file(
-            sandbox,
-            &local_mcp_config_path,
-            "/sandbox/.claude/",
-        )
-        .await
-        {
-            tracing::warn!(invocation_id, "progress MCP config upload failed: {e:#}");
-            // Upload failed → no sandbox-side file landed; only the host
-            // file needs cleanup.
-            cleanup_partial_progress(ctx, &invocation_id, Some(&local_mcp_config_path)).await;
-            return None;
-        }
-        let sandbox_path = progress_sandbox_mcp_path(&invocation_id);
-        (sandbox_path.clone(), Some(sandbox_path))
-    } else {
-        (local_mcp_config_path.to_string_lossy().into_owned(), None)
+    let Some(sandbox) = ctx.sandbox.as_ref() else {
+        tracing::warn!(invocation_id, "progress disabled: sandbox unavailable");
+        cleanup_partial_progress(ctx, &invocation_id, Some(&local_mcp_config_path)).await;
+        return None;
     };
+    if let Err(e) =
+        crate::sandbox::upload_into_dir(sandbox, &local_mcp_config_path, "/sandbox/.claude").await
+    {
+        tracing::warn!(invocation_id, "progress MCP config upload failed: {e:#}");
+        // Upload failed → no guest-side file landed; only the host file needs
+        // cleanup.
+        cleanup_partial_progress(ctx, &invocation_id, Some(&local_mcp_config_path)).await;
+        return None;
+    }
+    let sandbox_path = progress_sandbox_mcp_path(&invocation_id);
+    let (claude_mcp_config_path, sandbox_mcp_config_path) =
+        (sandbox_path.clone(), Some(sandbox_path));
 
     Some(ActiveProgressInvocation {
         invocation_id,
@@ -4030,11 +4139,7 @@ async fn finish_progress_invocation(ctx: &WorkerContext, active: ActiveProgressI
     unregister_progress(ctx, &active.invocation_id).await;
     remove_progress_config_file(&active.local_mcp_config_path);
     if let Some(sandbox_path) = active.sandbox_mcp_config_path {
-        spawn_sandbox_progress_cleanup(
-            active.invocation_id,
-            ctx.resolved_sandbox.clone(),
-            sandbox_path,
-        );
+        spawn_sandbox_progress_cleanup(active.invocation_id, ctx.sandbox.clone(), sandbox_path);
     }
 }
 
@@ -4046,11 +4151,11 @@ async fn finish_progress_invocation(ctx: &WorkerContext, active: ActiveProgressI
 /// best-effort, so we spawn-and-forget and log failures via `tracing::warn!`.
 fn spawn_sandbox_progress_cleanup(
     invocation_id: String,
-    sandbox_name: Option<String>,
+    sandbox: Option<crate::sandbox::Sandbox>,
     sandbox_path: String,
 ) {
     std::mem::drop(tokio::spawn(async move {
-        remove_sandbox_progress_config_file(invocation_id, sandbox_name, sandbox_path).await;
+        remove_sandbox_progress_config_file(invocation_id, sandbox, sandbox_path).await;
     }));
 }
 
@@ -4093,79 +4198,23 @@ fn remove_progress_config_file(path: &Path) {
 /// can run inside a detached `tokio::spawn` without borrowing `WorkerContext`.
 async fn remove_sandbox_progress_config_file(
     invocation_id: String,
-    sandbox_name: Option<String>,
+    sandbox: Option<crate::sandbox::Sandbox>,
     sandbox_path: String,
 ) {
-    let Some(sandbox_name) = sandbox_name else {
+    let Some(sandbox) = sandbox else {
         tracing::warn!(
             invocation_id,
             sandbox_path,
-            "sandbox progress MCP config cleanup skipped: sandbox name unresolved"
+            "sandbox progress MCP config cleanup skipped: sandbox unavailable"
         );
         return;
     };
-    let mtls_dir = match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-        status => {
-            tracing::warn!(
-                invocation_id,
-                sandbox_path,
-                ?status,
-                "sandbox progress MCP config cleanup skipped: OpenShell preflight not Ready"
-            );
-            return;
-        }
-    };
-    let mut client = match right_openshell::openshell::connect_grpc(&mtls_dir).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                invocation_id,
-                sandbox_path,
-                "sandbox progress MCP config cleanup gRPC connect failed: {e:#}"
-            );
-            return;
-        }
-    };
-    // `exec_in_sandbox` wants a sandbox id, not a name — resolve it via gRPC.
-    let sandbox_id =
-        match right_openshell::openshell::resolve_sandbox_id(&mut client, &sandbox_name).await {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(
-                    invocation_id,
-                    sandbox_path,
-                    sandbox_name,
-                    "sandbox progress MCP config cleanup sandbox-id resolve failed: {e:#}"
-                );
-                return;
-            }
-        };
-    match right_openshell::openshell::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
-        &["rm", "-f", &sandbox_path],
-        right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
-    )
-    .await
-    {
-        Ok((_, 0)) => {}
-        Ok((stdout, exit_code)) => {
-            tracing::warn!(
-                invocation_id,
-                sandbox_path,
-                exit_code,
-                stdout = %stdout,
-                "sandbox progress MCP config cleanup exited non-zero"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                invocation_id,
-                sandbox_path,
-                "sandbox progress MCP config cleanup exec failed: {e:#}"
-            );
-        }
+    if let Err(e) = sandbox.fs_remove(&sandbox_path).await {
+        tracing::warn!(
+            invocation_id,
+            sandbox_path,
+            "sandbox progress MCP config cleanup failed: {e:#}"
+        );
     }
 }
 
@@ -4246,12 +4295,7 @@ async fn invoke_cc(
         active_progress
             .as_ref()
             .map(|active| active.claude_mcp_config_path.clone())
-            .unwrap_or_else(|| {
-                crate::cc::invocation::mcp_config_path(
-                    ctx.ssh_config_path.as_deref(),
-                    &ctx.agent_dir,
-                )
-            }),
+            .unwrap_or_else(|| crate::sandbox::SANDBOX_MCP_JSON_PATH.to_owned()),
     );
 
     let mut invocation = crate::cc::invocation::ClaudeInvocation {
@@ -4303,24 +4347,12 @@ async fn invoke_cc(
 
     // Generate base system prompt (identity-neutral — no agent name to avoid
     // contradicting IDENTITY.md which the agent may have customized).
-    let (sandbox_mode, home_dir) = if ctx.ssh_config_path.is_some() {
-        (
-            right_agent::agent::types::SandboxMode::Openshell,
-            "/sandbox".to_owned(),
-        )
-    } else {
-        (
-            right_agent::agent::types::SandboxMode::None,
-            ctx.agent_dir.to_string_lossy().into_owned(),
-        )
-    };
     let repair_notice = if bootstrap_mode {
         None
     } else {
         ctx.claude_health.consume_repair_notice()
     };
-    let base_prompt =
-        right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
+    let base_prompt = right_codegen::generate_system_prompt(&ctx.agent_name, "/sandbox");
 
     let session_key: SessionKey = (chat_id, eff_thread_id);
     let (operator_focus, agent_focus) = if bootstrap_mode {
@@ -4521,23 +4553,26 @@ async fn invoke_cc(
         entry.lock_owned().await
     };
 
-    if let Err(e) = crate::cc::invocation::guard_no_sandboxed_host_exec(
-        ctx.resolved_sandbox.as_deref(),
-        ctx.ssh_config_path.as_deref(),
+    let sandbox = match crate::cc::invocation::guard_no_sandboxed_host_exec(
+        &ctx.agent_name,
+        ctx.sandbox.as_ref(),
     ) {
-        cleanup_prepared_first_call_session(
-            conn,
-            chat_id,
-            eff_thread_id,
-            is_first_call,
-            &session_uuid,
-        )
-        .await;
-        if let Some(active) = active_progress.take() {
-            finish_progress_invocation(ctx, active).await;
+        Ok(sandbox) => sandbox,
+        Err(e) => {
+            cleanup_prepared_first_call_session(
+                conn,
+                chat_id,
+                eff_thread_id,
+                is_first_call,
+                &session_uuid,
+            )
+            .await;
+            if let Some(active) = active_progress.take() {
+                finish_progress_invocation(ctx, active).await;
+            }
+            return Err(format!("{e:#}").into());
         }
-        return Err(format!("{e:#}").into());
-    }
+    };
 
     // Per-agent notice token for the trusted `## Platform Notice Token` prompt
     // section, so the agent can verify SYSTEM_NOTICE markers.
@@ -4559,85 +4594,32 @@ async fn invoke_cc(
         }
     };
 
-    let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
-        // OpenShell sandbox: composite system prompt assembled IN the sandbox
-        // from fresh files — single SSH command, no extra roundtrips.
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(
-            ctx.resolved_sandbox.as_deref().unwrap(),
-        );
-        let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            prompt_mode.clone(),
-            "/sandbox",
-            &format!("/tmp/right-system-prompt-{session_uuid}.md"),
-            "/sandbox",
-            &claude_args,
-            mcp_instructions.as_deref(),
-            memory_mode.as_ref(),
-            Some(chat_context_block.as_str()),
-            operator_focus_section.as_deref(),
-            Some(&notice_token),
-        );
-        // Inject auth token as env var in the remote shell
-        if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
-            let escaped_token = token.replace('\'', "'\\''");
-            assembly_script =
-                format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped_token}'\n{assembly_script}");
-        }
-        let mut c = tokio::process::Command::new("ssh");
-        c.arg("-F").arg(ssh_config);
-        // Opt out of multiplexing for the long-lived `claude -p` channel.
-        // In multiplex mode the slave forwards stdin/stdout/stderr FDs to the
-        // master via SCM_RIGHTS; SIGKILLing the slave on deadline leaves the
-        // master holding those FDs until the remote command exits, hanging
-        // the bot's post-kill stderr read indefinitely. The handshake savings
-        // ControlMaster offers are noise next to a turn that lasts seconds to
-        // minutes — so for this one call site we connect directly. Short ssh
-        // calls (mkdir, attachments, ssh_exec) keep using the master.
-        c.arg("-o").arg("ControlMaster=no");
-        c.arg("-o").arg("ControlPath=none");
-        c.arg(&ssh_host);
-        c.arg("--");
-        c.arg(assembly_script);
-        c
-    } else {
-        // No-sandbox: same shell template, paths point to host agent_dir.
-        let agent_dir_str = ctx.agent_dir.to_string_lossy();
-        let prompt_path = ctx
-            .agent_dir
-            .join(".claude")
-            .join(format!("composite-system-prompt-{session_uuid}.md"));
-        let prompt_path_str = prompt_path.to_string_lossy();
-        let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            prompt_mode.clone(),
-            &agent_dir_str,
-            &prompt_path_str,
-            &agent_dir_str,
-            &claude_args,
-            mcp_instructions.as_deref(),
-            memory_mode.as_ref(),
-            Some(chat_context_block.as_str()),
-            operator_focus_section.as_deref(),
-            Some(&notice_token),
-        );
+    // Composite system prompt assembled IN the guest from fresh files — one
+    // guest command, no extra roundtrips.
+    let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
+        &base_prompt,
+        prompt_mode.clone(),
+        "/sandbox",
+        &crate::cc::prompt::sandbox_prompt_file_path("system-prompt"),
+        "/sandbox",
+        &claude_args,
+        mcp_instructions.as_deref(),
+        memory_mode.as_ref(),
+        Some(chat_context_block.as_str()),
+        operator_focus_section.as_deref(),
+        Some(&notice_token),
+    );
+    let command = crate::cc::invocation::build_claude_script_command(
+        assembly_script,
+        &ctx.agent_db_dir,
+        sandbox,
+    )
+    .await
+    .stdin_piped()
+    .stdout(crate::cc::sandbox_process::Capture::Pipe)
+    .stderr(crate::cc::sandbox_process::Capture::Pipe);
 
-        let mut c = tokio::process::Command::new("bash");
-        c.arg("-c");
-        c.arg(&assembly_script);
-        c.env("HOME", &ctx.agent_dir);
-        c.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
-            c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
-        }
-        c.current_dir(&ctx.agent_dir);
-        c
-    };
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let sandboxed = ctx.ssh_config_path.is_some();
+    let sandboxed = true;
     let log_ctx = InvocationLogContext::new(chat_id, eff_thread_id, session_uuid.clone(), turn_id);
     let stop_token =
         register_stop_token_for_foreground(&ctx.stop_tokens, (chat_id, eff_thread_id), turn_id);
@@ -4760,7 +4742,7 @@ async fn invoke_cc(
     }
 
     let turn_started_at = std::time::Instant::now();
-    let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
+    let mut child = match command.spawn().await {
         Ok(child) => child,
         Err(e) => {
             tracing::error!(
@@ -4795,15 +4777,27 @@ async fn invoke_cc(
 
     let mut timed_out = false;
     let mut stopped = false;
+    let mut startup_auth_timeout = false;
     let mut schema_run = SchemaRejectionRun::default();
     let mut schema_loop_detected = false;
     // Set once stdin (carrying the volatile prefix's memory-status marker) is
     // fully written; gates the deferred edge-trigger commit below.
     let mut input_delivered = false;
+    // The initial 20-second guard covers transport delivery as well as the
+    // first model API progress. A delivery stall is a transport failure, not
+    // evidence that credentials need recovery.
+    let foreground_api_progress_deadline =
+        tokio::time::Instant::now() + FOREGROUND_API_PROGRESS_TIMEOUT;
 
-    // Write input to stdin, then drop to signal EOF.
-    if let Some(mut stdin) = child.stdin() {
-        use tokio::io::AsyncWriteExt;
+    // Deliver the complete input and guest EOF as one cancellation-safe unit.
+    // `stdin` is already detached from `child`, so the child remains available
+    // for termination while write/close is pending.
+    let delivery_failure = if let Some(mut stdin) = child.stdin() {
+        let delivery = async move {
+            stdin.write_all(effective_input.as_bytes()).await?;
+            stdin.close().await
+        };
+        tokio::pin!(delivery);
         tokio::select! {
             biased;
             _ = stop_token.cancelled() => {
@@ -4814,44 +4808,59 @@ async fn invoke_cc(
                     key = ?log_ctx.key(),
                     session_uuid = %log_ctx.session_uuid,
                     turn_id = log_ctx.turn_id,
-                    child_pid = child.id(),
-                    "stop_token cancelled during stdin write -- sending SIGKILL to claude -p",
+                    child_pid = child.pid(),
+                    "stop_token cancelled during stdin delivery -- sending SIGKILL to claude -p",
                 );
-                child.kill().await.ok();
+                child.kill().await;
+                None
             }
-            result = stdin.write_all(effective_input.as_bytes()) => {
-                if let Err(e) = result {
-                    tracing::error!(
-                        chat_id = log_ctx.chat_id,
-                        eff_thread_id = log_ctx.eff_thread_id,
-                        key = ?log_ctx.key(),
-                        session_uuid = %log_ctx.session_uuid,
-                        turn_id = log_ctx.turn_id,
-                        "stdin write failed: {e:#}"
-                    );
-                    clear_foreground_handoff_controls(
-                        &ctx.stop_tokens,
-                        &ctx.bg_requests,
-                        &ctx.bg_handoff_gates,
-                        (chat_id, eff_thread_id),
-                        turn_id,
-                    );
-                    if let Some(active) = active_progress.take() {
-                        finish_progress_invocation(ctx, active).await;
-                    }
-                    cleanup_prepared_first_call_session(
-                        conn,
-                        chat_id,
-                        eff_thread_id,
-                        is_first_call,
-                        &session_uuid,
-                    )
-                    .await;
-                    return Err(format_error_reply(-1, &format!("stdin write failed: {:#}", e)).into());
+            result = &mut delivery => match result {
+                Ok(()) => {
+                    input_delivered = true;
+                    None
                 }
-                input_delivered = true;
+                Err(error) => {
+                    child.kill().await;
+                    Some(format!("stdin delivery failed: {error:#}"))
+                }
+            },
+            _ = tokio::time::sleep_until(foreground_api_progress_deadline) => {
+                child.kill().await;
+                stdin_delivery_timeout_detail(input_delivered)
             }
         }
+    } else {
+        Some("stdin delivery failed: no stdin handle".to_string())
+    };
+
+    if let Some(detail) = delivery_failure {
+        tracing::error!(
+            chat_id = log_ctx.chat_id,
+            eff_thread_id = log_ctx.eff_thread_id,
+            key = ?log_ctx.key(),
+            session_uuid = %log_ctx.session_uuid,
+            turn_id = log_ctx.turn_id,
+            "{detail}"
+        );
+        clear_foreground_handoff_controls(
+            &ctx.stop_tokens,
+            &ctx.bg_requests,
+            &ctx.bg_handoff_gates,
+            (chat_id, eff_thread_id),
+            turn_id,
+        );
+        if let Some(active) = active_progress.take() {
+            finish_progress_invocation(ctx, active).await;
+        }
+        cleanup_prepared_first_call_session(
+            conn,
+            chat_id,
+            eff_thread_id,
+            is_first_call,
+            &session_uuid,
+        )
+        .await;
+        return Err(format_error_reply(-1, &detail).into());
     }
 
     // The memory-status marker is now in the agent's stdin, so commit the
@@ -4970,6 +4979,7 @@ async fn invoke_cc(
     last_edit = tokio::time::Instant::now();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(CC_TIMEOUT_SECS);
+    let mut saw_api_progress = false;
     loop {
         tokio::select! {
             line_result = lines.next_line() => {
@@ -4998,6 +5008,7 @@ async fn invoke_cc(
                         }
 
                         let event = crate::cc::stream::parse_stream_event(&line);
+                        saw_api_progress |= stream_event_is_api_progress(&event);
 
                         // Null-repair evidence: track the last assistant text block
                         // and any send_message call across ALL content blocks
@@ -5034,7 +5045,7 @@ async fn invoke_cc(
                         }
                         if schema_tripped {
                             schema_loop_detected = true;
-                            child.kill().await.ok();
+                            child.kill().await;
                             break;
                         }
 
@@ -5100,6 +5111,9 @@ async fn invoke_cc(
                                     usage.num_turns = usage.num_turns.max(1);
                                 }
                             }
+                        }
+                        if stream_event_is_terminal(&event) {
+                            break;
                         }
 
                         // Thinking message: always send (Stop button anchor).
@@ -5171,6 +5185,21 @@ async fn invoke_cc(
                     }
                 }
             }
+            _ = tokio::time::sleep_until(foreground_api_progress_deadline), if !saw_api_progress && !stopped => {
+                startup_auth_timeout = should_recover_auth(input_delivered, saw_api_progress, true);
+                tracing::warn!(
+                    chat_id = log_ctx.chat_id,
+                    eff_thread_id = log_ctx.eff_thread_id,
+                    key = ?log_ctx.key(),
+                    session_uuid = %log_ctx.session_uuid,
+                    turn_id = log_ctx.turn_id,
+                    child_pid = child.pid(),
+                    timeout_secs = FOREGROUND_API_PROGRESS_TIMEOUT.as_secs(),
+                    "foreground produced no API progress before initial deadline; starting auth recovery",
+                );
+                child.kill().await;
+                break;
+            }
             _ = tokio::time::sleep_until(deadline) => {
                 timed_out = true;
                 tracing::warn!(
@@ -5179,11 +5208,11 @@ async fn invoke_cc(
                     key = ?log_ctx.key(),
                     session_uuid = %log_ctx.session_uuid,
                     turn_id = log_ctx.turn_id,
-                    child_pid = child.id(),
+                    child_pid = child.pid(),
                     "deadline fired ({}s) — sending SIGKILL to claude -p",
                     CC_TIMEOUT_SECS,
                 );
-                child.kill().await.ok();
+                child.kill().await;
                 break;
             }
             _ = stop_token.cancelled() => {
@@ -5194,13 +5223,20 @@ async fn invoke_cc(
                     key = ?log_ctx.key(),
                     session_uuid = %log_ctx.session_uuid,
                     turn_id = log_ctx.turn_id,
-                    child_pid = child.id(),
+                    child_pid = child.pid(),
                     "stop_token cancelled — sending SIGKILL to claude -p",
                 );
-                child.kill().await.ok();
+                child.kill().await;
                 break;
             }
         }
+    }
+
+    // A terminal stream-json result is the completion contract. The SDK may
+    // never emit Exited or close its stream afterward, so explicitly close the
+    // guest exec session before the existing bounded wait/drop cleanup.
+    if result_line.is_some() {
+        child.kill().await;
     }
 
     // Post-break cleanup. ProcessGroupChild::Drop kills the slave's group on
@@ -5209,7 +5245,7 @@ async fn invoke_cc(
     // subprocess plumbing changes, the master could once again hold the slave's
     // pipe FDs and stall these reads. The bounds keep the worker walking even
     // if that recurs, and the structured logs make the recurrence visible.
-    let child_pid = child.id();
+    let child_pid = child.pid();
 
     let wait_started = tokio::time::Instant::now();
     let exit_status = match tokio::time::timeout(
@@ -5245,7 +5281,8 @@ async fn invoke_cc(
             None
         }
     };
-    let exit_code = exit_status.and_then(|s| s.code()).unwrap_or(-1);
+    let actual_exit_code = exit_status;
+    let exit_code = effective_exit_code(result_line.as_deref(), actual_exit_code);
     tracing::debug!(
         chat_id = log_ctx.chat_id,
         eff_thread_id = log_ctx.eff_thread_id,
@@ -5254,6 +5291,7 @@ async fn invoke_cc(
         turn_id = log_ctx.turn_id,
         child_pid,
         exit_code,
+        actual_exit_code = ?actual_exit_code,
         wait_ms = wait_started.elapsed().as_millis() as u64,
         "post-break: child waited",
     );
@@ -5308,7 +5346,7 @@ async fn invoke_cc(
                 );
             }
             Err(_) => {
-                tracing::error!(
+                tracing::debug!(
                     chat_id = log_ctx.chat_id,
                     eff_thread_id = log_ctx.eff_thread_id,
                     key = ?log_ctx.key(),
@@ -5317,7 +5355,7 @@ async fn invoke_cc(
                     child_pid,
                     bytes_so_far = buf.len(),
                     elapsed_ms = read_started.elapsed().as_millis() as u64,
-                    "stderr read timed out — pipe write-end held by another process (ssh master forwarding?)",
+                    "post-break: stderr drain timed out (transport keeps the pipe open after the terminal result; benign)",
                 );
             }
         }
@@ -5384,10 +5422,10 @@ async fn invoke_cc(
     // If we're about to return a Reflectable, spawn_worker will edit the
     // thinking message into a banner — skip the cost/turns finalization here
     // to avoid a visible flash of the final summary before the banner.
-    let will_reflect = exit_code != 0 && !is_auth_error(&stdout_str);
+    let will_reflect = !startup_auth_timeout && exit_code != 0 && !is_auth_error(&stdout_str);
     // Backgrounding paths (user-requested via bg button, or auto-timeout) also
     // hand the thinking message off to spawn_worker for the bg banner edit.
-    let will_background = was_bg_request || timed_out;
+    let will_background = !startup_auth_timeout && (was_bg_request || timed_out);
 
     // Final thinking message update based on completion mode.
     if let Some(msg_id) = thinking_msg_id {
@@ -5422,6 +5460,36 @@ async fn invoke_cc(
         }
         // When will_reflect is true, DO NOT touch the thinking message here —
         // spawn_worker will edit it into a banner.
+    }
+
+    // A startup without model API progress is treated as credential recovery,
+    // never as background work: expired setup tokens can emit system/init and
+    // then retry indefinitely without reaching the API.
+    if startup_auth_timeout {
+        super::release_bg_handoff_gate(&ctx.bg_handoff_gates, (chat_id, eff_thread_id));
+        deactivate_session_if_active(conn, chat_id, eff_thread_id, &session_uuid)
+            .await
+            .map_err(|error| {
+                format!("deactivate foreground invocation during startup auth recovery: {error:#}")
+            })?;
+        start_token_request(ctx, ctx.chat_id, ctx.effective_thread_id)
+            .await
+            .map_err(|error| {
+                format!("start setup-token request after API-progress timeout: {error:#}")
+            })?;
+        return Ok(CcReply {
+            output: None,
+            session_uuid,
+            turn_id,
+            is_first_call,
+            prompt_mode,
+            usage: usage.clone(),
+            wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
+            learning_invocation_id: learning_invocation_id.clone(),
+            last_assistant_text: None,
+            send_message_used: false,
+            session_guard,
+        });
     }
 
     // Handle user-requested backgrounding — must come BEFORE the `stopped`
@@ -5534,113 +5602,33 @@ async fn invoke_cc(
                         turn_id = log_ctx.turn_id,
                         "deactivate_session_if_active on auth error: {:#}",
                         e
-                    )
-                })
-                .ok();
-            if ctx.ssh_config_path.is_some() {
-                // Sandbox mode: spawn token request if not already active.
-                if !ctx.auth_watcher_active.swap(true, Ordering::SeqCst) {
-                    let tg_chat_id = ctx.chat_id;
-                    if let Err(e) = send_tg(
-                        &ctx.bot,
-                        tg_chat_id,
-                        ctx.effective_thread_id,
-                        "Claude needs authentication. Setup instructions incoming...",
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            chat_id = log_ctx.chat_id,
-                            eff_thread_id = log_ctx.eff_thread_id,
-                            key = ?log_ctx.key(),
-                            session_uuid = %log_ctx.session_uuid,
-                            turn_id = log_ctx.turn_id,
-                            "failed to send auth error notification: {e:#}"
-                        );
-                    }
-                    spawn_token_request(ctx, tg_chat_id, ctx.effective_thread_id);
-                    // Return Ok(None) — the initial message above is sufficient,
-                    // don't send a second error message before instructions arrive.
-                    return Ok(CcReply {
-                        output: None,
-                        session_uuid,
-                        turn_id,
-                        is_first_call,
-                        prompt_mode,
-                        usage: usage.clone(),
-                        wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
-                        learning_invocation_id: learning_invocation_id.clone(),
-                        last_assistant_text: None,
-                        send_message_used: false,
-                        session_guard,
-                    });
-                } else {
-                    // Token request already running — silent, don't spam.
-                    return Ok(CcReply {
-                        output: None,
-                        session_uuid,
-                        turn_id,
-                        is_first_call,
-                        prompt_mode,
-                        usage: usage.clone(),
-                        wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
-                        learning_invocation_id: learning_invocation_id.clone(),
-                        last_assistant_text: None,
-                        send_message_used: false,
-                        session_guard,
-                    });
-                }
-            } else {
-                // No-sandbox: also use token request flow.
-                if !ctx.auth_watcher_active.swap(true, Ordering::SeqCst) {
-                    let tg_chat_id = ctx.chat_id;
-                    if let Err(e) = send_tg(
-                        &ctx.bot,
-                        tg_chat_id,
-                        ctx.effective_thread_id,
-                        "Claude needs authentication. Setup instructions incoming...",
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            chat_id = log_ctx.chat_id,
-                            eff_thread_id = log_ctx.eff_thread_id,
-                            key = ?log_ctx.key(),
-                            session_uuid = %log_ctx.session_uuid,
-                            turn_id = log_ctx.turn_id,
-                            "failed to send auth error notification: {e:#}"
-                        );
-                    }
-                    spawn_token_request(ctx, tg_chat_id, ctx.effective_thread_id);
-                    return Ok(CcReply {
-                        output: None,
-                        session_uuid,
-                        turn_id,
-                        is_first_call,
-                        prompt_mode,
-                        usage: usage.clone(),
-                        wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
-                        learning_invocation_id: learning_invocation_id.clone(),
-                        last_assistant_text: None,
-                        send_message_used: false,
-                        session_guard,
-                    });
-                } else {
-                    return Ok(CcReply {
-                        output: None,
-                        session_uuid,
-                        turn_id,
-                        is_first_call,
-                        prompt_mode,
-                        usage: usage.clone(),
-                        wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
-                        learning_invocation_id: learning_invocation_id.clone(),
-                        last_assistant_text: None,
-                        send_message_used: false,
-                        session_guard,
-                    });
-                }
+                    );
+                    format!("deactivate foreground invocation after auth error: {e:#}")
+                })?;
+            if let Err(error) = start_token_request(ctx, ctx.chat_id, ctx.effective_thread_id).await
+            {
+                tracing::warn!(
+                    chat_id = log_ctx.chat_id,
+                    eff_thread_id = log_ctx.eff_thread_id,
+                    key = ?log_ctx.key(),
+                    session_uuid = %log_ctx.session_uuid,
+                    turn_id = log_ctx.turn_id,
+                    "failed to start or remind about authentication: {error:#}"
+                );
             }
+            return Ok(CcReply {
+                output: None,
+                session_uuid,
+                turn_id,
+                is_first_call,
+                prompt_mode,
+                usage: usage.clone(),
+                wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
+                learning_invocation_id: learning_invocation_id.clone(),
+                last_assistant_text: None,
+                send_message_used: false,
+                session_guard,
+            });
         }
 
         // If this was the first call, CC never created the session — deactivate
@@ -5932,7 +5920,6 @@ mod tests {
 
         assert_eq!(effective_input, "volatile prefix\n\nuser input");
     }
-    use right_openshell::test_support::{PROCESS_ENV_LOCK, PathGuard};
     use std::os::unix::fs::PermissionsExt;
 
     #[derive(Clone)]
@@ -6297,9 +6284,10 @@ mod tests {
     }
 
     fn worker_context_for_invoke_test(agent_dir: &Path) -> WorkerContext {
-        let (sandbox_runtime, _sandbox_rx) = crate::sandbox_runtime::SandboxRuntimeHandle::new(
-            crate::sandbox_runtime::SandboxHealth::Ready,
-        );
+        let (sandbox_runtime, _sandbox_rx) =
+            crate::sandbox_runtime::SandboxRuntimeHandle::new(Err(Arc::new(
+                right_sandbox::SandboxCause::HypervisorUnavailable.diagnose(),
+            )));
         WorkerContext {
             chat_id: 42,
             effective_thread_id: 0,
@@ -6307,11 +6295,11 @@ mod tests {
             agent_name: "test-agent".into(),
             bot: super::super::bot::build_bot("0:fake_token_for_tests".into()),
             agent_db_dir: agent_dir.to_path_buf(),
-            debug: Arc::new(AtomicBool::new(false)),
-            ssh_config_path: None,
-            auth_watcher_active: Arc::new(AtomicBool::new(false)),
-            auth_code_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            resolved_sandbox: None,
+            debug: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sandbox: None,
+            pending_auth: Arc::new(tokio::sync::Mutex::new(
+                super::super::handler::PendingAuthState::default(),
+            )),
             show_thinking: false,
             model: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
             stop_tokens: Arc::new(DashMap::new()),
@@ -6335,14 +6323,57 @@ mod tests {
             claude_health: crate::keepalive::ClaudeHealth::new(
                 "test-agent".into(),
                 agent_dir.to_path_buf(),
-                None,
-                None,
-                None,
-                Some(Arc::clone(&sandbox_runtime)),
+                Arc::clone(&sandbox_runtime),
             ),
             shutdown: CancellationToken::new(),
             sandbox_runtime,
         }
+    }
+
+    /// Regression for the startup-snapshot bug in the foreground turn path.
+    ///
+    /// A worker outlives sandbox recoveries, and each recovery publishes a
+    /// NEW handle. Snapshotting at spawn produced two failures: a worker born
+    /// during a degraded window held `None` forever and refused every turn
+    /// even after the backend recovered (bricked until `/new`), and one born
+    /// while Ready kept addressing a VM recovery had already replaced. The
+    /// debounce loop therefore re-resolves `ctx.sandbox` once per batch.
+    ///
+    /// This drives the real `spawn_worker` loop rather than replicating its
+    /// refresh line, so deleting that line fails the test.
+    #[tokio::test]
+    async fn worker_resolves_the_sandbox_per_batch_not_at_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = worker_context_for_invoke_test(dir.path());
+        let runtime = Arc::clone(&ctx.sandbox_runtime);
+
+        let tx = spawn_worker((42, 0), ctx, Arc::new(DashMap::new()));
+        assert_eq!(
+            runtime.sandbox_reads(),
+            0,
+            "spawning a worker must not snapshot the sandbox"
+        );
+
+        // Feed one batch. The loop resolves the sandbox before it does
+        // anything with the guest; the turn itself then fails closed on the
+        // degraded runtime, which is fine — the read is what is under test.
+        tx.send(debug_msg(1, None))
+            .await
+            .expect("worker accepts the message");
+        // The read happens early in the cycle; poll briefly rather than
+        // sleeping a fixed interval.
+        for _ in 0..100 {
+            if runtime.sandbox_reads() > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            runtime.sandbox_reads() > 0,
+            "the debounce loop must resolve the live handle when a batch arrives, \
+             not reuse the handle captured at spawn"
+        );
     }
 
     #[tokio::test]
@@ -7086,11 +7117,13 @@ mod tests {
                 .await
                 .unwrap()
         );
-        drop(conn);
 
-        recover_bootstrap_finalization(dir.path(), None)
+        // Identity verification needs a live microVM; inject its verdict so the
+        // recovery bookkeeping under test stays exercisable without one.
+        finish_bootstrap_recovery(dir.path(), &conn, &intent, BootstrapVerification::Verified)
             .await
             .unwrap();
+        drop(conn);
 
         let conn = right_db::open_connection(dir.path(), false).await.unwrap();
         assert!(get_active_session(&conn, 42, 7).await.unwrap().is_none());
@@ -7111,11 +7144,16 @@ mod tests {
         deactivate_session_if_active(&conn, 42, 7, "bootstrap-session")
             .await
             .unwrap();
-        drop(conn);
 
-        let error = recover_bootstrap_finalization(dir.path(), None)
-            .await
-            .expect_err("missing identity must abort startup");
+        let error = finish_bootstrap_recovery(
+            dir.path(),
+            &conn,
+            &intent,
+            BootstrapVerification::IdentityMissing,
+        )
+        .await
+        .expect_err("missing identity must abort startup");
+        drop(conn);
 
         assert!(format!("{error:#}").contains("identity files are missing"));
         assert!(dir.path().join("BOOTSTRAP.md").exists());
@@ -7197,105 +7235,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sandbox_bootstrap_probe_classifies_missing_identity() {
-        let agent_dir = tempfile::tempdir().unwrap();
-
-        let verification = verify_bootstrap_for_paths_with_probe(
-            agent_dir.path(),
-            Some("right-test-sandbox"),
-            |_| async { Ok(("missing".to_owned(), 0)) },
-        )
-        .await;
-
-        assert!(matches!(
-            verification,
-            BootstrapVerification::IdentityMissing
-        ));
-    }
-
-    #[tokio::test]
-    async fn sandbox_bootstrap_probe_classifies_verified_identity() {
-        let _guard = PROCESS_ENV_LOCK.lock().await;
-        let tmp = tempfile::tempdir().unwrap();
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        let fake_openshell = bin.join("openshell");
-        std::fs::write(
-            &fake_openshell,
-            r#"#!/bin/sh
-set -eu
-if [ "$1" != "sandbox" ] || [ "$2" != "download" ]; then
-  exit 64
-fi
-sandbox="$3"
-src="$4"
-dest="$5"
-if [ "$sandbox" != "right-test-sandbox" ]; then
-  exit 65
-fi
-case "$src" in
-  /sandbox/IDENTITY.md) printf '# identity\n' > "$dest/IDENTITY.md" ;;
-  /sandbox/SOUL.md) printf '# soul\n' > "$dest/SOUL.md" ;;
-  /sandbox/USER.md) printf '# user\n' > "$dest/USER.md" ;;
-  *) exit 66 ;;
-esac
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake_openshell, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _path_guard = PathGuard::prepend(&bin);
-        let agent_dir = tmp.path().join("agent");
-
-        let verification = verify_bootstrap_for_paths_with_probe(
-            &agent_dir,
-            Some("right-test-sandbox"),
-            |_| async { Ok(("verified".to_owned(), 0)) },
-        )
-        .await;
-
-        assert!(matches!(verification, BootstrapVerification::Verified));
-        assert!(right_agent::identity_mirror::host_identity_mirror_complete(
-            &agent_dir
-        ));
-    }
-
-    #[tokio::test]
-    async fn sandbox_bootstrap_probe_classifies_nonzero_and_unexpected_output() {
-        let agent_dir = tempfile::tempdir().unwrap();
-
-        let nonzero = verify_bootstrap_for_paths_with_probe(
-            agent_dir.path(),
-            Some("right-test-sandbox"),
-            |_| async { Ok(("verified".to_owned(), 9)) },
-        )
-        .await;
-        assert!(matches!(
-            nonzero,
-            BootstrapVerification::InfrastructureError(_)
-        ));
-
-        let unexpected = verify_bootstrap_for_paths_with_probe(
-            agent_dir.path(),
-            Some("right-test-sandbox"),
-            |_| async { Ok(("verified\n".to_owned(), 0)) },
-        )
-        .await;
-        assert!(matches!(
-            unexpected,
-            BootstrapVerification::InfrastructureError(_)
-        ));
-    }
-
-    #[tokio::test]
     async fn sandbox_bootstrap_probe_classifies_infrastructure_failure() {
         let agent_dir = tempfile::tempdir().unwrap();
 
-        let verification = verify_bootstrap_for_paths_with_probe(
-            agent_dir.path(),
-            Some("right-test-sandbox"),
-            |_| async { Err(miette::miette!("gateway unavailable")) },
-        )
-        .await;
+        let verification =
+            verify_bootstrap_for_paths_with_probe(agent_dir.path(), None, |_| async {
+                Err(miette::miette!("gateway unavailable"))
+            })
+            .await;
 
         assert!(matches!(
             verification,
@@ -7311,6 +7258,29 @@ esac
         assert!(reply.contains("something failed"));
         assert!(reply.contains("<pre>"));
         assert!(reply.contains("</pre>"));
+    }
+
+    /// Sandboxless mode is gone, so a missing sandbox handle must be reported
+    /// as a backend failure. Reading the host identity mirror instead would
+    /// reintroduce the host fallback the fail-closed guard exists to prevent,
+    /// and would declare bootstrap verified from a stale copy.
+    #[tokio::test]
+    async fn bootstrap_probe_fails_closed_without_a_sandbox() {
+        let agent_dir = tempfile::tempdir().unwrap();
+        for filename in right_agent::identity_mirror::IDENTITY_MIRROR_FILES {
+            std::fs::write(agent_dir.path().join(filename), "verified").unwrap();
+        }
+
+        let verification =
+            verify_bootstrap_for_paths_with_probe(agent_dir.path(), None, |_| async {
+                unreachable!("the probe must not run without a sandbox")
+            })
+            .await;
+
+        assert!(
+            matches!(verification, BootstrapVerification::InfrastructureError(_)),
+            "present host identity files must not yield Verified without a sandbox"
+        );
     }
 
     #[tokio::test]
@@ -7397,6 +7367,51 @@ esac
     }
 
     // classify_cc_result tests
+    #[test]
+    fn successful_terminal_result_overrides_missing_process_exit() {
+        let result = r#"{"type":"result","is_error":false,"result":"ok"}"#;
+        assert_eq!(effective_exit_code(Some(result), None), 0);
+    }
+
+    #[test]
+    fn error_terminal_result_overrides_process_exit() {
+        let result = r#"{"type":"result","is_error":true,"result":"failed"}"#;
+        assert_eq!(effective_exit_code(Some(result), Some(-1)), 1);
+        assert_eq!(effective_exit_code(Some(result), Some(0)), 1);
+    }
+
+    #[test]
+    fn malformed_or_missing_terminal_result_uses_actual_exit_or_sentinel() {
+        assert_eq!(effective_exit_code(Some("not json"), Some(7)), 7);
+        assert_eq!(effective_exit_code(Some(r#"{"type":"result"}"#), None), -1);
+        assert_eq!(effective_exit_code(None, Some(9)), 9);
+        assert_eq!(effective_exit_code(None, None), -1);
+    }
+
+    #[test]
+    fn only_result_stream_events_are_terminal() {
+        assert!(stream_event_is_terminal(
+            &crate::cc::stream::parse_stream_event(
+                r#"{"type":"result","is_error":false,"result":"ok"}"#,
+            ),
+        ));
+        assert!(!stream_event_is_terminal(
+            &crate::cc::stream::parse_stream_event(
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+            ),
+        ));
+        assert!(!stream_event_is_terminal(
+            &crate::cc::stream::parse_stream_event(r#"{"type":"system","subtype":"init"}"#),
+        ));
+    }
+
+    #[test]
+    fn terminal_rate_limit_result_is_classified_for_user_facing_path() {
+        let result = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":529,"result":"API Error: 529 Overloaded."}"#;
+        assert_eq!(effective_exit_code(Some(result), None), 1);
+        assert_eq!(classify_cc_result(result), CcResultClass::RateLimited);
+    }
+
     #[tokio::test]
     async fn classify_detects_429_rate_limit() {
         let stdout = r#"{"type":"result","is_error":true,"api_error_status":429,"result":"API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"}"#;
@@ -7507,8 +7522,7 @@ esac
             chat_id: 42,
             thread_id: 7,
             agent_dir: std::path::PathBuf::from("/tmp/agent"),
-            ssh_config_path: None,
-            resolved_sandbox: None,
+            sandbox: None,
             channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
 
@@ -8770,6 +8784,62 @@ mod bg_request_race_tests {
         let b = super::super::next_turn_id_after(None);
         let c = super::super::next_turn_id_after(None);
         assert!(a < b && b < c, "turn ids must be strictly increasing");
+    }
+
+    #[test]
+    fn no_api_progress_before_deadline_recovers_auth() {
+        assert!(should_recover_auth(true, false, true));
+    }
+
+    #[test]
+    fn system_init_does_not_count_as_api_progress() {
+        let event = crate::cc::stream::parse_stream_event(r#"{"type":"system","subtype":"init"}"#);
+        assert!(!stream_event_is_api_progress(&event));
+        assert!(should_recover_auth(true, false, true));
+    }
+
+    #[test]
+    fn assistant_events_disable_auth_guard() {
+        let lines = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}"#,
+        ];
+        for line in lines {
+            let event = crate::cc::stream::parse_stream_event(line);
+            assert!(stream_event_is_api_progress(&event));
+            assert!(!should_recover_auth(true, true, true));
+        }
+    }
+
+    #[test]
+    fn result_event_disables_auth_guard() {
+        let event = crate::cc::stream::parse_stream_event(
+            r#"{"type":"result","subtype":"success","result":"hi"}"#,
+        );
+        assert!(stream_event_is_api_progress(&event));
+        assert!(!should_recover_auth(true, true, true));
+    }
+
+    #[test]
+    fn global_deadline_remains_background_timeout() {
+        assert!(!should_recover_auth(true, false, false));
+        assert_eq!(FOREGROUND_API_PROGRESS_TIMEOUT, Duration::from_secs(20));
+        assert_eq!(CC_TIMEOUT_SECS, 600);
+    }
+
+    #[test]
+    fn stdin_delivery_deadline_never_recovers_auth() {
+        assert!(!should_recover_auth(false, false, true));
+    }
+
+    #[test]
+    fn stdin_delivery_timeout_has_clear_transport_error() {
+        assert_eq!(
+            stdin_delivery_timeout_detail(false).as_deref(),
+            Some("stdin delivery timed out after 20s"),
+        );
+        assert!(stdin_delivery_timeout_detail(true).is_none());
     }
 
     // Intra-turn race: bg click lands AFTER stdout closed and child exited 0.

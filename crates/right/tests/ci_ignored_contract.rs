@@ -2,9 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const CI_IGNORE_PREFIXES: &[(&str, &str)] = &[
-    ("ci-openshell", "ci_openshell_"),
     ("ci-claude", "ci_claude_"),
     ("ci-stt", "ci_stt_"),
+    ("ci-msb", "ci_msb_"),
 ];
 
 #[test]

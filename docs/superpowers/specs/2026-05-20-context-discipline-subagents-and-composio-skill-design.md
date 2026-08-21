@@ -5,12 +5,12 @@
 
 ## Problem
 
-Audit of all `agent-b` (18) and `right` (13) Telegram sessions (stream NDJSON
+Audit of all `him` (18) and `right` (13) Telegram sessions (stream NDJSON
 under `~/.right/logs/streams/`) showed that subagent (`Agent` tool)
 delegation is sporadic and Composio MCP responses pollute the main
 context window:
 
-- 7 of 18 `agent-b` sessions used subagents at all (15 calls total); 2 of 13
+- 7 of 18 `him` sessions used subagents at all (15 calls total); 2 of 13
   for `right` (3 calls). Several long group-chat sessions
   (`f7d5a319`, `2f4a29c9`, `8db11961`) reach 192K–268K
   `cache_read_input_tokens` per turn — at or beyond Sonnet 4.6's 200K
@@ -266,7 +266,7 @@ delegated to CC.
 
 For a typical post-merge user turn that triggers both changes:
 
-1. User asks `agent-b` "глянь последние письма gmail".
+1. User asks `him` "глянь последние письма gmail".
 2. Composite system prompt is assembled (per PROMPT_SYSTEM.md). It
    contains the rewritten `### Subagents` section and the
    `/right-composio` Core Skills entry.
@@ -338,10 +338,10 @@ Per AGENTS.md verification rules:
 
 ### Manual verification (post-merge, on operator machine)
 
-1. `right restart agent-b && right restart right`.
-2. `ls ~/.right/agents/agent-b/.claude/skills/right-composio/` shows
+1. `right restart him && right restart right`.
+2. `ls ~/.right/agents/him/.claude/skills/right-composio/` shows
    `SKILL.md`.
-3. In Telegram, send `agent-b` a Composio-Gmail task ("глянь последние
+3. In Telegram, send `him` a Composio-Gmail task ("глянь последние
    письма"). In `~/.right/logs/streams/<latest-sid>.ndjson`:
    - Look for a Skill invocation referencing `right-composio` (CC
      surfaces this as a `<command-name>` system event or a tool_use

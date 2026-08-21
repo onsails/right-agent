@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 futures = { workspace = true }
 miette = { workspace = true }
-right-openshell = { path = "../right-openshell", version = "*" }
+right-sandbox = { path = "../right-sandbox", version = "*" }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }

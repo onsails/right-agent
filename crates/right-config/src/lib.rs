@@ -114,7 +114,7 @@ pub struct GlobalConfig {
 /// Controls rmcp's DNS-rebinding Host-header check. Since v1.4.0, rmcp's
 /// `StreamableHttpServerConfig::default()` only allows `localhost`/`127.0.0.1`/`::1`
 /// as Host values, which breaks sandbox access where the Host is e.g.
-/// `host.openshell.internal:8100`.
+/// `host.microsandbox.internal:8100`.
 ///
 /// - Empty `allowed_hosts` (default) → `disable_allowed_hosts()`, skip the check
 ///   entirely. This is safe because the aggregator already authenticates every

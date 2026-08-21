@@ -127,8 +127,6 @@ fn init_first_run_splash_and_recap() {
             home.path().to_str().unwrap(),
             "init",
             "-y",
-            "--sandbox-mode",
-            "none",
             "--tunnel-hostname",
             "test.example.com",
         ])
@@ -157,8 +155,6 @@ fn init_rerun_writes_recap_again() {
                 home.path().to_str().unwrap(),
                 "init",
                 "-y",
-                "--sandbox-mode",
-                "none",
                 "--tunnel-hostname",
                 "test.example.com",
             ])
@@ -179,8 +175,6 @@ fn agent_init_recap_renders_block() {
             home.path().to_str().unwrap(),
             "init",
             "-y",
-            "--sandbox-mode",
-            "none",
             "--tunnel-hostname",
             "test.example.com",
         ])
@@ -195,8 +189,6 @@ fn agent_init_recap_renders_block() {
             "init",
             "finance",
             "-y",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .success()
@@ -217,8 +209,6 @@ fn init_ascii_fallback() {
             home.path().to_str().unwrap(),
             "init",
             "-y",
-            "--sandbox-mode",
-            "none",
             "--tunnel-hostname",
             "test.example.com",
         ])

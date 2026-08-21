@@ -13,10 +13,10 @@ remember the same things about you. In groups the agent stays quiet until you
 
 ## Every agent in its own sandbox
 
-Each agent gets a persistent OpenShell sandbox with its own filesystem
-(landlock), its own scoped network, and a tls-terminating proxy. A misbehaving
-agent cannot reach the host, the other agents, or arbitrary networks. Sandboxes
-persist: they live as long as the agent and survive restarts.
+Each agent gets a persistent microVM with its own kernel, its own disk, and
+its own scoped network. A misbehaving agent cannot reach the host, the other
+agents, or arbitrary networks. Sandboxes persist: they live as long as the
+agent and survive restarts.
 
 ## Credentials stay outside the box
 

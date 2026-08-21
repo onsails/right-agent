@@ -1,11 +1,10 @@
 use std::time::Duration;
 
+use crate::sandbox::{Sandbox, exec_argv};
 use right_dashboard::api_types::{IdentityFileResponse, IdentityFileSummary, IdentityResponse};
 use right_dashboard::identity_files::{
-    IDENTITY_FILE_NAMES, IdentityFilesError, read_host_identity_file, read_host_identity_files,
-    validate_identity_file_name,
+    IDENTITY_FILE_NAMES, IdentityFilesError, read_host_identity_file, validate_identity_file_name,
 };
-use right_openshell::sandbox_exec::SandboxExec;
 
 use super::DashboardState;
 
@@ -42,22 +41,23 @@ done"#;
 pub(super) async fn identity_response(
     state: &DashboardState,
 ) -> Result<IdentityResponse, IdentityFilesError> {
-    if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
-        // The combined read maps its own failure to a `sandbox_unreachable`
-        // response, so any `Err` here is a host-mirror read failure that must
-        // propagate rather than masquerade as unreachable.
-        return read_sandbox_identity_files(&state.agent_name, &state.agent_dir, sandbox_exec)
-            .await
-            .map_err(|error| IdentityFilesError::Io(std::io::Error::other(format!("{error:#}"))));
-    }
-
-    read_host_identity_files(
-        &state.agent_name,
-        &state.agent_dir,
-        "host",
-        None,
-        IDENTITY_PREVIEW_LIMIT_BYTES,
-    )
+    // Every agent is sandboxed, so startup always captures a sandbox handle.
+    // A missing one means the sandbox never came up: report it as unreachable
+    // rather than passing host files off as live.
+    let Some(sandbox) = state.sandbox() else {
+        return host_mirror_unreachable_response(
+            &state.agent_name,
+            &state.agent_dir,
+            &miette::miette!("sandbox handle unavailable"),
+        )
+        .map_err(|error| IdentityFilesError::Io(std::io::Error::other(format!("{error:#}"))));
+    };
+    // The combined read maps its own failure to a `sandbox_unreachable`
+    // response, so any `Err` here is a host-mirror read failure that must
+    // propagate rather than masquerade as unreachable.
+    read_sandbox_identity_files(&state.agent_name, &state.agent_dir, &sandbox)
+        .await
+        .map_err(|error| IdentityFilesError::Io(std::io::Error::other(format!("{error:#}"))))
 }
 
 pub(super) async fn identity_file_response(
@@ -65,8 +65,20 @@ pub(super) async fn identity_file_response(
     file_name: &str,
 ) -> Result<IdentityFileResponse, IdentityFilesError> {
     validate_identity_file_name(file_name)?;
-    if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
-        let (file, warning) = match read_sandbox_identity_file(sandbox_exec, file_name).await {
+    let (file, warning) = match state.sandbox() {
+        // No sandbox handle: the sandbox never came up. Same shape as an
+        // unreachable sandbox — host mirror, clearly labelled.
+        None => (
+            read_host_identity_file(
+                &state.agent_dir,
+                STATE_SANDBOX_UNREACHABLE,
+                STATE_SANDBOX_UNREACHABLE,
+                file_name,
+                IDENTITY_PREVIEW_LIMIT_BYTES,
+            )?,
+            Some("sandbox unreachable; showing host mirror when present".to_owned()),
+        ),
+        Some(sandbox) => match read_sandbox_identity_file(&sandbox, file_name).await {
             Ok(Some(file)) => (file, None),
             // Absent in the sandbox: show the host mirror when present
             // (host_mirror) otherwise mark it not_authored.
@@ -93,24 +105,12 @@ pub(super) async fn identity_file_response(
                     "sandbox unreachable; showing host mirror when present: {error:#}"
                 )),
             ),
-        };
-        return Ok(IdentityFileResponse {
-            agent: state.agent_name.clone(),
-            warning,
-            file,
-        });
-    }
-
+        },
+    };
     Ok(IdentityFileResponse {
         agent: state.agent_name.clone(),
-        warning: None,
-        file: read_host_identity_file(
-            &state.agent_dir,
-            "host",
-            "host",
-            file_name,
-            IDENTITY_PREVIEW_LIMIT_BYTES,
-        )?,
+        warning,
+        file,
     })
 }
 
@@ -125,9 +125,9 @@ pub(super) async fn identity_file_response(
 async fn read_sandbox_identity_files(
     agent_name: &str,
     agent_dir: &std::path::Path,
-    sandbox_exec: &SandboxExec,
+    sandbox: &Sandbox,
 ) -> miette::Result<IdentityResponse> {
-    let stdout = match run_combined_identity_read(sandbox_exec, None).await {
+    let stdout = match run_combined_identity_read(sandbox, None).await {
         Ok(stdout) => stdout,
         Err(error) => return host_mirror_unreachable_response(agent_name, agent_dir, &error),
     };
@@ -186,7 +186,7 @@ async fn read_sandbox_identity_files(
 /// `sandbox_unreachable` branch. `name_filter` reads only that one file when
 /// `Some` (the per-file detail route), all files when `None`.
 async fn run_combined_identity_read(
-    sandbox_exec: &SandboxExec,
+    sandbox: &Sandbox,
     name_filter: Option<&str>,
 ) -> miette::Result<String> {
     let limit = (IDENTITY_PREVIEW_LIMIT_BYTES + 1).to_string();
@@ -199,7 +199,7 @@ async fn run_combined_identity_read(
         name_filter.unwrap_or(""),
     ];
     let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
-    let run = sandbox_exec.exec(&command);
+    let run = exec_argv(sandbox, &command);
     let (stdout, exit_code) = match tokio::time::timeout(timeout, run).await {
         Ok(result) => result?,
         Err(_) => return Err(miette::miette!("sandbox identity read timed out")),
@@ -247,11 +247,11 @@ fn host_mirror_unreachable_response(
 /// `Ok(Some(_))` = present in the sandbox; `Ok(None)` = absent (caller maps to
 /// host_mirror/not_authored); `Err(_)` = sandbox unreachable.
 async fn read_sandbox_identity_file(
-    sandbox_exec: &SandboxExec,
+    sandbox: &Sandbox,
     name: &str,
 ) -> miette::Result<Option<IdentityFileSummary>> {
     validate_identity_file_name(name).map_err(|error| miette::miette!("{error:#}"))?;
-    let stdout = run_combined_identity_read(sandbox_exec, Some(name)).await?;
+    let stdout = run_combined_identity_read(sandbox, Some(name)).await?;
     let parsed = parse_combined_identity_read(&stdout, IDENTITY_PREVIEW_LIMIT_BYTES);
     match parsed.iter().find(|file| file.name == name) {
         Some(file) if file.present => Ok(Some(IdentityFileSummary {

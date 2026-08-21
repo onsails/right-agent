@@ -1,20 +1,26 @@
 //! Background task that periodically upgrades Claude Code inside a sandbox.
 //!
-//! Runs `claude upgrade` via SSH every 8 hours. The upgraded binary is installed
-//! to `/sandbox/.local/bin/claude` and takes precedence over the image-baked
-//! `/usr/local/bin/claude` via PATH ordering (set up by `sync.rs`).
+//! Runs `claude upgrade` in the guest every 8 hours. The upgraded binary is
+//! installed to `/sandbox/.local/bin/claude` and takes precedence over the
+//! image-baked `/usr/local/bin/claude` via PATH ordering (set up by `sync.rs`).
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use crate::sandbox::{Sandbox, exec_argv_with_timeout};
+
 /// Default interval between upgrade checks (8 hours).
 const UPGRADE_INTERVAL: Duration = Duration::from_secs(8 * 3600);
 
-/// Timeout for `claude upgrade` SSH command (2 minutes).
-const UPGRADE_TIMEOUT_SECS: u64 = 120;
-const CLAUDE_UPGRADE_SCRIPT: &str = r#"output="$(claude upgrade 2>&1)"
+/// Timeout for the in-guest `claude upgrade` (2 minutes).
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(120);
+// `bash -lc` reads the *invoking user's* login profile, and guest execs run as
+// root, whose HOME is not /sandbox — so /sandbox/.bashrc never runs and the
+// agent's own /sandbox/.local/bin stays off PATH. Source the env script
+// explicitly, exactly as the turn and keepalive paths do.
+const CLAUDE_UPGRADE_SCRIPT: &str = r#"if [ -r /sandbox/.right/env.sh ]; then . /sandbox/.right/env.sh; fi
+output="$(claude upgrade 2>&1)"
 status=$?
 printf '%s\n' "$output"
 if [ "$status" -eq 1 ]; then
@@ -28,9 +34,8 @@ const CLAUDE_UPGRADE_CMD: [&str; 3] = ["bash", "-lc", CLAUDE_UPGRADE_SCRIPT];
 
 /// Run a single upgrade attempt at startup (blocking).
 /// Called before cron/telegram tasks exist — no lock needed.
-pub(crate) async fn run_startup_upgrade(ssh_config_path: &Path, agent_name: &str, sandbox: &str) {
-    let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sandbox);
-    run_upgrade(ssh_config_path, &ssh_host, agent_name).await;
+pub(crate) async fn run_startup_upgrade(sandbox: &Sandbox, agent_name: &str) {
+    run_upgrade(sandbox, agent_name).await;
 }
 
 /// Spawn a background task that periodically runs `claude upgrade` in the sandbox.
@@ -41,32 +46,22 @@ pub(crate) async fn run_startup_upgrade(ssh_config_path: &Path, agent_name: &str
 /// Returns the `JoinHandle` so the caller can await it during shutdown,
 /// preventing a tokio runtime panic from in-flight `Interval::tick()` futures.
 pub(crate) fn spawn_upgrade_task(
-    ssh_config_path: PathBuf,
+    sandbox_runtime: Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     agent_name: String,
-    sandbox: String,
     shutdown: CancellationToken,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run_upgrade_loop(
-            &ssh_config_path,
-            &agent_name,
-            &sandbox,
-            shutdown,
-            &upgrade_lock,
-        )
-        .await;
+        run_upgrade_loop(&sandbox_runtime, &agent_name, shutdown, &upgrade_lock).await;
     })
 }
 
 async fn run_upgrade_loop(
-    ssh_config_path: &Path,
+    sandbox_runtime: &crate::sandbox_runtime::SandboxRuntimeHandle,
     agent_name: &str,
-    sandbox: &str,
     shutdown: CancellationToken,
     upgrade_lock: &tokio::sync::RwLock<()>,
 ) {
-    let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sandbox);
     let mut interval = tokio::time::interval(UPGRADE_INTERVAL);
     // First tick fires immediately — consume it since startup upgrade already ran.
     interval.tick().await;
@@ -86,26 +81,31 @@ async fn run_upgrade_loop(
             continue;
         };
 
-        run_upgrade(ssh_config_path, &ssh_host, agent_name).await;
+        // Resolved per attempt: a recovery between ticks retires the previous
+        // handle, and there is no host fallback when none is published.
+        let Some(sandbox) = sandbox_runtime.current_sandbox() else {
+            tracing::info!(agent = %agent_name, "skipping upgrade — sandbox unavailable");
+            continue;
+        };
+        run_upgrade(&sandbox, agent_name).await;
         // _guard dropped here — CC sessions unblock
     }
 }
 
-async fn run_upgrade(ssh_config_path: &Path, ssh_host: &str, agent_name: &str) {
+async fn run_upgrade(sandbox: &Sandbox, agent_name: &str) {
     tracing::info!(agent = %agent_name, "checking for claude upgrade");
 
-    let result = right_openshell::openshell::ssh_exec(
-        ssh_config_path,
-        ssh_host,
-        &CLAUDE_UPGRADE_CMD,
-        UPGRADE_TIMEOUT_SECS,
-    )
-    .await;
-
-    match result {
-        Ok(stdout) => {
+    match exec_argv_with_timeout(sandbox, &CLAUDE_UPGRADE_CMD, UPGRADE_TIMEOUT).await {
+        Ok((stdout, exit_code)) => {
             let stdout = stdout.trim();
-            if stdout.contains("Successfully updated") {
+            if exit_code != 0 {
+                tracing::error!(
+                    agent = %agent_name,
+                    exit_code,
+                    output = %stdout,
+                    "claude upgrade exited non-zero"
+                );
+            } else if stdout.contains("Successfully updated") {
                 tracing::info!(agent = %agent_name, output = %stdout, "claude upgraded");
             } else if claude_upgrade_up_to_date(stdout) || stdout.contains("already") {
                 tracing::info!(agent = %agent_name, "claude is up to date");
@@ -133,28 +133,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::RwLock;
-
-    /// Regression: upgrade.rs must use ssh_host_for_sandbox(resolved_sandbox),
-    /// never an agent-name-derived alias. Agents carry explicit
-    /// sandbox.name = right-{agent} in agent.yaml; their SSH config carries
-    /// Host openshell-right-{agent}.
-    #[tokio::test]
-    async fn upgrade_uses_resolved_sandbox_not_agent_name() {
-        let src = include_str!("upgrade.rs");
-        // The bare ssh_host(agent_name) call would be the bug.
-        // Split the pattern so this test's own source text doesn't match.
-        let bad_pattern = concat!("openshell::ssh_host", "(agent_name)");
-        assert!(
-            !src.contains(bad_pattern),
-            "upgrade.rs must not call ssh_host(agent_name) — that bypasses agent.yaml \
-             sandbox.name. Use ssh_host_for_sandbox(sandbox) instead."
-        );
-        // Positive: confirm the right helper is used at least once.
-        assert!(
-            src.contains("ssh_host_for_sandbox"),
-            "upgrade.rs must use ssh_host_for_sandbox"
-        );
-    }
 
     #[tokio::test]
     async fn upgrade_skips_when_sessions_active() {

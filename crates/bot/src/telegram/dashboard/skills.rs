@@ -1,13 +1,13 @@
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
+use crate::sandbox::{Sandbox, exec_argv};
 use right_dashboard::api_types::{
     PinSkillResponse, SkillDetailResponse, SkillGroups, SkillSummary, SkillsResponse,
 };
 use right_dashboard::skill_inventory::{
-    SkillInventoryError, classify_skill_group, parse_skill_description, read_host_skill_detail,
-    scan_host_skills, sort_skill_groups, validate_skill_name,
+    SkillInventoryError, classify_skill_group, parse_skill_description, sort_skill_groups,
+    validate_skill_name,
 };
-use right_openshell::sandbox_exec::SandboxExec;
 
 use super::DashboardState;
 
@@ -15,13 +15,17 @@ const SKILL_PREVIEW_LIMIT_BYTES: usize = 64 * 1024;
 const SKILL_DESCRIPTION_PREVIEW_LIMIT_BYTES: usize = 8 * 1024;
 const SANDBOX_SKILL_LIMIT_STR: &str = "200";
 const SANDBOX_SKILLS_PATH: &str = "/sandbox/.claude/skills";
-// These two scripts MUST stay single-line: OpenShell's gRPC `ExecSandbox`
-// rejects any command argument containing a real newline/CR byte, and each is
-// passed as one `sh -c <script>` arg. Rust's `\`-line-continuation strips the
-// trailing newline AND the next line's leading whitespace, so the source
+/// Detail reported by every skills route when the sandbox handle is absent.
+/// Carries the same `sandbox_unreachable` label the identity routes use: an
+/// unreachable sandbox is an error, never a host mirror served as truth (the
+/// learned `rightx-*` packages exist only in the guest).
+const SANDBOX_UNREACHABLE_DETAIL: &str = "sandbox_unreachable: no sandbox handle";
+// These two scripts are kept single-line: each is passed as one
+// `sh -c <script>` argv entry, and the `;`-joined form keeps the guest
+// command line readable in exec traces. Rust's `\`-line-continuation strips
+// the trailing newline AND the next line's leading whitespace, so the source
 // indentation is cosmetic — the space before each `\` is the statement
-// separator. Do not reflow into a raw multi-line string. `script_constants_tests`
-// guards this; `printf '%s\\n'` is a literal backslash+n for printf, not 0x0A.
+// separator. `printf '%s\\n'` is a literal backslash+n for printf, not 0x0A.
 const SANDBOX_LIST_SKILLS_SCRIPT: &str = "cd \"$1\" 2>/dev/null || exit 0; \
      limit=\"$2\"; \
      count=0; \
@@ -91,26 +95,18 @@ pub(super) enum SkillLifecycleReadError {
 pub(super) async fn skills_response(
     state: &DashboardState,
 ) -> Result<SkillsResponse, SkillsResponseError> {
-    if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
-        // Learned (`rightx-*`) skills live only inside the sandbox at
-        // `/sandbox/.claude/skills`. Falling back to the host filesystem on a
-        // scan failure would show "0 learned" — a wrong answer dressed as a
-        // valid one. Propagate the failure so the dashboard renders an error
-        // (and keeps any previously loaded skills) instead.
-        let mut response = scan_sandbox_skills(&state.agent_name, sandbox_exec)
-            .await
-            .map_err(|error| SkillsResponseError::Sandbox(format!("{error:#}")))?;
-        try_enrich_skills_response(state, &mut response).await;
-        return Ok(response);
-    }
-
-    let mut response = scan_host_skills(
-        &state.agent_name,
-        &state.agent_dir,
-        right_codegen::BUILTIN_SKILL_NAMES,
-        "host",
-        SKILL_PREVIEW_LIMIT_BYTES,
-    )?;
+    // Learned (`rightx-*`) skills live only inside the sandbox at
+    // `/sandbox/.claude/skills`. Falling back to the host filesystem — on a
+    // scan failure or on a missing handle, which now means the sandbox never
+    // came up rather than "unsandboxed agent" — would show "0 learned": a
+    // wrong answer dressed as a valid one. Propagate instead, so the dashboard
+    // renders an error and keeps any previously loaded skills.
+    let sandbox = state
+        .sandbox()
+        .ok_or_else(|| SkillsResponseError::Sandbox(SANDBOX_UNREACHABLE_DETAIL.to_owned()))?;
+    let mut response = scan_sandbox_skills(&state.agent_name, &sandbox)
+        .await
+        .map_err(|error| SkillsResponseError::Sandbox(format!("{error:#}")))?;
     try_enrich_skills_response(state, &mut response).await;
     Ok(response)
 }
@@ -120,20 +116,12 @@ pub(super) async fn skill_detail_response(
     skill_name: &str,
 ) -> Result<SkillDetailResponse, SkillDetailError> {
     validate_skill_name(skill_name)?;
-    if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
-        let mut response =
-            read_sandbox_skill_detail(&state.agent_name, sandbox_exec, skill_name).await?;
-        try_enrich_skill_summary(state, &mut response.skill).await;
-        return Ok(response);
-    }
-
-    let mut response = read_host_skill_detail(
-        &state.agent_name,
-        &state.agent_dir,
-        skill_name,
-        right_codegen::BUILTIN_SKILL_NAMES,
-        SKILL_PREVIEW_LIMIT_BYTES,
-    )?;
+    // Same rule as the list route: a learned skill's SKILL.md exists only in
+    // the guest, so no handle means unreachable, not "read the host copy".
+    let sandbox = state
+        .sandbox()
+        .ok_or_else(|| SkillDetailError::Sandbox(SANDBOX_UNREACHABLE_DETAIL.to_owned()))?;
+    let mut response = read_sandbox_skill_detail(&state.agent_name, &sandbox, skill_name).await?;
     try_enrich_skill_summary(state, &mut response.skill).await;
     Ok(response)
 }
@@ -147,23 +135,9 @@ pub(super) async fn pin_skill_response(
     if !skill_name.starts_with("rightx-") {
         return Err(PinSkillError::NonRightx);
     }
-    // Guard against pinning an orphan lifecycle row whose SKILL.md was
-    // deleted out-of-band — surface as 404, not a silent pin. For
-    // sandboxed agents the learned-skill package lives in
-    // /sandbox/.claude/skills/<name>/SKILL.md, not under agent_dir, so
-    // probe the sandbox there instead of the host filesystem.
-    if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
-        probe_sandbox_skill_package(sandbox_exec, skill_name).await?;
-    } else {
-        read_host_skill_detail(
-            &state.agent_name,
-            &state.agent_dir,
-            skill_name,
-            right_codegen::BUILTIN_SKILL_NAMES,
-            SKILL_PREVIEW_LIMIT_BYTES,
-        )?;
-    }
-
+    // Cheap local checks first, so a request that is wrong on its own terms
+    // (unknown or non-curator-managed row) still answers precisely while the
+    // sandbox is down.
     let agent_dir = state.agent_dir.clone();
     let skill_name = skill_name.to_owned();
     let conn = right_db::open_connection(&agent_dir, false).await?;
@@ -176,6 +150,16 @@ pub(super) async fn pin_skill_response(
     ) {
         return Err(PinSkillError::NotCuratorManaged);
     }
+    // Guard against pinning an orphan lifecycle row whose SKILL.md was deleted
+    // out-of-band — surface as 404, not a silent pin. The learned-skill package
+    // lives at /sandbox/.claude/skills/<name>/SKILL.md, so the probe runs in
+    // the guest; with no sandbox handle there is nothing to verify against, and
+    // the pin MUST NOT be written on the strength of a host read.
+    let sandbox = state
+        .sandbox()
+        .ok_or_else(|| PinSkillError::Sandbox(SANDBOX_UNREACHABLE_DETAIL.to_owned()))?;
+    probe_sandbox_skill_package(&sandbox, &skill_name).await?;
+
     right_lifecycle::set_pinned(&conn, &skill_name, pinned).await?;
     Ok(PinSkillResponse { skill_name, pinned })
 }
@@ -189,7 +173,7 @@ pub(super) async fn pin_skill_response(
 /// "SKILL.md was deleted out-of-band" case the host path also covers.
 /// Timeout / gRPC failures propagate as `PinSkillError::Sandbox` (500).
 async fn probe_sandbox_skill_package(
-    sandbox_exec: &SandboxExec,
+    sandbox: &Sandbox,
     skill_name: &str,
 ) -> Result<(), PinSkillError> {
     let skill_path = format!("{SANDBOX_SKILLS_PATH}/{skill_name}/SKILL.md");
@@ -205,7 +189,7 @@ async fn probe_sandbox_skill_package(
     // not the cold-start list-scan budget, so a transient failure fails fast.
     let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
     let (_, exit_code) =
-        match tokio::time::timeout(timeout, sandbox_exec.exec(&probe_command)).await {
+        match tokio::time::timeout(timeout, exec_argv(sandbox, &probe_command)).await {
             Ok(result) => result.map_err(|error| {
                 PinSkillError::Sandbox(format!("sandbox skill probe failed: {error:#}"))
             })?,
@@ -224,10 +208,7 @@ async fn probe_sandbox_skill_package(
     Ok(())
 }
 
-async fn scan_sandbox_skills(
-    agent: &str,
-    sandbox_exec: &SandboxExec,
-) -> miette::Result<SkillsResponse> {
+async fn scan_sandbox_skills(agent: &str, sandbox: &Sandbox) -> miette::Result<SkillsResponse> {
     let list_command = [
         "sh",
         "-c",
@@ -238,7 +219,7 @@ async fn scan_sandbox_skills(
     ];
     let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS);
     let (stdout, exit_code) =
-        match tokio::time::timeout(timeout, sandbox_exec.exec(&list_command)).await {
+        match tokio::time::timeout(timeout, exec_argv(sandbox, &list_command)).await {
             Ok(result) => result?,
             Err(_) => {
                 return Err(miette::miette!("sandbox skill list timed out"));
@@ -266,7 +247,7 @@ async fn scan_sandbox_skills(
             limit.as_str(),
         ];
         let (preview, exit_code) =
-            match tokio::time::timeout(timeout, sandbox_exec.exec(&read_command)).await {
+            match tokio::time::timeout(timeout, exec_argv(sandbox, &read_command)).await {
                 Ok(result) => result?,
                 Err(_) => continue,
             };
@@ -287,7 +268,7 @@ async fn scan_sandbox_skills(
 
 async fn read_sandbox_skill_detail(
     agent: &str,
-    sandbox_exec: &SandboxExec,
+    sandbox: &Sandbox,
     skill_name: &str,
 ) -> Result<SkillDetailResponse, SkillDetailError> {
     validate_skill_name(skill_name)?;
@@ -305,7 +286,7 @@ async fn read_sandbox_skill_detail(
     // skill detail only after the list scan loaded, so use the short budget.
     let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
     let (mut content_preview, exit_code) =
-        match tokio::time::timeout(timeout, sandbox_exec.exec(&read_command)).await {
+        match tokio::time::timeout(timeout, exec_argv(sandbox, &read_command)).await {
             Ok(result) => result.map_err(sandbox_error)?,
             Err(_) => {
                 return Err(SkillDetailError::Sandbox(format!(
@@ -472,132 +453,7 @@ async fn spend_by_skill(
     Ok(right_dashboard::read_model::learning::skill_spend_by_skill(&conn).await?)
 }
 
-#[cfg(test)]
-mod ci_sandbox_tests {
-    use super::{SANDBOX_LIST_SKILLS_SCRIPT, SANDBOX_READ_SKILL_SCRIPT, SANDBOX_SKILLS_PATH};
-
-    use right_openshell::sandbox_exec::SandboxExec;
-
-    /// Build a `SandboxExec` against a live test sandbox using the same
-    /// (name + mtls_dir + resolved id) pattern the bot's other live
-    /// sandbox tests use (see `sync.rs`).
-    async fn sandbox_exec_for(sandbox: &right_openshell::test_support::TestSandbox) -> SandboxExec {
-        let mtls_dir = match right_openshell::openshell::preflight_check() {
-            right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-            other => panic!("OpenShell not ready: {other:?}"),
-        };
-        let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
-            .await
-            .expect("connect_grpc to OpenShell gateway");
-        let sandbox_id =
-            right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox.name())
-                .await
-                .expect("resolve sandbox id");
-        SandboxExec::new(mtls_dir, sandbox.name().to_owned(), sandbox_id)
-    }
-
-    /// Run one dashboard command array through `SandboxExec::exec`, panicking
-    /// with the newline-rejection error if OpenShell refuses the argument.
-    /// Returns the exit code so the caller can sanity-check it.
-    async fn exec_dashboard_command(sbox: &SandboxExec, label: &str, command: &[&str]) -> i32 {
-        let (_stdout, exit_code) = sbox.exec(command).await.unwrap_or_else(|error| {
-            panic!(
-                "{label} was rejected by OpenShell ExecSandbox (multi-line \
-                 constant contains real newline bytes): {error:#}"
-            );
-        });
-        exit_code
-    }
-
-    /// Regression repro for the dashboard "Skills" tab on sandboxed agents.
-    ///
-    /// `SANDBOX_LIST_SKILLS_SCRIPT` and `SANDBOX_READ_SKILL_SCRIPT` are
-    /// multi-line raw strings passed as a single `sh -c <script>` argument.
-    /// OpenShell's `ExecSandbox` server rejects any command argument that
-    /// contains newline or carriage-return bytes, so every dashboard scan
-    /// fails with:
-    ///   `command argument 2 contains newline or carriage return characters`.
-    ///
-    /// This runs each script constant through `SandboxExec::exec` exactly as
-    /// `scan_sandbox_skills` / `read_sandbox_skill_detail` do, and asserts the
-    /// exec is not rejected. It is RED while the constants contain real
-    /// newlines and goes GREEN once they are rewritten as single-line scripts.
-    #[ignore = "ci-openshell: requires live OpenShell gateway"]
-    #[tokio::test]
-    async fn ci_openshell_dashboard_skill_scripts_have_no_newline_args() {
-        let sandbox =
-            right_openshell::test_support::TestSandbox::create("dashboard-skill-script-newline")
-                .await;
-        let sbox = sandbox_exec_for(&sandbox).await;
-
-        // The exact command arrays the dashboard builds. The list script `cd`s
-        // into a possibly-empty/missing dir and exits 0; the read script exits
-        // 3 when the file is absent. We assert only that the exec itself is not
-        // rejected by the newline guard — not on specific stdout/exit code.
-        let list_exit = exec_dashboard_command(
-            &sbox,
-            "SANDBOX_LIST_SKILLS_SCRIPT",
-            &[
-                "sh",
-                "-c",
-                SANDBOX_LIST_SKILLS_SCRIPT,
-                "dashboard-skill-list",
-                SANDBOX_SKILLS_PATH,
-                "200",
-            ],
-        )
-        .await;
-        // List script exits 0 even when the skills dir is missing/empty.
-        assert_eq!(
-            list_exit, 0,
-            "SANDBOX_LIST_SKILLS_SCRIPT ran but returned unexpected exit code {list_exit}"
-        );
-
-        let read_exit = exec_dashboard_command(
-            &sbox,
-            "SANDBOX_READ_SKILL_SCRIPT",
-            &[
-                "sh",
-                "-c",
-                SANDBOX_READ_SKILL_SCRIPT,
-                "dashboard-skill-read",
-                SANDBOX_SKILLS_PATH,
-                "rightx-nonexistent",
-                "1024",
-            ],
-        )
-        .await;
-        // Read script exits 3 when the target SKILL.md is absent.
-        assert_eq!(
-            read_exit, 3,
-            "SANDBOX_READ_SKILL_SCRIPT ran but returned unexpected exit code {read_exit}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod script_constants_tests {
-    use super::{SANDBOX_LIST_SKILLS_SCRIPT, SANDBOX_READ_SKILL_SCRIPT};
-
-    /// OpenShell's gRPC `ExecSandbox` rejects any command argument that
-    /// contains a real newline or carriage-return byte. These scripts are
-    /// passed as a single `sh -c <script>` argument, so they MUST stay
-    /// single-line. The only `\n` they may carry is the two-char escaped
-    /// `\n` handed to `printf` (a backslash followed by `n`), never a real
-    /// 0x0A byte. This fast guard fails without needing a live sandbox, so a
-    /// reintroduced multi-line script is caught in the normal test suite.
-    #[test]
-    fn dashboard_skill_scripts_have_no_real_newline_bytes() {
-        for (name, script) in [
-            ("SANDBOX_LIST_SKILLS_SCRIPT", SANDBOX_LIST_SKILLS_SCRIPT),
-            ("SANDBOX_READ_SKILL_SCRIPT", SANDBOX_READ_SKILL_SCRIPT),
-        ] {
-            assert!(
-                !script.contains('\n') && !script.contains('\r'),
-                "{name} contains a real newline/CR byte; OpenShell ExecSandbox \
-                 rejects command arguments with newlines — keep it single-line \
-                 (`;`-joined statements; use \\\\n for printf)"
-            );
-        }
-    }
-}
+// The former `script_constants_tests` module asserted these scripts carried no
+// real newline byte, because OpenShell's gRPC `ExecSandbox` rejected such
+// arguments. Microsandbox passes argv through verbatim, so that constraint no
+// longer exists and the guard asserted nothing about behavior.

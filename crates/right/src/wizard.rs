@@ -56,10 +56,6 @@ pub(crate) const PROMPT_LABELS: &[&str] = &[
     "curator circuit: consecutive failures before the circuit opens:",
     "curator circuit: cooldown hours while open:",
     "curator mode (apply | report_only):",
-    // sandbox mode — label + options (shared with init.rs)
-    "sandbox mode:",
-    "openshell — isolated container (recommended)",
-    "none — direct host access (computer-use, chrome)",
     // network policy — label + options
     "network policy:",
     "restrictive — anthropic/claude domains only (recommended)",
@@ -1161,7 +1157,6 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
                 .join(", ")
         };
 
-        let sandbox_display = format!("{}", config.sandbox_mode());
         let network_policy_display = format!("{}", config.network_policy);
         let memory_display = format_memory_display(&config.memory, &chosen_name);
         let learning_display = format_learning_display(&config.learning);
@@ -1169,7 +1164,6 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         let opt_token = format!("telegram token: {token_display}");
         let opt_model = format!("model: {model_display}");
         let opt_chat_ids = format!("allowed chat ids: {chat_ids_display}");
-        let opt_sandbox = format!("sandbox mode: {sandbox_display}");
         let opt_network_policy = format!("network policy: {network_policy_display}");
         let opt_memory = format!("memory: {memory_display}");
         let opt_learning = format!("learning: {learning_display}");
@@ -1185,15 +1179,8 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
             opt_token.clone(),
             opt_model.clone(),
             opt_chat_ids.clone(),
-            opt_sandbox.clone(),
+            opt_network_policy.clone(),
         ];
-        // Only show network policy when sandbox is openshell (no sandbox = no policy).
-        if matches!(
-            config.sandbox_mode(),
-            right_agent::agent::types::SandboxMode::Openshell
-        ) {
-            options.push(opt_network_policy.clone());
-        }
         options.push(opt_stt.clone());
         options.push(opt_memory.clone());
         options.push(opt_learning.clone());
@@ -1259,21 +1246,6 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
                 update_agent_yaml_chat_ids(&agent_yaml_path, &ids)?;
             }
             Some("allowed chat ids")
-        } else if selection == opt_sandbox {
-            let options = vec![
-                "openshell — isolated container (recommended)",
-                "none — direct host access (computer-use, chrome)",
-            ];
-            let choice = inquire::Select::new("sandbox mode:", options)
-                .prompt()
-                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
-            let mode = if choice.starts_with("openshell") {
-                "openshell"
-            } else {
-                "none"
-            };
-            update_agent_yaml_sandbox_mode(&agent_yaml_path, mode)?;
-            Some("sandbox mode")
         } else if selection == opt_network_policy {
             let options = vec![
                 "restrictive — anthropic/claude domains only (recommended)",
@@ -2190,50 +2162,6 @@ fn remove_agent_yaml_field(path: &Path, key: &str) -> miette::Result<()> {
     Ok(())
 }
 
-/// Update the `sandbox: mode:` field in an agent.yaml file.
-///
-/// Handles the nested `sandbox:` block: updates `mode:` if it exists,
-/// or creates the block if absent. When switching to `none`, removes `policy_file`.
-/// When switching to `openshell`, adds default `policy_file: policy.yaml`.
-fn update_agent_yaml_sandbox_mode(path: &Path, mode: &str) -> miette::Result<()> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| miette::miette!("read {}: {e:#}", path.display()))?;
-
-    // Remove existing sandbox block (header + indented lines).
-    let mut lines: Vec<String> = Vec::new();
-    let mut in_sandbox_block = false;
-    for line in content.lines() {
-        if line == "sandbox:" {
-            in_sandbox_block = true;
-            continue;
-        }
-        if in_sandbox_block {
-            if line.starts_with("  ") {
-                continue;
-            }
-            in_sandbox_block = false;
-        }
-        lines.push(line.to_string());
-    }
-
-    // Append new sandbox block.
-    lines.push("sandbox:".to_string());
-    lines.push(format!("  mode: {mode}"));
-    if mode == "openshell" {
-        lines.push("  policy_file: policy.yaml".to_string());
-    }
-
-    let mut output = lines.join("\n");
-    if !output.ends_with('\n') {
-        output.push('\n');
-    }
-
-    std::fs::write(path, &output)
-        .map_err(|e| miette::miette!("write {}: {e:#}", path.display()))?;
-
-    Ok(())
-}
-
 /// Write or update `sandbox.name` in agent.yaml.
 pub fn update_agent_yaml_sandbox_name(agent_dir: &Path, sandbox_name: &str) -> miette::Result<()> {
     let path = agent_dir.join("agent.yaml");
@@ -2969,7 +2897,7 @@ mod up_repair_tests {
         let path = dir.path().join("agent.yaml");
         std::fs::write(
             &path,
-            "# keep\nmodel: sonnet\ntelegram_token: \"1:old\"\nsandbox:\n  mode: none\n",
+            "# keep\nmodel: sonnet\ntelegram_token: \"1:old\"\nsandbox:\n  name: right-a\n",
         )
         .unwrap();
 
@@ -2977,7 +2905,7 @@ mod up_repair_tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("# keep"));
-        assert!(content.contains("sandbox:\n  mode: none"));
+        assert!(content.contains("sandbox:\n  name: right-a"));
         assert!(content.contains("telegram_token: \"123:new_token\""));
         let parsed: right_agent_config::AgentConfig = serde_saphyr::from_str(&content).unwrap();
         assert_eq!(parsed.telegram_token.as_deref(), Some("123:new_token"));

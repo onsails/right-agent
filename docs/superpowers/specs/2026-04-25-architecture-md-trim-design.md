@@ -11,7 +11,7 @@ Shrink `ARCHITECTURE.md` from ~42.6k chars (755 lines) to ~33–34k chars (~20% 
 ## Scope
 
 **In scope:**
-- In-place edits to `/Users/developer/dev/rightclaw/ARCHITECTURE.md`.
+- In-place edits to `/Users/molt/dev/rightclaw/ARCHITECTURE.md`.
 - Correction of stale content spotted during the trim pass.
 
 **Out of scope:**

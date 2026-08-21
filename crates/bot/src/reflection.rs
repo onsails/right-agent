@@ -6,10 +6,9 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use right_agent::usage::insert::{insert_reflection_cron, insert_reflection_worker};
 
@@ -20,6 +19,9 @@ use crate::cc::stream::{StreamEvent, parse_stream_event};
 /// or tool-argument summary in the reflection prompt. Kept short so the prompt
 /// stays under a few hundred tokens.
 const ACTIVITY_SNIPPET_LEN: usize = 80;
+
+/// Bound on transport cleanup after a terminal result or forced termination.
+const NOTICE_RESUME_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Classifies the failure we are reflecting on. Drives the human-readable
 /// reason text inserted into the SYSTEM_NOTICE prompt.
@@ -75,8 +77,9 @@ pub(crate) struct ReflectionContext {
     pub(crate) limits: ReflectionLimits,
     pub(crate) agent_name: String,
     pub(crate) agent_dir: PathBuf,
-    pub(crate) ssh_config_path: Option<PathBuf>,
-    pub(crate) resolved_sandbox: Option<String>,
+    /// `None` when the sandbox backend is degraded; the reflection then
+    /// refuses rather than resuming the session on the host.
+    pub(crate) sandbox: Option<crate::sandbox::Sandbox>,
     pub(crate) parent_source: ParentSource,
     pub(crate) model: Option<String>,
     /// Hot-reloadable debug flag. Forwarded to ClaudeInvocation.debug_flag.
@@ -87,6 +90,8 @@ pub(crate) struct ReflectionContext {
 pub(crate) enum ReflectionError {
     #[error("reflection spawn failed: {0}")]
     Spawn(String),
+    #[error("reflection guest process failed: {0}")]
+    Process(#[from] crate::cc::sandbox_process::SandboxProcessError),
     #[error("reflection timed out after {0:?}")]
     Timeout(Duration),
     #[error("reflection CC exited with code {code}: {detail}")]
@@ -95,6 +100,42 @@ pub(crate) enum ReflectionError {
     Parse(String),
     #[error("reflection I/O failed: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Derive the semantic process exit from CC's terminal result.
+///
+/// A well-formed `is_error` is authoritative because the transport may not
+/// report an exit after the terminal result. Malformed or missing result data
+/// falls back to the transport exit, if one was observed.
+fn effective_notice_exit(result_line: Option<&str>, transport_exit: Option<i32>) -> i32 {
+    let result_is_error = result_line.and_then(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()?
+            .get("is_error")?
+            .as_bool()
+    });
+    match result_is_error {
+        Some(false) => 0,
+        Some(true) => 1,
+        None => transport_exit.unwrap_or(-1),
+    }
+}
+
+async fn kill_and_bounded_wait(
+    child: &mut crate::cc::sandbox_process::SandboxChild,
+) -> Option<i32> {
+    child.kill().await;
+    match tokio::time::timeout(NOTICE_RESUME_CLEANUP_TIMEOUT, child.wait()).await {
+        Ok(Ok(code)) => Some(code),
+        Ok(Err(error)) => {
+            tracing::debug!("notice-resume cleanup wait failed: {error:#}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("notice-resume cleanup wait timed out");
+            None
+        }
+    }
 }
 
 /// Render a human-readable reason text for the SYSTEM_NOTICE header.
@@ -309,9 +350,8 @@ async fn run_notice_resume(
     let schema_path = ctx.agent_dir.join(".claude").join(mode.schema_filename());
     let reply_schema = std::fs::read_to_string(&schema_path)?;
 
-    // 2. MCP config path (reuse worker's helper).
-    let mcp_path =
-        crate::cc::invocation::mcp_config_path(ctx.ssh_config_path.as_deref(), &ctx.agent_dir);
+    // 2. Aggregator config — one fixed guest path.
+    let mcp_path = crate::sandbox::SANDBOX_MCP_JSON_PATH.to_owned();
 
     // 3. ClaudeInvocation — resume, stream-json, tight caps, no Agent tool.
     let invocation = ClaudeInvocation {
@@ -339,130 +379,123 @@ async fn run_notice_resume(
     let claude_args = invocation.into_args();
 
     // 4. System-prompt assembly (match worker's pattern; no MCP refresh, no memory).
-    let (sandbox_mode, home_dir) = if ctx.ssh_config_path.is_some() {
-        (
-            right_agent::agent::types::SandboxMode::Openshell,
-            "/sandbox".to_owned(),
-        )
-    } else {
-        (
-            right_agent::agent::types::SandboxMode::None,
-            ctx.agent_dir.to_string_lossy().into_owned(),
-        )
-    };
-    let base_prompt =
-        right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
+    let base_prompt = right_codegen::generate_system_prompt(&ctx.agent_name, "/sandbox");
 
-    crate::cc::invocation::guard_no_sandboxed_host_exec(
-        ctx.resolved_sandbox.as_deref(),
-        ctx.ssh_config_path.as_deref(),
+    let sandbox =
+        crate::cc::invocation::guard_no_sandboxed_host_exec(&ctx.agent_name, ctx.sandbox.as_ref())
+            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
+
+    let prompt_path = crate::cc::prompt::sandbox_prompt_file_path("reflection-prompt");
+    let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
+        &base_prompt,
+        mode.prompt_mode(),
+        "/sandbox",
+        &prompt_path,
+        "/sandbox",
+        &claude_args,
+        None, // no MCP instructions refresh
+        None, // no memory section
+        None,
+        None,
+        Some(notice_token),
+    );
+
+    let mut child = crate::cc::invocation::build_claude_script_command(
+        assembly_script,
+        &ctx.agent_dir,
+        sandbox,
     )
+    .await
+    .stdin_piped()
+    .stdout(crate::cc::sandbox_process::Capture::Pipe)
+    .stderr(crate::cc::sandbox_process::Capture::Null)
+    .spawn()
+    .await
     .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
 
-    let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
-        let sandbox_name = ctx.resolved_sandbox.as_deref().ok_or_else(|| {
-            ReflectionError::Spawn("ssh_config_path set but resolved_sandbox is None".into())
-        })?;
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sandbox_name);
-        let prompt_path = format!("/tmp/right-reflection-prompt-{}.md", ctx.session_uuid);
-        let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            mode.prompt_mode(),
-            "/sandbox",
-            &prompt_path,
-            "/sandbox",
-            &claude_args,
-            None, // no MCP instructions refresh
-            None, // no memory section
-            None,
-            None,
-            Some(notice_token),
-        );
-        if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir).await {
-            let escaped = token.replace('\'', "'\\''");
-            assembly_script =
-                format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
-        }
-        let mut c = tokio::process::Command::new("ssh");
-        c.arg("-F").arg(ssh_config);
-        c.arg(&ssh_host);
-        c.arg("--");
-        c.arg(assembly_script);
-        c
-    } else {
-        let agent_dir_str = ctx.agent_dir.to_string_lossy();
-        let prompt_path = ctx.agent_dir.join(".claude").join(format!(
-            "composite-reflection-prompt-{}.md",
-            ctx.session_uuid
-        ));
-        let prompt_path_str = prompt_path.to_string_lossy();
-        let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
-            &base_prompt,
-            mode.prompt_mode(),
-            &agent_dir_str,
-            &prompt_path_str,
-            &agent_dir_str,
-            &claude_args,
-            None,
-            None,
-            None,
-            None,
-            Some(notice_token),
-        );
-        let mut c = tokio::process::Command::new("bash");
-        c.arg("-c");
-        c.arg(&assembly_script);
-        c.env("HOME", &ctx.agent_dir);
-        c.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir).await {
-            c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
-        }
-        c.current_dir(&ctx.agent_dir);
-        c
-    };
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::null());
-
-    let mut child = right_process::ProcessGroupChild::spawn(cmd)
-        .map_err(|e| ReflectionError::Spawn(format!("{:#}", e)))?;
-
-    // Pipe the prompt, then drop stdin to signal EOF.
+    // Pipe the prompt and guest EOF as one delivery operation. The SDK EOF
+    // acknowledgement is part of delivery and must not outlive the reflection
+    // process timeout.
     if let Some(mut stdin) = child.stdin() {
-        stdin.write_all(input.as_bytes()).await?;
-        // drop at end of scope
-    }
-
-    // Read stdout streaming; capture the last `result` event's raw JSON.
-    let stdout = child
-        .stdout()
-        .ok_or_else(|| ReflectionError::Spawn("no stdout handle".into()))?;
-    let mut lines = BufReader::new(stdout).lines();
-
-    let mut last_result_line: Option<String> = None;
-    let read_fut = async {
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let StreamEvent::Result(raw) = parse_stream_event(&line) {
-                last_result_line = Some(raw);
+        let delivery = async move {
+            stdin.write_all(input.as_bytes()).await?;
+            stdin.close().await
+        };
+        match tokio::time::timeout(ctx.limits.process_timeout, delivery).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                kill_and_bounded_wait(&mut child).await;
+                return Err(error.into());
+            }
+            Err(_) => {
+                kill_and_bounded_wait(&mut child).await;
+                tracing::warn!(
+                    duration_ms = ctx.limits.process_timeout.as_millis() as u64,
+                    "notice-resume stdin delivery timed out"
+                );
+                return Err(ReflectionError::Timeout(ctx.limits.process_timeout));
             }
         }
+    } else {
+        kill_and_bounded_wait(&mut child).await;
+        return Err(ReflectionError::Spawn("no stdin handle".into()));
+    }
+
+    // Read stdout only until the first terminal result. The SDK can deliver
+    // that record without ever closing stdout or reporting process exit.
+    let stdout = match child.stdout() {
+        Some(stdout) => stdout,
+        None => {
+            kill_and_bounded_wait(&mut child).await;
+            return Err(ReflectionError::Spawn("no stdout handle".into()));
+        }
+    };
+    let mut lines = BufReader::new(stdout).lines();
+    let read_result = tokio::time::timeout(ctx.limits.process_timeout, async {
+        loop {
+            match lines.next_line().await? {
+                Some(line) => {
+                    if let StreamEvent::Result(raw) = parse_stream_event(&line) {
+                        return Ok::<Option<String>, std::io::Error>(Some(raw));
+                    }
+                }
+                None => return Ok(None),
+            }
+        }
+    })
+    .await;
+
+    let last_result_line = match read_result {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            kill_and_bounded_wait(&mut child).await;
+            return Err(error.into());
+        }
+        Err(_) => {
+            kill_and_bounded_wait(&mut child).await;
+            tracing::warn!(
+                duration_ms = ctx.limits.process_timeout.as_millis() as u64,
+                "notice-resume timed out"
+            );
+            return Err(ReflectionError::Timeout(ctx.limits.process_timeout));
+        }
     };
 
-    let timed_out = tokio::time::timeout(ctx.limits.process_timeout, read_fut)
-        .await
-        .is_err();
-
-    // Kill the child regardless of outcome; collect exit code best-effort.
-    let _ = child.kill().await;
-    let exit = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
-
-    if timed_out {
-        tracing::warn!(
-            duration_ms = ctx.limits.process_timeout.as_millis() as u64,
-            "notice-resume timed out"
-        );
-        return Err(ReflectionError::Timeout(ctx.limits.process_timeout));
-    }
+    // A result is terminal regardless of whether the SDK later reports EOF.
+    // Kill is cleanup, while `is_error` below remains the semantic exit.
+    let transport_exit = if last_result_line.is_some() {
+        kill_and_bounded_wait(&mut child).await
+    } else {
+        match tokio::time::timeout(NOTICE_RESUME_CLEANUP_TIMEOUT, child.wait()).await {
+            Ok(Ok(code)) => Some(code),
+            Ok(Err(error)) => {
+                tracing::debug!("notice-resume exit wait failed: {error:#}");
+                None
+            }
+            Err(_) => kill_and_bounded_wait(&mut child).await,
+        }
+    };
+    let exit = effective_notice_exit(last_result_line.as_deref(), transport_exit);
 
     if exit != 0 {
         let detail = match &last_result_line {
@@ -577,6 +610,26 @@ mod tests {
         assert!(format_ring_event(&StreamEvent::Text("   ".into())).is_none());
         assert!(format_ring_event(&StreamEvent::Other).is_none());
         assert!(format_ring_event(&StreamEvent::Result("{}".into())).is_none());
+    }
+
+    #[test]
+    fn terminal_result_semantics_override_unreliable_transport_exit() {
+        let success = r#"{"type":"result","is_error":false,"result":"ok"}"#;
+        let failure = r#"{"type":"result","is_error":true,"result":"failed"}"#;
+
+        assert_eq!(effective_notice_exit(Some(success), None), 0);
+        assert_eq!(effective_notice_exit(Some(success), Some(137)), 0);
+        assert_eq!(effective_notice_exit(Some(failure), Some(0)), 1);
+    }
+
+    #[test]
+    fn malformed_or_missing_terminal_semantics_fall_back_to_transport() {
+        assert_eq!(effective_notice_exit(Some("not json"), Some(7)), 7);
+        assert_eq!(
+            effective_notice_exit(Some(r#"{"type":"result"}"#), None),
+            -1
+        );
+        assert_eq!(effective_notice_exit(None, Some(9)), 9);
     }
 
     #[tokio::test]

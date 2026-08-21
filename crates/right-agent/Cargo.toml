@@ -15,7 +15,8 @@ tokio = { workspace = true }
 which = { workspace = true }
 tempfile = { workspace = true }
 right-config = { path = "../right-config", version = "*" }
-right-openshell = { path = "../right-openshell", version = "*" }
+right-providers = { path = "../right-providers", version = "*" }
+right-sandbox = { path = "../right-sandbox", version = "*" }
 right-ui = { path = "../right-ui", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-stt = { path = "../right-stt", version = "*" }
@@ -30,19 +31,15 @@ inquire = { workspace = true }
 chrono = { workspace = true }
 cron = { workspace = true }
 cron-descriptor = { workspace = true }
-tonic = { workspace = true }
 fs4 = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 const_format = { workspace = true }
 uuid = { workspace = true }
 
-[features]
-test-support = ["right-openshell/test-support"]
-
 [dev-dependencies]
-right-openshell = { path = "../right-openshell", version = "*", features = ["test-support"] }
 right-db = { path = "../right-db", version = "*", features = ["test-support"] }
+anyhow = { workspace = true }
 rustls = { workspace = true }
 tokio = { version = "1.52", features = ["test-util"] }
 wiremock = "0.6"

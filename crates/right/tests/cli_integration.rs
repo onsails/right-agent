@@ -102,8 +102,6 @@ fn agent_init_non_interactive_without_claude_token_leaves_no_agent_directory() {
             "init",
             "missing-auth",
             "-y",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .failure()
@@ -130,8 +128,6 @@ async fn agent_init_persists_claude_token_supplied_via_env() {
             "init",
             "env-auth",
             "-y",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .success()
@@ -182,8 +178,6 @@ fn agent_init_missing_cloudflared_tunnel_leaves_no_agent_directory() {
             "init",
             "dead-ingress",
             "-y",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .failure()
@@ -219,8 +213,6 @@ fn agent_init_malformed_cloudflare_credentials_leaves_no_agent_directory() {
             "init",
             "bad-creds",
             "-y",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .failure()
@@ -255,8 +247,6 @@ fn agent_init_mismatched_cloudflare_tunnel_id_leaves_no_agent_directory() {
             "init",
             "wrong-tunnel",
             "-y",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .failure()
@@ -277,8 +267,6 @@ fn top_level_init_tunnel_failure_leaves_no_agent_state() {
             "external",
             "--tunnel-hostname",
             "https://invalid.example.com",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .failure()
@@ -287,8 +275,12 @@ fn top_level_init_tunnel_failure_leaves_no_agent_state() {
     assert!(!home.path().join("agents/right").exists());
 }
 
+/// `agent init` stores the credential but must not claim it was verified:
+/// the probe that verifies it runs inside the agent's sandbox, which only the
+/// bot's supervisor creates. A broken `claude` on the *host* PATH is therefore
+/// irrelevant to init — proving the host binary is never consulted.
 #[test]
-fn agent_init_invalid_claude_probe_does_not_render_ready() {
+fn agent_init_stores_claude_token_without_claiming_validation() {
     let home = tempdir().unwrap();
     let fake_bin = tempdir().unwrap();
     fs::create_dir_all(home.path().join("agents")).unwrap();
@@ -313,20 +305,20 @@ fn agent_init_invalid_claude_probe_does_not_render_ready() {
             "init",
             "invalid-auth",
             "-y",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
-        .failure()
-        .stdout(predicate::str::contains("ready").not())
-        .stderr(predicate::str::contains(
-            "Claude authentication validation failed",
+        .success()
+        .stdout(predicate::str::contains("credential stored"))
+        .stdout(predicate::str::contains("authenticated").not())
+        .stdout(predicate::str::contains(
+            "created and checked on first `right up`",
         ))
+        .stdout(predicate::str::contains(TEST_CLAUDE_SETUP_TOKEN).not())
         .stderr(predicate::str::contains(TEST_CLAUDE_SETUP_TOKEN).not());
 
     assert!(
         home.path().join("agents/invalid-auth").exists(),
-        "post-creation auth probe failure leaves inspectable agent state"
+        "init completes without a sandbox; the credential is checked at first bring-up"
     );
 }
 
@@ -337,7 +329,7 @@ fn write_minimal_no_sandbox_backup(home: &Path) -> PathBuf {
     fs::create_dir_all(&source).unwrap();
     fs::write(
         backup.join("agent.yaml"),
-        "sandbox:\n  mode: none\nnetwork_policy: permissive\n",
+        "sandbox:\n  name: right-test\nnetwork_policy: permissive\n",
     )
     .unwrap();
     fs::write(source.join("marker"), "backup").unwrap();
@@ -405,8 +397,9 @@ fn agent_restore_tunnel_preflight_failure_leaves_no_agent_state() {
     assert!(!home.path().join("agents/restore-dead-ingress").exists());
 }
 
+#[ignore = "ci-msb: the restore auth probe runs inside a live microVM"]
 #[test]
-fn agent_restore_invalid_claude_probe_does_not_render_restored() {
+fn ci_msb_agent_restore_invalid_claude_probe_does_not_render_restored() {
     let home = tempdir().unwrap();
     let fake_bin = tempdir().unwrap();
     fs::create_dir_all(home.path().join("agents")).unwrap();
@@ -505,7 +498,7 @@ fn test_help_output() {
 }
 
 #[tokio::test]
-async fn test_init_smoke_generates_codegen_list_and_doctor() {
+async fn init_smoke_generates_codegen_list_and_doctor() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -517,8 +510,6 @@ async fn test_init_smoke_generates_codegen_list_and_doctor() {
             "-y",
             "--tunnel-hostname",
             "test.example.com",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .success();
@@ -585,7 +576,7 @@ async fn test_init_smoke_generates_codegen_list_and_doctor() {
 }
 
 #[test]
-fn test_init_twice_fails() {
+fn init_twice_fails() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -597,8 +588,6 @@ fn test_init_twice_fails() {
             "-y",
             "--tunnel-hostname",
             "test.example.com",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .success();
@@ -611,8 +600,6 @@ fn test_init_twice_fails() {
             "-y",
             "--tunnel-hostname",
             "test.example.com",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .failure()
@@ -668,7 +655,7 @@ fn test_doctor_missing_agents_dir() {
 }
 
 #[test]
-fn test_init_with_telegram_token() {
+fn init_with_telegram_token() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -680,8 +667,6 @@ fn test_init_with_telegram_token() {
             "-y",
             "--tunnel-hostname",
             "test.example.com",
-            "--sandbox-mode",
-            "none",
             "--telegram-token",
             "123456:ABCdef",
             "--telegram-allowed-chat-ids",
@@ -820,7 +805,7 @@ fn test_down_no_state_file() {
 }
 
 #[test]
-fn test_init_yes_no_telegram_prompt() {
+fn init_yes_no_telegram_prompt() {
     // Regression for UAT gap: `right init -y` must not block on stdin
     // waiting for a Telegram token when --telegram-token is omitted.
     // cert.pem is absent in CI so the tunnel section is skipped;
@@ -836,15 +821,13 @@ fn test_init_yes_no_telegram_prompt() {
             "-y",
             "--tunnel-hostname",
             "example.com",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .success();
 }
 
 #[test]
-fn test_init_always_writes_config() {
+fn init_always_writes_config() {
     // D-11: config.yaml must be written even when no cloudflared cert detected.
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
@@ -858,8 +841,6 @@ fn test_init_always_writes_config() {
             "-y",
             "--tunnel-hostname",
             "test.example.com",
-            "--sandbox-mode",
-            "none",
             "--telegram-token",
             "123456:ABCdef",
         ])
@@ -885,7 +866,7 @@ fn reload_fails_when_not_running() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
         agent_dir.join("agent.yaml"),
-        "restart: never\nsandbox:\n  mode: none\n",
+        "restart: never\nsandbox:\n  name: right-test\n",
     )
     .unwrap();
 
@@ -910,16 +891,7 @@ fn agent_init_recap_suggests_right_up() {
     .unwrap();
 
     right_with_init_auth()
-        .args([
-            "--home",
-            home,
-            "agent",
-            "init",
-            "test-bot",
-            "-y",
-            "--sandbox-mode",
-            "none",
-        ])
+        .args(["--home", home, "agent", "init", "test-bot", "-y"])
         .assert()
         .success()
         .stdout(predicate::str::contains("right up"));
@@ -928,7 +900,7 @@ fn agent_init_recap_suggests_right_up() {
 // --- Task 2: --force and --fresh flag tests ---
 
 #[test]
-fn test_agent_init_force_recreates_agent() {
+fn agent_init_force_recreates_agent() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -942,16 +914,7 @@ fn test_agent_init_force_recreates_agent() {
 
     // Create agent.
     right_with_init_auth()
-        .args([
-            "--home",
-            home,
-            "agent",
-            "init",
-            "test-agent",
-            "-y",
-            "--sandbox-mode",
-            "none",
-        ])
+        .args(["--home", home, "agent", "init", "test-agent", "-y"])
         .assert()
         .success();
 
@@ -971,8 +934,6 @@ fn test_agent_init_force_recreates_agent() {
             "test-agent",
             "--force-recreate",
             "-y",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .success();
@@ -1004,7 +965,7 @@ fn test_agent_init_fresh_without_force_recreate_errors() {
 }
 
 #[test]
-fn test_agent_init_force_recreate_preserves_config() {
+fn agent_init_force_recreate_preserves_config() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -1025,8 +986,6 @@ fn test_agent_init_force_recreate_preserves_config() {
             "init",
             "preserve-test",
             "-y",
-            "--sandbox-mode",
-            "none",
             "--network-policy",
             "permissive",
         ])
@@ -1050,13 +1009,13 @@ fn test_agent_init_force_recreate_preserves_config() {
 
     let yaml = fs::read_to_string(dir.path().join("agents/preserve-test/agent.yaml")).unwrap();
     assert!(
-        yaml.contains("mode: none"),
-        "agent.yaml should preserve sandbox mode: none after --force-recreate, got:\n{yaml}"
+        yaml.contains("network_policy: permissive"),
+        "agent.yaml should preserve the saved network policy after --force-recreate, got:\n{yaml}"
     );
 }
 
 #[test]
-fn test_agent_init_force_recreate_on_nonexistent_agent() {
+fn agent_init_force_recreate_on_nonexistent_agent() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -1078,8 +1037,6 @@ fn test_agent_init_force_recreate_on_nonexistent_agent() {
             "new-agent",
             "--force-recreate",
             "-y",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .success();
@@ -1092,7 +1049,7 @@ fn assert_force_recreate_rejects_bot_status(status: &str) {
     fs::create_dir_all(home.join("agents/test-agent")).unwrap();
     fs::write(
         home.join("agents/test-agent/agent.yaml"),
-        "sandbox:\n  mode: none\n",
+        "sandbox:\n  name: right-test\n",
     )
     .unwrap();
     fs::write(home.join("config.yaml"), minimal_config_yaml(home)).unwrap();
@@ -1156,50 +1113,26 @@ fn agent_init_force_recreate_refuses_active_bot_states() {
 
 /// Regression: cmd_agent_ssh must discover agents correctly.
 /// Previously it passed `home` instead of `home/agents` to discover_agents,
-/// so no agents were ever found.
+/// `right agent ssh` is gone: SSH is not part of the sandbox transport any
+/// more, so the subcommand must not be silently accepted.
 #[test]
-fn test_agent_ssh_finds_agent() {
+fn test_agent_ssh_subcommand_no_longer_exists() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
-    // Create minimal agent structure with openshell sandbox.
     let agent_dir = dir.path().join("agents").join("test-agent");
     fs::create_dir_all(&agent_dir).unwrap();
     fs::write(
         agent_dir.join("agent.yaml"),
-        "restart: never\nsandbox:\n  mode: openshell\n",
+        "restart: never\nsandbox:\n  name: right-test\n",
     )
     .unwrap();
 
-    // SSH should fail because process-compose isn't running — but NOT because
-    // the agent wasn't found. The old bug would give "Agent 'test-agent' not found".
     right()
         .args(["--home", home, "agent", "ssh", "test-agent"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("not running").or(predicate::str::contains("SSH config")))
-        .stderr(predicate::str::contains("not found").not());
-}
-
-/// Agent SSH must reject agents without openshell sandbox.
-#[test]
-fn test_agent_ssh_rejects_no_sandbox() {
-    let dir = tempdir().unwrap();
-    let home = dir.path().to_str().unwrap();
-
-    let agent_dir = dir.path().join("agents").join("local-agent");
-    fs::create_dir_all(&agent_dir).unwrap();
-    fs::write(
-        agent_dir.join("agent.yaml"),
-        "restart: never\nsandbox:\n  mode: none\n",
-    )
-    .unwrap();
-
-    right()
-        .args(["--home", home, "agent", "ssh", "local-agent"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("without sandbox"));
+        .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
 /// `right agent list` should work the same as `right list`.
@@ -1213,7 +1146,7 @@ fn test_agent_list() {
     fs::create_dir_all(&agent_dir).unwrap();
     fs::write(
         agent_dir.join("agent.yaml"),
-        "restart: never\nsandbox:\n  mode: none\n",
+        "restart: never\nsandbox:\n  name: right-test\n",
     )
     .unwrap();
 
@@ -1225,70 +1158,11 @@ fn test_agent_list() {
         .stdout(predicate::str::contains("1 agent"));
 }
 
-/// Validate generated OpenShell policy against a live sandbox.
-/// Creates an ephemeral sandbox via `ensure_sandbox`, applies the policy, then destroys it.
-#[ignore = "ci-openshell: requires live OpenShell gateway"]
+// --- Backup and restore integration tests ---
+
+#[ignore = "ci-msb: restore unpacks the backup inside a live microVM"]
 #[tokio::test]
-async fn ci_openshell_policy_validates_against_openshell() {
-    let _slot = right_openshell::openshell::acquire_sandbox_slot();
-    let mtls_dir = match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-        other => panic!("OpenShell not ready: {other:?}"),
-    };
-
-    let sandbox_name = "rt-policy-validate";
-
-    right_openshell::test_cleanup::pkill_test_orphans(sandbox_name);
-    right_openshell::test_cleanup::register_test_sandbox(sandbox_name);
-
-    // Clean up leftover from a previous failed run.
-    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
-        .await
-        .unwrap();
-    if right_openshell::openshell::sandbox_exists(&mut client, sandbox_name)
-        .await
-        .unwrap()
-    {
-        right_openshell::openshell::delete_sandbox(sandbox_name).await;
-        right_openshell::openshell::wait_for_deleted(&mut client, sandbox_name, 60, 2)
-            .await
-            .expect("cleanup of leftover sandbox failed");
-    }
-
-    // Generate the policy under test.
-    let policy_yaml = right_codegen::policy::generate_policy(
-        right_runtime_state::MCP_HTTP_PORT,
-        &right_agent::agent::types::NetworkPolicy::Permissive,
-        right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
-    );
-    let tmpdir = tempdir().unwrap();
-    let policy_path = tmpdir.path().join("test-policy.yaml");
-    fs::write(&policy_path, &policy_yaml).unwrap();
-
-    // Create sandbox with the generated policy — this validates the YAML is accepted.
-    let mut child =
-        right_openshell::openshell::spawn_sandbox(sandbox_name, &policy_path, None, &[])
-            .expect("failed to spawn sandbox");
-    let ready = right_openshell::openshell::wait_for_ready(
-        &mut client,
-        sandbox_name,
-        right_openshell::test_support::sandbox_ready_timeout_secs(120),
-        2,
-    )
-    .await;
-    let _ = child.kill().await;
-
-    // Cleanup regardless of outcome.
-    right_openshell::openshell::delete_sandbox(sandbox_name).await;
-    right_openshell::test_cleanup::unregister_test_sandbox(sandbox_name);
-
-    ready.expect("sandbox did not become READY — generated policy may be invalid");
-}
-
-// --- Task 9: No-sandbox backup and restore integration tests ---
-
-#[tokio::test]
-async fn test_agent_backup_and_restore_no_sandbox() {
+async fn ci_msb_agent_backup_and_restore_no_sandbox() {
     let home = tempdir().unwrap();
     let home_str = home.path().to_str().unwrap();
 
@@ -1297,7 +1171,7 @@ async fn test_agent_backup_and_restore_no_sandbox() {
     fs::create_dir_all(agent_dir.join(".claude")).unwrap();
     fs::write(
         agent_dir.join("agent.yaml"),
-        "sandbox:\n  mode: none\nnetwork_policy: permissive\n",
+        "sandbox:\n  name: right-test\nnetwork_policy: permissive\n",
     )
     .unwrap();
     fs::write(
@@ -1470,8 +1344,9 @@ groups:
     assert_eq!(restored_token.as_deref(), Some(TEST_CLAUDE_SETUP_TOKEN));
 }
 
+#[ignore = "ci-msb: restore unpacks the backup inside a live microVM"]
 #[tokio::test]
-async fn test_agent_restore_no_sandbox_removes_legacy_db_sidecars() {
+async fn ci_msb_agent_restore_removes_legacy_db_sidecars() {
     let home = tempdir().unwrap();
     let home_str = home.path().to_str().unwrap();
     fs::write(
@@ -1486,7 +1361,11 @@ async fn test_agent_restore_no_sandbox_removes_legacy_db_sidecars() {
         .join("source-agent")
         .join("20260527-0100");
     fs::create_dir_all(&backup_dir).unwrap();
-    fs::write(backup_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(
+        backup_dir.join("agent.yaml"),
+        "sandbox:\n  name: right-test\n",
+    )
+    .unwrap();
     let backup_db = right_db::open_connection(&backup_dir, true).await.unwrap();
     backup_db
         .execute("CREATE TABLE legacy_restore_probe (val TEXT)", ())
@@ -1508,7 +1387,11 @@ async fn test_agent_restore_no_sandbox_removes_legacy_db_sidecars() {
     let tar_root = home.path().join("legacy-tar-root");
     let tar_agent = tar_root.join("source-agent");
     fs::create_dir_all(&tar_agent).unwrap();
-    fs::write(tar_agent.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(
+        tar_agent.join("agent.yaml"),
+        "sandbox:\n  name: right-test\n",
+    )
+    .unwrap();
     fs::write(tar_agent.join("notes.txt"), "from tar\n").unwrap();
     let tar_db = right_db::open_connection(&tar_agent, true).await.unwrap();
     tar_db
@@ -1583,8 +1466,9 @@ async fn test_agent_restore_no_sandbox_removes_legacy_db_sidecars() {
     assert_eq!(val, "canonical db snapshot");
 }
 
+#[ignore = "ci-msb: restore unpacks the backup inside a live microVM"]
 #[tokio::test]
-async fn test_agent_restore_no_sandbox_ignores_tar_db_without_canonical_snapshot() {
+async fn ci_msb_agent_restore_ignores_tar_db_without_canonical_snapshot() {
     let home = tempdir().unwrap();
     let home_str = home.path().to_str().unwrap();
     fs::write(
@@ -1599,12 +1483,20 @@ async fn test_agent_restore_no_sandbox_ignores_tar_db_without_canonical_snapshot
         .join("source-agent")
         .join("20260527-0200");
     fs::create_dir_all(&backup_dir).unwrap();
-    fs::write(backup_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(
+        backup_dir.join("agent.yaml"),
+        "sandbox:\n  name: right-test\n",
+    )
+    .unwrap();
 
     let tar_root = home.path().join("legacy-tar-root-no-canonical");
     let tar_agent = tar_root.join("source-agent");
     fs::create_dir_all(&tar_agent).unwrap();
-    fs::write(tar_agent.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(
+        tar_agent.join("agent.yaml"),
+        "sandbox:\n  name: right-test\n",
+    )
+    .unwrap();
     fs::write(tar_agent.join("notes.txt"), "from tar\n").unwrap();
     let tar_db = right_db::open_connection(&tar_agent, true).await.unwrap();
     tar_db
@@ -1683,7 +1575,7 @@ fn test_agent_restore_fails_before_partial_agent_for_missing_binding_mode() {
     fs::write(backup_dir.join("sandbox.tar.gz"), "not a real tar").unwrap();
     fs::write(
         backup_dir.join("agent.yaml"),
-        "sandbox:\n  mode: none\nmemory:\n  provider: hindsight\n",
+        "sandbox:\n  name: right-test\nmemory:\n  provider: hindsight\n",
     )
     .unwrap();
 
@@ -1709,8 +1601,9 @@ fn test_agent_restore_fails_before_partial_agent_for_missing_binding_mode() {
     );
 }
 
+#[ignore = "ci-msb: restore unpacks the backup inside a live microVM"]
 #[test]
-fn test_agent_backup_and_restore_no_sandbox_preserves_source_hindsight_bank() {
+fn ci_msb_agent_backup_and_restore_preserves_source_hindsight_bank() {
     let home = tempdir().unwrap();
     let home_str = home.path().to_str().unwrap();
 
@@ -1718,7 +1611,7 @@ fn test_agent_backup_and_restore_no_sandbox_preserves_source_hindsight_bank() {
     fs::create_dir_all(&agent_dir).unwrap();
     fs::write(
         agent_dir.join("agent.yaml"),
-        "sandbox:\n  mode: none\nmemory:\n  provider: hindsight\n",
+        "sandbox:\n  name: right-test\nmemory:\n  provider: hindsight\n",
     )
     .unwrap();
     fs::write(agent_dir.join("IDENTITY.md"), "# Source Agent\n").unwrap();
@@ -1771,14 +1664,19 @@ fn test_agent_backup_and_restore_no_sandbox_preserves_source_hindsight_bank() {
     );
 }
 
+#[ignore = "ci-msb: backup archives the guest filesystem of a live microVM"]
 #[test]
-fn test_agent_backup_sandbox_only() {
+fn ci_msb_agent_backup_sandbox_only() {
     let home = tempdir().unwrap();
     let home_str = home.path().to_str().unwrap();
 
     let agent_dir = home.path().join("agents").join("test-agent");
     fs::create_dir_all(agent_dir.join(".claude")).unwrap();
-    fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(
+        agent_dir.join("agent.yaml"),
+        "sandbox:\n  name: right-test\n",
+    )
+    .unwrap();
     fs::write(agent_dir.join("IDENTITY.md"), "# Test\n").unwrap();
     fs::write(agent_dir.join("TOOLS.md"), "# Tools\n").unwrap();
 
@@ -1814,8 +1712,9 @@ fn test_agent_backup_sandbox_only() {
     );
 }
 
+#[ignore = "ci-msb: backup archives the guest filesystem of a live microVM"]
 #[test]
-fn test_agent_backup_excludes_rebuildable_dirs_by_default_no_sandbox() {
+fn ci_msb_agent_backup_excludes_rebuildable_dirs_by_default() {
     let home = tempdir().unwrap();
     let home_str = home.path().to_str().unwrap();
 
@@ -1826,7 +1725,11 @@ fn test_agent_backup_excludes_rebuildable_dirs_by_default_no_sandbox() {
     fs::create_dir_all(agent_dir.join(".npm")).unwrap();
     fs::create_dir_all(agent_dir.join(".uv")).unwrap();
     fs::create_dir_all(agent_dir.join("custom-dir")).unwrap();
-    fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(
+        agent_dir.join("agent.yaml"),
+        "sandbox:\n  name: right-test\n",
+    )
+    .unwrap();
     fs::write(agent_dir.join(".claude/session.json"), "{}\n").unwrap();
     fs::write(agent_dir.join(".cache/cache.txt"), "cache\n").unwrap();
     fs::write(agent_dir.join(".venv/python.txt"), "venv\n").unwrap();
@@ -1873,8 +1776,9 @@ fn test_agent_backup_excludes_rebuildable_dirs_by_default_no_sandbox() {
     );
 }
 
+#[ignore = "ci-msb: backup archives the guest filesystem of a live microVM"]
 #[test]
-fn test_agent_backup_include_rebuildable_keeps_rebuildable_dirs_no_sandbox() {
+fn ci_msb_agent_backup_include_rebuildable_keeps_rebuildable_dirs() {
     let home = tempdir().unwrap();
     let home_str = home.path().to_str().unwrap();
 
@@ -1883,7 +1787,11 @@ fn test_agent_backup_include_rebuildable_keeps_rebuildable_dirs_no_sandbox() {
     fs::create_dir_all(agent_dir.join(".venv")).unwrap();
     fs::create_dir_all(agent_dir.join(".npm")).unwrap();
     fs::create_dir_all(agent_dir.join(".uv")).unwrap();
-    fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(
+        agent_dir.join("agent.yaml"),
+        "sandbox:\n  name: right-test\n",
+    )
+    .unwrap();
     fs::write(agent_dir.join(".cache/cache.txt"), "cache\n").unwrap();
     fs::write(agent_dir.join(".venv/python.txt"), "venv\n").unwrap();
     fs::write(agent_dir.join(".npm/npm.txt"), "npm\n").unwrap();
@@ -1925,13 +1833,21 @@ fn test_agent_restore_fails_if_agent_exists() {
     // Create existing agent.
     let agent_dir = home.path().join("agents").join("existing");
     fs::create_dir_all(&agent_dir).unwrap();
-    fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(
+        agent_dir.join("agent.yaml"),
+        "sandbox:\n  name: right-test\n",
+    )
+    .unwrap();
 
     // Create a fake backup dir.
     let backup_dir = home.path().join("fake-backup");
     fs::create_dir_all(&backup_dir).unwrap();
     fs::write(backup_dir.join("sandbox.tar.gz"), "fake").unwrap();
-    fs::write(backup_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(
+        backup_dir.join("agent.yaml"),
+        "sandbox:\n  name: right-test\n",
+    )
+    .unwrap();
 
     right_with_init_auth()
         .args([
@@ -1965,8 +1881,9 @@ fn test_destroy_nonexistent_agent() {
         .stderr(predicate::str::contains("not found"));
 }
 
+#[ignore = "ci-msb: destroy deletes from the host-global microVM catalog"]
 #[test]
-fn test_destroy_agent_force() {
+fn ci_msb_destroy_agent_force() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -1977,8 +1894,6 @@ fn test_destroy_agent_force() {
             home,
             "init",
             "-y",
-            "--sandbox-mode",
-            "none",
             "--tunnel-hostname",
             "test.example.com",
         ])
@@ -1999,8 +1914,9 @@ fn test_destroy_agent_force() {
     assert!(!dir.path().join("agents/right").exists());
 }
 
+#[ignore = "ci-msb: destroy backs up a live microVM before deleting it"]
 #[test]
-fn test_destroy_agent_force_with_backup() {
+fn ci_msb_destroy_agent_force_with_backup() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -2010,8 +1926,6 @@ fn test_destroy_agent_force_with_backup() {
             home,
             "init",
             "-y",
-            "--sandbox-mode",
-            "none",
             "--tunnel-hostname",
             "test.example.com",
         ])
@@ -2069,8 +1983,6 @@ fn test_agent_init_bare_force_rejected() {
             "test-agent",
             "--force",
             "-y",
-            "--sandbox-mode",
-            "none",
         ])
         .assert()
         .failure()

@@ -47,10 +47,10 @@ The 2026-04-25 spec stays in tree as historical record; do not delete.
 
 **In scope:**
 
-- Edits to `/Users/developer/dev/rightclaw/ARCHITECTURE.md` (cuts + tighten +
+- Edits to `/Users/molt/dev/rightclaw/ARCHITECTURE.md` (cuts + tighten +
   pointers).
-- New tree at `/Users/developer/dev/rightclaw/docs/architecture/` with six files.
-- Edits to `/Users/developer/dev/rightclaw/CLAUDE.md` (drop dependency block, add
+- New tree at `/Users/molt/dev/rightclaw/docs/architecture/` with six files.
+- Edits to `/Users/molt/dev/rightclaw/CLAUDE.md` (drop dependency block, add
   split convention).
 
 **Out of scope:**

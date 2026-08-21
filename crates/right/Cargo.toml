@@ -19,8 +19,10 @@ right-db = { path = "../right-db", version = "*" }
 right-lifecycle = { path = "../right-lifecycle", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
 right-memory = { path = "../right-memory", version = "*" }
-right-openshell = { path = "../right-openshell", version = "*" }
+right-process = { path = "../right-process", version = "*" }
+right-providers = { path = "../right-providers", version = "*" }
 right-runtime-state = { path = "../right-runtime-state", version = "*" }
+right-sandbox = { path = "../right-sandbox", version = "*" }
 right-stt = { path = "../right-stt", version = "*" }
 right-ui = { path = "../right-ui", version = "*" }
 clap = { workspace = true }
@@ -49,14 +51,15 @@ inquire = { workspace = true }
 chrono = { workspace = true }
 walkdir = { workspace = true }
 secrecy = { workspace = true }
-tonic = { workspace = true }
 uuid = { workspace = true }
+tempfile = { workspace = true }
+sha2 = { workspace = true }
+shlex = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2.2"
 predicates = "3.1"
 right-db = { path = "../right-db", version = "*", features = ["test-support"] }
-right-openshell = { path = "../right-openshell", version = "*", features = ["test-support"] }
-tempfile = "3.27"
+right-providers = { path = "../right-providers", version = "*", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }

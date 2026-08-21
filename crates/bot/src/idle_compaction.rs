@@ -121,8 +121,7 @@ pub(crate) struct IdleCompactionCtx {
     pub agent_dir: PathBuf,
     pub agent_db_dir: PathBuf,
     pub agent_name: String,
-    pub ssh_config_path: Option<PathBuf>,
-    pub resolved_sandbox: Option<String>,
+    pub sandbox: Option<crate::sandbox::Sandbox>,
     pub session_locks: crate::telegram::SessionLocks,
     pub debug: Arc<AtomicBool>,
     pub chat_id: i64,
@@ -210,25 +209,23 @@ async fn run_compaction(ctx: IdleCompactionCtx, token: CancellationToken) {
 
     let args =
         build_compact_invocation(&root_session_id, model, Arc::clone(&ctx.debug)).into_args();
-    let mut cmd = match crate::cc::invocation::build_claude_command(
-        &args,
-        &ctx.agent_dir,
-        ctx.ssh_config_path.as_deref(),
-        ctx.resolved_sandbox.as_deref(),
-    )
-    .await
-    {
-        Ok(c) => c,
+    let sandbox = match crate::cc::invocation::guard_no_sandboxed_host_exec(
+        &ctx.agent_name,
+        ctx.sandbox.as_ref(),
+    ) {
+        Ok(sandbox) => sandbox,
         Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: build_claude_command refused: {e:#}");
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: refused: {e:#}");
             return;
         }
     };
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let child = match right_process::ProcessGroupChild::spawn(cmd) {
+    let child = match crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, sandbox)
+        .await
+        .stdout(crate::cc::sandbox_process::Capture::Pipe)
+        .stderr(crate::cc::sandbox_process::Capture::Pipe)
+        .spawn()
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "idle-compaction: spawn failed: {e:#}");
@@ -237,9 +234,9 @@ async fn run_compaction(ctx: IdleCompactionCtx, token: CancellationToken) {
     };
 
     // Race the wait against the session cancellation token. On timeout or
-    // abort, dropping the wait future drops the `ProcessGroupChild`, which
-    // SIGKILLs the whole `/compact` process group (the in-sandbox grandchild
-    // too) — nothing is orphaned and the session lock releases immediately.
+    // abort, dropping the wait future drops the `SandboxChild`, which kills
+    // the guest `/compact` process — nothing is orphaned and the session lock
+    // releases immediately.
     let output = tokio::select! {
         res = crate::cc::invocation::wait_with_output_or_kill(child, COMPACT_TIMEOUT) => match res {
             Ok(crate::cc::invocation::ChildOutput::Completed(o)) => o,
@@ -258,17 +255,17 @@ async fn run_compaction(ctx: IdleCompactionCtx, token: CancellationToken) {
         },
         _ = token.cancelled() => {
             // A turn started (activity). Dropping the wait future drops the
-            // ProcessGroupChild, killing the /compact process group cleanly.
+            // SandboxChild, killing the /compact guest process cleanly.
             tracing::debug!(agent = %ctx.agent_name, "idle-compaction: aborted by activity");
             return;
         }
     };
 
-    if !output.status.success() {
+    if !output.success() {
         // `/compact` returns an empty `result`; success is exit status only.
         tracing::warn!(
             agent = %ctx.agent_name,
-            status = ?output.status,
+            exit_code = output.code,
             stderr_bytes = output.stderr.len(),
             "idle-compaction: /compact non-zero exit"
         );
@@ -455,8 +452,7 @@ mod tests {
             agent_dir: std::path::PathBuf::from("/nonexistent"),
             agent_db_dir: std::path::PathBuf::from("/nonexistent"),
             agent_name: "test".into(),
-            ssh_config_path: None,
-            resolved_sandbox: None,
+            sandbox: None,
             session_locks: std::sync::Arc::new(dashmap::DashMap::new()),
             debug: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chat_id: chat,

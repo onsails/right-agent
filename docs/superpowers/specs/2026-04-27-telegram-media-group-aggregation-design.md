@@ -17,7 +17,7 @@ caption-less siblings fail that check and are dropped silently in the
 "group non-mention dropped" branch. Only the message bearing the caption
 reaches `handle_message`.
 
-Concrete reproduction from `~/.right/logs/agent-b.log.2026-04-27`:
+Concrete reproduction from `~/.right/logs/him.log.2026-04-27`:
 
 ```
 16:03:55.337156  text_preview=None  entities=0   ← attachment, no caption (dropped at filter)
@@ -291,7 +291,7 @@ process restarts (process-compose `on_failure` policy or a manual
 
 ## References
 
-- Bug log: `~/.right/logs/agent-b.log.2026-04-27` lines 137-152
+- Bug log: `~/.right/logs/him.log.2026-04-27` lines 137-152
 - Filter code: `crates/bot/src/telegram/filter.rs:20-60`
 - Mention code: `crates/bot/src/telegram/mention.rs:25-81`
 - Worker debounce: `crates/bot/src/telegram/worker.rs:340-399`

@@ -18,8 +18,9 @@ pub(crate) struct PostTurnLearningCtx {
     pub agent_dir: PathBuf,
     pub agent_db_dir: PathBuf,
     pub agent_name: String,
-    pub ssh_config_path: Option<PathBuf>,
-    pub resolved_sandbox: Option<String>,
+    /// `None` when the sandbox backend is degraded; the prefilter and
+    /// probe-writer legs both skip rather than run anything on the host.
+    pub sandbox: Option<crate::sandbox::Sandbox>,
     pub internal_client: Arc<right_mcp::internal_client::InternalClient>,
     pub session_locks: crate::telegram::SessionLocks,
     pub debug_flag: Arc<AtomicBool>,
@@ -96,8 +97,7 @@ pub(crate) async fn run_post_turn(ctx: PostTurnLearningCtx, anchor: ProbeAnchor)
         agent_dir: ctx.agent_dir.clone(),
         agent_db_dir: ctx.agent_db_dir.clone(),
         agent_name: ctx.agent_name.clone(),
-        ssh_config_path: ctx.ssh_config_path.clone(),
-        resolved_sandbox: ctx.resolved_sandbox.clone(),
+        sandbox: ctx.sandbox.clone(),
         model: ctx.prefilter_model.clone(),
         chat_id: anchor.chat_id,
         thread_id: anchor.thread_id,
@@ -135,29 +135,29 @@ pub(crate) async fn run_post_turn(ctx: PostTurnLearningCtx, anchor: ProbeAnchor)
         }
     };
 
-    let skill_index = match crate::learning_prefilter::collect_rightx_skill_index(
-        ctx.resolved_sandbox.as_deref(),
-        &ctx.agent_dir,
-    )
-    .await
-    {
-        Ok(entries) => entries
-            .into_iter()
-            .map(|s| format!("- {}: {}", s.name, summary_first_line(&s.excerpt)))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "collect_rightx_skill_index failed: {e:#}");
-            String::new()
-        }
+    // No sandbox, no skill index: the `rightx-*` skills live on the guest
+    // filesystem and there is nowhere else to read them from.
+    let skill_index = match ctx.sandbox.as_ref() {
+        Some(sandbox) => match crate::learning_prefilter::collect_rightx_skill_index(sandbox).await
+        {
+            Ok(entries) => entries
+                .into_iter()
+                .map(|s| format!("- {}: {}", s.name, summary_first_line(&s.excerpt)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Err(e) => {
+                tracing::warn!(agent = %ctx.agent_name, "collect_rightx_skill_index failed: {e:#}");
+                String::new()
+            }
+        },
+        None => String::new(),
     };
 
     let writer_ctx = crate::learning_probe_writer::ProbeWriterContext {
         agent_dir: ctx.agent_dir,
         agent_db_dir: ctx.agent_db_dir,
         agent_name: ctx.agent_name,
-        ssh_config_path: ctx.ssh_config_path,
-        resolved_sandbox: ctx.resolved_sandbox,
+        sandbox: ctx.sandbox,
         internal_client: ctx.internal_client,
         model: probe_writer_model,
         debug_flag: ctx.debug_flag,

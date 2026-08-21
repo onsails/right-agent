@@ -2,11 +2,12 @@
 #
 # Concurrency model: test-groups bound concurrency WITHIN one `cargo nextest
 # run`. The host-global, cross-worktree cap is still enforced separately by
-# acquire_sandbox_slot() via RIGHT_MAX_CONCURRENT_SANDBOX_TESTS. Both apply —
-# and the slot cap is the binding TOTAL: the merged CI ignored run sets it to 2,
-# so even though the per-prefix groups below sum to 3 (claude 1 + openshell 2),
-# at most 2 live sandboxes ever exist at once (matching the pre-merge profile).
-# The group caps shape per-prefix parallelism; the slot cap bounds the total.
+# the microVM slot gate in `crates/right-sandbox/tests/common/mod.rs` via
+# RT_MSB_MAX_CONCURRENT_VMS. Both apply — and the slot cap is the binding
+# TOTAL: the merged CI ignored run sets it to 2, so even though the per-prefix
+# groups below sum to 3 (claude 1 + msb 2), at most 2 live sandboxes ever
+# exist at once. The group caps shape per-prefix parallelism; the slot cap
+# bounds the total.
 
 [profile.default]
 # Local dev loop: fail fast, no retries.
@@ -26,7 +27,7 @@ retries = 0
 
 [test-groups]
 sandbox-claude = { max-threads = 1 }
-sandbox-openshell = { max-threads = 2 }
+sandbox-msb = { max-threads = 2 }
 
 # ci_claude_* — heaviest (a full Claude Code turn inside the sandbox): 1 at a time.
 # slow-timeout is a HANG backstop, not a tight bound: 300s × 6 = 30min hard kill.
@@ -38,9 +39,9 @@ filter = 'test(/ci_claude_/)'
 test-group = 'sandbox-claude'
 slow-timeout = { period = '300s', terminate-after = 6 }
 
-# ci_openshell_* — sandbox I/O suite: 2 at a time. Same 30min hang backstop;
-# the provider/github integration tests also boot sandboxes + do network I/O.
+# ci_msb_* — microVM I/O suite: 2 at a time. Same 30min hang backstop; these
+# boot real microVMs and do network I/O against the guest.
 [[profile.ci-ignored.overrides]]
-filter = 'test(/ci_openshell_/)'
-test-group = 'sandbox-openshell'
+filter = 'test(/ci_msb_/)'
+test-group = 'sandbox-msb'
 slow-timeout = { period = '300s', terminate-after = 6 }

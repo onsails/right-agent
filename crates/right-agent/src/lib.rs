@@ -10,6 +10,8 @@ pub mod init;
 pub mod learned_skills;
 pub mod rebootstrap;
 pub mod runtime;
+pub mod sandbox_backup;
+pub mod sandbox_migrate;
 pub(crate) mod tunnel;
 pub mod usage;
 

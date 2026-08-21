@@ -9,7 +9,7 @@
 Driving crons **from a live foreground chat** is clumsy. When the user
 wants "run A, then B when A is done," today's agent has to babysit:
 trigger A, watch `cron_list_runs`, then trigger B — or it fakes the
-dependency with wall-clock offsets plus a shared state file. The agent-a
+dependency with wall-clock offsets plus a shared state file. The riskoff
 agent did exactly this: standing `sources-update` (07:17 UTC) and
 `news-digest` (08:43 UTC) crons coupled only by a 1.5 h gap and
 `sources.json`, then **raced them at trigger time** ("I triggered
