@@ -114,7 +114,7 @@ jobs:
               ;;
             *" tunnel "*" create "*)
               for last do :; done
-              printf '{}\n' > "$cf_dir/$uuid.json"
+              printf '{"TunnelID":"%s"}\n' "$uuid" > "$cf_dir/$uuid.json"
               printf '{"id":"%s","name":"%s"}\n' "$uuid" "$last"
               ;;
             *)
