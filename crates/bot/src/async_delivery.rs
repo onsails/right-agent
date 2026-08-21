@@ -216,9 +216,12 @@ Here is the YAML report of the cron job:
 const DELIVERY_INSTRUCTION_FAILURE: &str = "\
 The cron job below did not complete successfully. The `content` field contains
 a platform-generated summary of the failure (produced by the agent's reflection
-pass). Relay it to the user in natural prose — you MAY rephrase lightly for
-flow with the recent conversation, but keep all factual claims intact. Do not
-invent details. Ignore the attachments field.
+pass). Place your natural-prose version in your reply's `content` field — you
+MAY rephrase lightly for flow with the recent conversation, but keep all
+factual claims intact. Do not invent details.
+Do NOT call `mcp__right__send_message` or any other send/notify tool. The
+platform delivers your reply to Telegram itself — writing `content` is the only
+way to reach the user. Ignore the attachments field.
 
 Here is the YAML report of the cron job:
 ";
@@ -233,12 +236,14 @@ Re-emit any attachments from the report in your reply's `attachments` array. `co
 
 Here is the YAML report of the background task:
 ";
-
 const BACKGROUND_DELIVERY_INSTRUCTION_FAILURE: &str = "\
 The background task below did not complete successfully. The `content` field contains
-a platform-generated summary of the failure. Relay it to the user in natural prose -
-you MAY rephrase lightly for flow with the recent conversation, but keep all factual
-claims intact. Do not invent details. Ignore the attachments field.
+a platform-generated summary of the failure. Place your natural-prose version in your
+reply's `content` field - you MAY rephrase lightly for flow with the recent conversation,
+but keep all factual claims intact. Do not invent details.
+Do NOT call `mcp__right__send_message` or any other send/notify tool. The platform
+delivers your reply to Telegram itself - writing `content` is the only way to reach
+the user. Ignore the attachments field.
 
 Here is the YAML report of the background task:
 ";
