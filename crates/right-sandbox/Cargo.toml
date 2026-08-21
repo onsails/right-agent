@@ -8,9 +8,11 @@ license.workspace = true
 right-agent-config = { path = "../right-agent-config" }
 microsandbox = "=0.6.10"
 sha2.workspace = true
+secrecy.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true

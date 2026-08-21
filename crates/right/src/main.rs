@@ -4019,6 +4019,14 @@ async fn cmd_agent_restore(
         let providers = right_providers::ProviderStore::open(home)
             .await
             .map_err(|error| miette::miette!("open provider store: {error:#}"))?;
+        // Serialize restore bring-up against the bot's sandbox supervisor,
+        // which reads credentials and applies them under this same per-agent
+        // lock. The spec build below resolves every declared provider's
+        // credential, and `create_or_attach` installs them, so both must run
+        // while holding the authoritative lock.
+        let _provider_guard = providers.agent_lock(agent_name).await.map_err(|error| {
+            miette::miette!("lock provider store for agent {agent_name}: {error:#}")
+        })?;
         let spec = right_bot::agent_sandbox_spec_for(
             agent_name,
             &new_sandbox_name,
@@ -4046,6 +4054,7 @@ async fn cmd_agent_restore(
             .map_err(|error| {
                 miette::miette!("create restore sandbox '{new_sandbox_name}': {error:#}")
             })?;
+        drop(_provider_guard);
         cleanup_plan.track_sandbox(new_sandbox_name.clone());
         sandbox
             .wait_ready(right_sandbox::DEFAULT_READY_TIMEOUT)

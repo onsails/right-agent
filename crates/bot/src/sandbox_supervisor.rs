@@ -65,66 +65,214 @@ fn diagnose(error: &SandboxError) -> SandboxDiagnosis {
         .diagnose()
 }
 
-/// Resolve every declared provider into a source-ref secret binding.
+/// Resolve one declared provider into a source-ref secret binding.
 ///
-/// Reading a binding publishes the credential into this process's environment
-/// under the binding's source variable; the value itself never enters the
-/// binding, the sandbox config, or a log line.
-///
-/// The two ways a declared provider can fail to bind are deliberately *not*
-/// the same thing:
-///
-/// - [`ProviderStatus::NeedsValue`] — the record exists and carries no
-///   credential yet, which is exactly the state
-///   `right agent migrate-sandbox` leaves a migrated provider in (OpenShell
-///   redacts credentials, so they are re-entered once from the dashboard).
-///   The binding is skipped and the operator is warned by name. Nothing
-///   pretends the provider is authenticated: with no binding there is no
-///   placeholder to substitute, so the agent's calls fail as the
-///   unauthenticated calls they are, and `/providers` shows the record
-///   awaiting its value.
-/// - the record is absent entirely — `agent.yaml` and `providers.db`
-///   disagree about what this agent holds. That is a config/store
-///   inconsistency no operator action is pending on, so it stays a hard
-///   error.
+/// The returned binding privately carries a redacted credential for
+/// right-sandbox's scoped SDK resolver. `NeedsValue` is returned as `None`
+/// only for create-time bulk resolution, where a migrated agent must be
+/// allowed to start before the dashboard receives its value.
+async fn secret_binding(
+    agent: &str,
+    provider_name: &str,
+    providers: &ProviderStore,
+) -> miette::Result<Option<right_sandbox::SecretBinding>> {
+    let record = providers.get(agent, provider_name).await.map_err(|e| {
+        miette::miette!(
+            "provider '{provider_name}' declared by agent {agent} cannot be bound: {e:#}"
+        )
+    })?;
+    if record.status == ProviderStatus::NeedsValue {
+        tracing::warn!(
+            agent = %agent,
+            provider = %provider_name,
+            env_var = %record.env_var,
+            "provider holds no credential yet, so the sandbox starts without it; \
+             add its credential from the dashboard: /providers"
+        );
+        return Ok(None);
+    }
+    providers
+        .source_ref_binding(agent, provider_name)
+        .await
+        .map(Some)
+        .map_err(|e| {
+            miette::miette!(
+                "provider '{provider_name}' declared by agent {agent} cannot be bound: {e:#}"
+            )
+        })
+}
+
 async fn secret_bindings(
     agent: &str,
     config: &AgentConfig,
     providers: &ProviderStore,
 ) -> miette::Result<Vec<right_sandbox::SecretBinding>> {
+    secret_bindings_with(agent, config, providers, false).await
+}
+
+/// Bulk provider resolution, with an optional tolerance mode.
+///
+/// The strict mode is create-time resolution: an unresolvable declared
+/// provider must abort bring-up, because the spec is about to be built from
+/// these bindings. The tolerant mode is reconcile-time resolution: a desired
+/// provider that cannot be bound (unknown built-in slug, store error, or a
+/// `Status::Error` record) is downgraded to a warning and skipped so that it
+/// cannot block revocation of bindings that are already obsolete. Duplicate
+/// guest env-var identities remain hard errors in both modes — that is a
+/// config defect that must be fixed before any sandbox mutation is safe.
+async fn secret_bindings_with(
+    agent: &str,
+    config: &AgentConfig,
+    providers: &ProviderStore,
+    tolerant: bool,
+) -> miette::Result<Vec<right_sandbox::SecretBinding>> {
     let mut bindings = Vec::new();
+    let mut env_vars = std::collections::HashMap::<String, &str>::new();
     for entry in config.providers() {
-        // Read the record first: only its status distinguishes "awaiting a
-        // credential" from "not there at all", and `source_ref_binding`
-        // rejects both.
-        let record = providers.get(agent, &entry.name).await.map_err(|e| {
-            miette::miette!(
-                "provider '{}' declared by agent {agent} cannot be bound: {e:#}",
+        let env_var = match provider_entry_env_var(entry) {
+            Ok(env_var) => env_var,
+            Err(error) if tolerant => {
+                tracing::warn!(
+                    agent = %agent,
+                    provider = %entry.name,
+                    error = %format!("{error:#}"),
+                    "desired provider is unresolvable; skipping it during reconcile"
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(first) = env_vars.insert(env_var.to_owned(), &entry.name) {
+            return Err(miette::miette!(
+                "providers '{first}' and '{}' both bind guest env var '{env_var}'; binding identity must be unique per agent",
                 entry.name
-            )
-        })?;
-        if record.status == ProviderStatus::NeedsValue {
-            tracing::warn!(
-                agent = %agent,
-                provider = %entry.name,
-                env_var = %record.env_var,
-                "provider holds no credential yet, so the sandbox starts without it; \
-                 add its credential from the dashboard: /providers"
-            );
-            continue;
+            ));
         }
-        let binding = providers
-            .source_ref_binding(agent, &entry.name)
-            .await
-            .map_err(|e| {
-                miette::miette!(
-                    "provider '{}' declared by agent {agent} cannot be bound: {e:#}",
-                    entry.name
-                )
-            })?;
-        bindings.push(binding);
+        match secret_binding(agent, &entry.name, providers).await {
+            Ok(Some(binding)) => bindings.push(binding),
+            Ok(None) => {}
+            Err(error) if tolerant => {
+                tracing::warn!(
+                    agent = %agent,
+                    provider = %entry.name,
+                    error = %format!("{error:#}"),
+                    "desired provider cannot be bound; skipping it during reconcile"
+                );
+            }
+            Err(error) => return Err(error),
+        }
     }
     Ok(bindings)
+}
+
+/// Guest environment variables that are, or ever were, provider-managed for
+/// this agent. Source identity is verified independently with
+/// `is_source_identity`, avoiding cross-products while still allowing removal
+/// after the owning store row has been deleted.
+#[cfg(test)]
+fn right_managed_secret_env_vars(
+    previous_configs: &[AgentConfig],
+    config: &AgentConfig,
+) -> miette::Result<std::collections::HashSet<String>> {
+    right_managed_secret_env_vars_with(previous_configs, config, false)
+}
+
+/// Tolerant variant of [`right_managed_secret_env_vars`]: an entry whose guest
+/// env var cannot be derived (an unknown built-in slug or a generic entry
+/// missing its definition) is skipped, so revocation of the other managed
+/// bindings still proceeds.
+fn right_managed_secret_env_vars_with(
+    previous_configs: &[AgentConfig],
+    config: &AgentConfig,
+    tolerant: bool,
+) -> miette::Result<std::collections::HashSet<String>> {
+    let mut vars = std::collections::HashSet::new();
+    for entry in previous_configs
+        .iter()
+        .chain(std::iter::once(config))
+        .flat_map(AgentConfig::providers)
+    {
+        match provider_entry_env_var(entry) {
+            Ok(env_var) => {
+                vars.insert(env_var.to_owned());
+            }
+            Err(error) if tolerant => {
+                tracing::warn!(
+                    provider = %entry.name,
+                    error = %format!("{error:#}"),
+                    "provider env var is unresolvable; skipping it when computing managed identities"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(vars)
+}
+
+fn provider_entry_env_var(
+    entry: &right_agent::agent::types::ProviderEntry,
+) -> miette::Result<&str> {
+    match &entry.type_ {
+        right_agent::agent::types::ProviderType::BuiltIn(slug) => {
+            right_providers::catalog::builtin(slug)
+                .map(|provider| provider.env_var)
+                .ok_or_else(|| {
+                    miette::miette!(
+                        "provider '{}' has unknown built-in type '{slug}'",
+                        entry.name
+                    )
+                })
+        }
+        right_agent::agent::types::ProviderType::Generic => entry
+            .generic
+            .as_ref()
+            .map(|generic| generic.env_var.as_str())
+            .ok_or_else(|| {
+                miette::miette!(
+                    "generic provider '{}' has no generic definition",
+                    entry.name
+                )
+            }),
+    }
+}
+
+/// Resolve one named provider after a dashboard mutation.
+///
+/// The config supplies identity; [`ProviderStore`] returns a redacted binding
+/// whose credential remains private to the sandbox application path.
+pub(crate) async fn resolve_named_provider(
+    agent: &str,
+    provider_name: &str,
+    config: &AgentConfig,
+    providers: &ProviderStore,
+) -> miette::Result<right_sandbox::SecretBinding> {
+    if !config
+        .providers()
+        .iter()
+        .any(|entry| entry.name == provider_name)
+    {
+        return Err(miette::miette!(
+            "provider '{provider_name}' is not declared by agent {agent}"
+        ));
+    }
+    secret_binding(agent, provider_name, providers)
+        .await?
+        .ok_or_else(|| miette::miette!("provider '{provider_name}' still has no usable credential"))
+}
+
+/// Resolve and apply one named provider after a dashboard mutation.
+pub(crate) async fn apply_named_provider(
+    agent: &str,
+    provider_name: &str,
+    config: &AgentConfig,
+    providers: &ProviderStore,
+    sandbox: &SandboxHandle,
+) -> miette::Result<right_sandbox::SecretApply> {
+    let binding = resolve_named_provider(agent, provider_name, config, providers).await?;
+    sandbox
+        .apply_secret(&binding)
+        .await
+        .map_err(|e| miette::miette!("applying provider secret {} failed: {e:#}", binding.env_var))
 }
 
 /// Build an agent's create-time sandbox specification.
@@ -132,10 +280,9 @@ async fn secret_bindings(
 /// Resolving the agent's declared providers is the only part that needs the
 /// bot's store; every other field comes from the shared
 /// [`right_sandbox::agent_sandbox_spec`]. The bot's bring-up, the CLI's
-/// `agent restore`, and `right agent migrate-sandbox` are the only sandbox
-/// creators and all three go through here, so a restored or migrated sandbox
-/// is identical to a bot-created one — egress and secret structure are
-/// create-time only, so drift there is unrecoverable without a recreate.
+/// `agent restore`, and `right agent migrate-sandbox` all use this spec.
+/// Later provider additions use [`SandboxHandle::apply_secret`] so existing
+/// sandboxes are upgraded without deletion.
 pub async fn agent_sandbox_spec_for(
     agent: &str,
     sandbox_name: &str,
@@ -177,6 +324,7 @@ pub(crate) async fn bring_up_sandbox(
     }
 
     let spec = sandbox_spec(ctx).await?;
+
     let sandbox = match SandboxHandle::create_or_attach(&spec).await {
         Ok(sandbox) => Arc::new(sandbox),
         Err(e) => {
@@ -185,19 +333,17 @@ pub(crate) async fn bring_up_sandbox(
         }
     };
     if let Err(e) = sandbox.wait_ready(DEFAULT_READY_TIMEOUT).await {
-        tracing::warn!(agent = %ctx.agent, sandbox = %ctx.sandbox_name, "sandbox did not become ready: {e:#}");
+        tracing::warn!(agent = %ctx.agent, sandbox = %ctx.sandbox_name, "sandbox readiness failed: {e:#}");
         return Ok(Err(diagnose(&e)));
     }
-    tracing::info!(agent = %ctx.agent, sandbox = %ctx.sandbox_name, "Agent Sandbox ready");
-
-    // Attachment transfer directories. Created every bring-up because a
-    // recreated sandbox starts from the stock image.
-    for dir in [SANDBOX_INBOX, SANDBOX_OUTBOX] {
-        if let Err(e) = sandbox.fs_mkdir(dir).await {
-            tracing::warn!(agent = %ctx.agent, dir, "creating attachment dir failed: {e:#}");
-            return Ok(Err(diagnose(&e)));
-        }
-    }
+    hot_reconcile_providers(ctx.agent, &[], ctx.config, ctx.providers, &sandbox)
+        .await
+        .map_err(|e| {
+            miette::miette!(
+                "failed to reconcile provider credentials for agent {}: {e:#}",
+                ctx.agent
+            )
+        })?;
 
     // Sync config files before considering the sandbox Ready: the guest must
     // have its `.claude.json`, settings, and platform tree before any turn.
@@ -213,53 +359,64 @@ pub(crate) async fn bring_up_sandbox(
     Ok(Ok(SandboxBringUp { sandbox }))
 }
 
-/// Hot-apply a `sandbox.providers` change to a live sandbox.
+/// Reconcile provider declarations to a live sandbox.
 ///
-/// Only credential *values* can change on a running sandbox: the secret
-/// structure (which bindings exist, and their allowed hosts) is fixed at
-/// create, so a newly declared or removed provider needs a sandbox recreate.
-/// This rotates every declared provider's value and reports the ones that need
-/// a recreate instead of silently leaving the agent unauthenticated.
+/// Right removes only bindings that both (a) exist in the sandbox now and (b)
+/// are named by this agent's current/previous accepted provider declarations,
+/// but are absent from the latest desired bindings. This revokes obsolete
+/// bindings without touching unrelated sandbox secrets. Desired bindings are
+/// then applied, rotating live or using the SDK's restart-backed addition path.
 pub(crate) async fn hot_reconcile_providers(
     agent: &str,
+    previous_configs: &[AgentConfig],
     config: &AgentConfig,
     providers: &ProviderStore,
     sandbox: &SandboxHandle,
 ) -> miette::Result<()> {
-    let mut needs_recreate: Vec<String> = Vec::new();
-    for binding in secret_bindings(agent, config, providers).await? {
-        match sandbox.rotate_secret(&binding).await {
-            Ok(rotation) => {
-                tracing::info!(
-                    agent = %agent,
-                    env_var = %binding.env_var,
-                    disposition = ?rotation.disposition,
-                    warnings = ?rotation.warnings,
-                    "provider credential rotated into the sandbox"
-                );
-            }
-            Err(SandboxError::RotationTargetMissing { .. }) => {
-                needs_recreate.push(binding.env_var.clone());
-                tracing::warn!(
-                    agent = %agent,
-                    env_var = %binding.env_var,
-                    "provider is declared but the sandbox has no binding for it; \
-                     recreate the sandbox to pick it up"
-                );
-            }
-            Err(e) => {
-                return Err(miette::miette!(
-                    "rotating provider secret {} failed: {e:#}",
-                    binding.env_var
-                ));
-            }
+    let bindings = secret_bindings_with(agent, config, providers, true).await?;
+    let desired: std::collections::HashSet<&str> = bindings
+        .iter()
+        .map(|binding| binding.env_var.as_str())
+        .collect();
+    let current: std::collections::HashSet<String> = sandbox
+        .secret_env_vars()
+        .await
+        .map_err(|e| miette::miette!("reading live sandbox secret identities failed: {e:#}"))?
+        .into_iter()
+        .collect();
+    let current_source_refs: std::collections::HashMap<String, String> = sandbox
+        .secret_source_refs()
+        .await
+        .map_err(|e| miette::miette!("reading live sandbox source refs failed: {e:#}"))?
+        .into_iter()
+        .collect();
+    let managed_env_vars = right_managed_secret_env_vars_with(previous_configs, config, true)?;
+    for (env_var, source_ref) in current_source_refs {
+        let is_right_managed =
+            managed_env_vars.contains(&env_var) && right_providers::is_source_identity(&source_ref);
+        if current.contains(&env_var) && is_right_managed && !desired.contains(env_var.as_str()) {
+            let removed = sandbox.remove_secret(&env_var).await.map_err(|e| {
+                miette::miette!("removing obsolete provider secret {env_var} failed: {e:#}")
+            })?;
+            tracing::info!(
+                agent = %agent,
+                env_var = %env_var,
+                disposition = ?removed.disposition,
+                warnings = ?removed.warnings,
+                "obsolete provider credential removed from the sandbox"
+            );
         }
     }
-    if !needs_recreate.is_empty() {
-        tracing::warn!(
+    for binding in bindings {
+        let applied = sandbox.apply_secret(&binding).await.map_err(|e| {
+            miette::miette!("applying provider secret {} failed: {e:#}", binding.env_var)
+        })?;
+        tracing::info!(
             agent = %agent,
-            unbound = ?needs_recreate,
-            "declared providers are missing from the live sandbox; recreate it to bind them"
+            env_var = %binding.env_var,
+            disposition = ?applied.disposition,
+            warnings = ?applied.warnings,
+            "provider credential applied to the sandbox"
         );
     }
     Ok(())
@@ -273,9 +430,9 @@ const RECOVERY_BACKOFF: &[u64] = &[5, 10, 15, 15, 30];
 /// Owned inputs the supervisor needs to rebuild a [`BringUpCtx`] on every
 /// recovery attempt, plus the sync inputs and the shutdown token.
 ///
-/// `BringUpCtx` borrows from `run_async`'s locals; the supervisor outlives that
-/// scope, so it owns the data here and hands out fresh borrows via
-/// [`SupervisorDeps::bring_up_ctx`].
+/// Provider-only reloads publish a new config through `config`. Recovery
+/// snapshots it while holding `provider_mutation`, so a dashboard mutation or
+/// watcher reconciliation cannot race bring-up with an obsolete provider set.
 pub(crate) struct SupervisorDeps {
     /// Agent name (logging + operator-facing help text).
     pub agent: String,
@@ -283,10 +440,12 @@ pub(crate) struct SupervisorDeps {
     pub agent_dir: PathBuf,
     /// Deterministic sandbox name for this agent.
     pub sandbox_name: String,
-    /// Full parsed agent config.
-    pub config: AgentConfig,
+    /// Latest accepted agent config. Provider-only reloads replace this value.
+    pub config: Arc<arc_swap::ArcSwap<AgentConfig>>,
     /// Provider credential store.
     pub providers: Arc<ProviderStore>,
+    /// Serializes provider config publication, live apply, and recovery.
+    pub provider_mutation: Arc<tokio::sync::Mutex<()>>,
     /// Shutdown token shared with the rest of the bot.
     pub shutdown: CancellationToken,
 }
@@ -297,8 +456,9 @@ impl SupervisorDeps {
         agent: String,
         agent_dir: PathBuf,
         sandbox_name: String,
-        config: AgentConfig,
+        config: Arc<arc_swap::ArcSwap<AgentConfig>>,
         providers: Arc<ProviderStore>,
+        provider_mutation: Arc<tokio::sync::Mutex<()>>,
         shutdown: CancellationToken,
     ) -> Self {
         Self {
@@ -307,19 +467,14 @@ impl SupervisorDeps {
             sandbox_name,
             config,
             providers,
+            provider_mutation,
             shutdown,
         }
     }
 
-    /// Borrow self's fields into a fresh `BringUpCtx` for one recovery attempt.
-    fn bring_up_ctx(&self) -> BringUpCtx<'_> {
-        BringUpCtx {
-            agent: &self.agent,
-            agent_dir: &self.agent_dir,
-            sandbox_name: &self.sandbox_name,
-            config: &self.config,
-            providers: &self.providers,
-        }
+    /// Snapshot the latest accepted config for one recovery attempt.
+    fn config_snapshot(&self) -> Arc<AgentConfig> {
+        self.config.load_full()
     }
 }
 
@@ -442,7 +597,22 @@ async fn recovery_step(
     deps: &SupervisorDeps,
     attempt: &mut usize,
 ) -> LoopStep {
-    let ctx = deps.bring_up_ctx();
+    let _mutation = deps.provider_mutation.lock().await;
+    let _agent_guard = match deps.providers.agent_lock(&deps.agent).await {
+        Ok(guard) => guard,
+        Err(error) => {
+            tracing::error!(agent = %deps.agent, error = %format!("{error:#}"), "failed to lock provider recovery");
+            return LoopStep::Break;
+        }
+    };
+    let config = deps.config_snapshot();
+    let ctx = BringUpCtx {
+        agent: &deps.agent,
+        agent_dir: &deps.agent_dir,
+        sandbox_name: &deps.sandbox_name,
+        config: &config,
+        providers: &deps.providers,
+    };
     match bring_up_sandbox(&ctx).await {
         Ok(Ok(bring_up)) => {
             handle.set_ready(Arc::clone(&bring_up.sandbox));

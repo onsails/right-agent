@@ -117,7 +117,13 @@ fn init_auth_probe_invocation(model: Option<String>) -> crate::cc::invocation::C
     }
 }
 
-fn init_auth_probe_succeeded(stdout: &[u8]) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitAuthProbeSuccess {
+    ExactOk,
+    AuthenticatedRateLimitRejection,
+}
+
+fn parse_init_auth_probe_success(stdout: &[u8]) -> Option<InitAuthProbeSuccess> {
     let mut saw_setup_token_auth = false;
     let mut saw_authenticated_rate_limit_rejection = false;
     let mut final_event = None;
@@ -128,7 +134,7 @@ fn init_auth_probe_succeeded(stdout: &[u8]) -> bool {
             continue;
         }
         let Ok(event) = serde_json::from_slice::<serde_json::Value>(line) else {
-            return false;
+            return None;
         };
         if event.get("type").and_then(serde_json::Value::as_str) == Some("system")
             && event.get("subtype").and_then(serde_json::Value::as_str) == Some("init")
@@ -138,7 +144,7 @@ fn init_auth_probe_succeeded(stdout: &[u8]) -> bool {
                 .and_then(serde_json::Value::as_str)
                 != Some("none")
             {
-                return false;
+                return None;
             }
             saw_setup_token_auth = true;
         }
@@ -155,24 +161,28 @@ fn init_auth_probe_succeeded(stdout: &[u8]) -> bool {
         final_event = Some(event);
     }
 
-    let Some(final_event) = final_event else {
-        return false;
-    };
-    saw_setup_token_auth
-        && (saw_authenticated_rate_limit_rejection
-            || (final_event.get("type").and_then(serde_json::Value::as_str) == Some("result")
-                && final_event
-                    .get("subtype")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("success")
-                && final_event
-                    .get("is_error")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(false)
-                && final_event
-                    .get("result")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("OK")))
+    if !saw_setup_token_auth {
+        return None;
+    }
+    if saw_authenticated_rate_limit_rejection {
+        return Some(InitAuthProbeSuccess::AuthenticatedRateLimitRejection);
+    }
+
+    let final_event = final_event?;
+    (final_event.get("type").and_then(serde_json::Value::as_str) == Some("result")
+        && final_event
+            .get("subtype")
+            .and_then(serde_json::Value::as_str)
+            == Some("success")
+        && final_event
+            .get("is_error")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+        && final_event
+            .get("result")
+            .and_then(serde_json::Value::as_str)
+            == Some("OK"))
+    .then_some(InitAuthProbeSuccess::ExactOk)
 }
 
 /// Guest script for the init-time auth probe.
@@ -224,7 +234,12 @@ fn build_init_auth_command(
 /// never echoes the token or any byte the CLI or upstream produced — is
 /// testable without a live sandbox.
 fn init_auth_verdict(output: crate::cc::sandbox_process::SandboxOutput) -> anyhow::Result<Vec<u8>> {
-    if !init_auth_probe_succeeded(&output.stdout) {
+    let accepted = match parse_init_auth_probe_success(&output.stdout) {
+        Some(InitAuthProbeSuccess::ExactOk) => output.success(),
+        Some(InitAuthProbeSuccess::AuthenticatedRateLimitRejection) => true,
+        None => false,
+    };
+    if !accepted {
         anyhow::bail!(
             "Claude authentication validation failed; rerun init with a fresh token from `claude setup-token`"
         );
@@ -739,24 +754,31 @@ mod tests {
         const INIT: &str = r#"{"type":"system","subtype":"init","apiKeySource":"none"}"#;
         const OK: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"OK"}"#;
 
-        assert!(init_auth_probe_succeeded(
-            format!("{INIT}\n{OK}\n").as_bytes()
-        ));
-        assert!(!init_auth_probe_succeeded(OK.as_bytes()));
-        assert!(!init_auth_probe_succeeded(
-            format!("{INIT}\n{{not-json}}\n{OK}\n").as_bytes()
-        ));
-        assert!(!init_auth_probe_succeeded(
-            format!("{INIT}\n{OK}\n{{\"type\":\"assistant\"}}\n").as_bytes()
-        ));
+        assert_eq!(
+            parse_init_auth_probe_success(format!("{INIT}\n{OK}\n").as_bytes()),
+            Some(InitAuthProbeSuccess::ExactOk)
+        );
+        assert_eq!(parse_init_auth_probe_success(OK.as_bytes()), None);
+        assert_eq!(
+            parse_init_auth_probe_success(format!("{INIT}\n{{not-json}}\n{OK}\n").as_bytes()),
+            None
+        );
+        assert_eq!(
+            parse_init_auth_probe_success(
+                format!("{INIT}\n{OK}\n{{\"type\":\"assistant\"}}\n").as_bytes()
+            ),
+            None
+        );
         let non_exact = r#"{"type":"result","subtype":"success","is_error":false,"result":"OK\n"}"#;
-        assert!(!init_auth_probe_succeeded(
-            format!("{INIT}\n{non_exact}\n").as_bytes()
-        ));
+        assert_eq!(
+            parse_init_auth_probe_success(format!("{INIT}\n{non_exact}\n").as_bytes()),
+            None
+        );
         let api_key_init = r#"{"type":"system","subtype":"init","apiKeySource":"api-key"}"#;
-        assert!(!init_auth_probe_succeeded(
-            format!("{api_key_init}\n{OK}\n").as_bytes()
-        ));
+        assert_eq!(
+            parse_init_auth_probe_success(format!("{api_key_init}\n{OK}\n").as_bytes()),
+            None
+        );
     }
 
     #[test]
@@ -766,12 +788,14 @@ mod tests {
         const ERROR: &str =
             r#"{"type":"result","subtype":"error_during_execution","is_error":true}"#;
 
-        assert!(init_auth_probe_succeeded(
-            format!("{INIT}\n{RATE_LIMIT}\n{ERROR}\n").as_bytes()
-        ));
-        assert!(!init_auth_probe_succeeded(
-            format!("{RATE_LIMIT}\n{ERROR}\n").as_bytes()
-        ));
+        assert_eq!(
+            parse_init_auth_probe_success(format!("{INIT}\n{RATE_LIMIT}\n{ERROR}\n").as_bytes()),
+            Some(InitAuthProbeSuccess::AuthenticatedRateLimitRejection)
+        );
+        assert_eq!(
+            parse_init_auth_probe_success(format!("{RATE_LIMIT}\n{ERROR}\n").as_bytes()),
+            None
+        );
     }
 
     #[test]
@@ -787,7 +811,23 @@ mod tests {
 
         let stdout = init_auth_verdict(output)
             .expect("authenticated rate-limit rejection must validate the credential");
-        assert!(init_auth_probe_succeeded(&stdout));
+        assert_eq!(
+            parse_init_auth_probe_success(&stdout),
+            Some(InitAuthProbeSuccess::AuthenticatedRateLimitRejection)
+        );
+    }
+
+    #[test]
+    fn init_auth_verdict_rejects_exact_ok_exit_one() {
+        let output = crate::cc::sandbox_process::SandboxOutput {
+            code: 1,
+            stdout: br#"{"type":"system","subtype":"init","apiKeySource":"none"}
+{"type":"result","subtype":"success","is_error":false,"result":"OK"}"#
+                .to_vec(),
+            stderr: Vec::new(),
+        };
+
+        assert!(init_auth_verdict(output).is_err());
     }
 
     #[test]

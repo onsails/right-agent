@@ -35,8 +35,8 @@ pub struct SandboxSpec {
     /// Egress policy. Create-time only — the SDK cannot change network policy
     /// on a running sandbox.
     pub egress: Egress,
-
-    /// Provider credential bindings (source references only).
+    /// Provider credential bindings. Values remain private and redacted;
+    /// durable SDK config receives source identities only.
     pub secrets: Vec<SecretBinding>,
 
     /// Extra TLS-bypass hosts on top of [`crate::TLS_BYPASS_HOSTS`]. Only
@@ -212,7 +212,7 @@ mod tests {
     fn duplicate_secret_env_vars_are_rejected() {
         let mut spec = SandboxSpec::new("right-a", "node:22-slim");
         for source in ["HOST_KEY_A", "HOST_KEY_B"] {
-            let mut binding = SecretBinding::new("KEY", source);
+            let mut binding = SecretBinding::new("KEY", source, secrecy::SecretString::from("v"));
             binding.allowed_hosts = vec!["api.example.com".to_owned()];
             spec.secrets.push(binding);
         }
@@ -234,7 +234,8 @@ mod tests {
         spec.egress = Egress::Restrictive {
             allow: vec!["example.com".to_owned()],
         };
-        let mut binding = SecretBinding::new("KEY", "HOST_KEY");
+        let mut binding =
+            SecretBinding::new("KEY", "HOST_KEY", secrecy::SecretString::from("secret"));
         binding.allowed_hosts = vec!["api.example.com".to_owned()];
         spec.secrets = vec![binding];
         spec.user = Some("sandbox".to_owned());

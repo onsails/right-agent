@@ -4033,8 +4033,6 @@ dependencies = [
 [[package]]
 name = "microsandbox"
 version = "0.6.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cfb7f787106cc6684d57cdf27d6d9d693711929d53678ac387d399103620eab"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
@@ -6127,11 +6125,14 @@ name = "right-providers"
 version = "0.4.2"
 dependencies = [
  "anyhow",
+ "fs4 1.1.0",
+ "hex",
  "right-db",
  "right-sandbox",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6160,6 +6161,7 @@ dependencies = [
  "rcgen",
  "right-agent-config",
  "rustls",
+ "secrecy",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
@@ -6167,6 +6169,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

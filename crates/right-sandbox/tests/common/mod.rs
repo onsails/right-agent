@@ -30,6 +30,14 @@ pub const CLEANUP_KILL_TIMEOUT: Duration = Duration::from_secs(15);
 static RUNTIME_INSTALL: OnceCell<()> = OnceCell::const_new();
 static NAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Serializes process-global environment mutation across live probe tests.
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Lock process-global environment mutation for a source-reference probe.
+pub async fn lock_env() -> tokio::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().await
+}
+
 /// Install the SDK's pinned `msb`/`libkrunfw` runtime once per test process.
 ///
 /// `setup::is_installed()` is a file-presence check, so the fast path costs two

@@ -50,9 +50,9 @@ See: `docs/architecture/lifecycle.md` (Voice transcription).
 Sandboxes are **persistent** — never deleted automatically. They live as
 long as the agent lives, run detached, and survive bot restarts.
 
-Egress policy, secret *structure*, and resources are create-time only —
-the SDK cannot change them on a running microVM, so a change to any of
-them needs a sandbox recreate. Only secret *values* hot-apply.
+Egress policy and initial resources are create-time. Provider values rotate
+live; a missing binding may be added by SDK-managed restart, which preserves
+the persistent sandbox filesystem.
 
 Live-microVM coverage is CI-explicit: tests that boot a real sandbox use
 `#[ignore = "ci-msb: ..."]` with a `ci_msb_` test-name prefix (enforced by
@@ -275,10 +275,9 @@ into `AgentSettings.model` (an `Arc<ArcSwap<...>>`) and
 `AgentSettings.debug` (an `Arc<AtomicBool>`) without restarting. A
 `sandbox.providers`-only change (Stage B of the diff) is classified
 `ProvidersReload`: it applies model/debug in-memory and signals an async
-`sandbox_supervisor::hot_reconcile_providers`, which rotates each declared
-provider's credential value into the live sandbox and reports any provider
-that has no binding there (secret structure is create-time, so that one
-needs a recreate) instead of restarting. The Telegram `/model`
+`sandbox_supervisor::hot_reconcile_providers`, which revokes obsolete
+Right-managed bindings live, rotates existing bindings, and restart-adds a
+supported missing binding without deleting the sandbox. The Telegram `/model`
 and `/debug` commands exploit the hot-reload path — in-flight CC subprocesses
 keep their old flags; the next invocation in any chat picks up the new value.
 Adding more hot-reloadable fields requires extending the two-stage diff in
@@ -502,9 +501,9 @@ Every per-agent codegen output belongs to exactly one category:
 | `MergedRMW` | Read, merge, write. Preserves unknown fields. | .claude.json, agent.yaml (secret injection) |
 | `AgentOwned` | Created by init. Never touched again. | TOOLS.md, IDENTITY.md, SOUL.md, USER.md, MEMORY.md, settings.local.json |
 
-There is no sandbox-policy or sandbox-recreate category: egress and secret
-*structure* are create-time properties of the sandbox spec, so changing them
-in `agent.yaml` needs a sandbox recreate, not a regenerated file.
+There is no sandbox-policy or sandbox-recreate codegen category: egress is a
+create-time sandbox-spec property, while provider bindings reconcile through
+the runtime rather than a generated file.
 
 Cross-agent outputs (process-compose.yaml, agent-tokens.json,
 cloudflared config) are all `Regenerated(BotRestart)` — reread on
@@ -693,11 +692,16 @@ lives in the backend; the UI optimizes for user clarity.
   guest-visible env var (holding a placeholder), the host env var the
   value is read from, and the hosts allowed to receive it. A credential
   value never enters a spec, the sandbox's durable config, or the guest.
-- **Create-time vs hot-appliable**: egress, secret structure, and
-  resources are fixed at create. Only secret *values* rotate on a live
-  sandbox, via `SandboxHandle::rotate_secret`. A declared provider with no
-  binding on the live sandbox MUST be reported as needing a recreate, not
-  silently skipped.
+- **Provider binding convergence**: existing provider values rotate live through
+  `SandboxHandle::apply_secret`; missing bindings use the SDK's restart-backed
+  modify path. Obsolete Right-managed bindings MUST be explicitly removed live
+  before dashboard remove/unshare reports success. Final removal MUST persist
+  TLS-off; SDK 0.6.10 leaves the active VM TLS-on but credential-free until its
+  next start. Reconciliation MUST NOT remove sandbox secrets whose env-var
+  identity was never declared by this agent's providers.
+- **Provider binding identity is unique per agent**: two declared providers
+  MUST NOT bind the same guest env var; reconciliation fails before sandbox
+  mutation rather than ambiguously letting one record replace/revoke another.
 
 ## Sandbox Gotchas
 

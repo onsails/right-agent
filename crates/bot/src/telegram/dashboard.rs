@@ -163,6 +163,19 @@ pub(crate) struct DashboardState {
     pub allowlist: right_agent::agent::allowlist::AllowlistHandle,
     pub foreground: super::StopTokens,
     pub internal_client: std::sync::Arc<right_mcp::internal_client::InternalClient>,
+    /// Provider store used to resolve source-ref bindings after dashboard
+    /// mutations. Production always supplies it; it is optional only so
+    /// unrelated dashboard unit fixtures do not open the credential store.
+    pub providers: Option<std::sync::Arc<right_providers::ProviderStore>>,
+    /// Shared with config-watcher reconcile to serialize this bot process's
+    /// provider config publication and recovery. ProviderStore's per-agent
+    /// advisory file lock is authoritative for sandbox mutation across bot and
+    /// aggregator processes.
+    pub provider_mutation: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Latest config whose provider YAML mutation was accepted. Dashboard
+    /// writes and the watcher publish under `provider_mutation`; recovery
+    /// snapshots the same cell under that lock.
+    pub provider_config: std::sync::Arc<arc_swap::ArcSwap<right_agent::agent::types::AgentConfig>>,
     pub pending_auth: super::oauth_callback::PendingAuthMap,
     pub oauth_status: super::oauth_status::OAuthFlowStatusStore,
     #[cfg(test)]
@@ -1094,6 +1107,28 @@ mod tests {
             foreground: Arc::new(DashMap::new()),
             internal_client: Arc::new(right_mcp::internal_client::InternalClient::new(
                 agent_dir.join("missing-internal.sock"),
+            )),
+            providers: None,
+            provider_mutation: Arc::new(tokio::sync::Mutex::new(())),
+            provider_config: Arc::new(arc_swap::ArcSwap::from_pointee(
+                right_agent::agent::types::AgentConfig {
+                    allowed_chat_ids: vec![],
+                    telegram_token: None,
+                    restart: Default::default(),
+                    max_restarts: 3,
+                    backoff_seconds: 5,
+                    model: None,
+                    debug: None,
+                    sandbox: None,
+                    env: Default::default(),
+                    secret: None,
+                    attachments: Default::default(),
+                    network_policy: Default::default(),
+                    show_thinking: true,
+                    learning: Default::default(),
+                    memory: None,
+                    stt: Default::default(),
+                },
             )),
             pending_auth: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             oauth_status: super::super::oauth_status::OAuthFlowStatusStore::default(),
@@ -2738,6 +2773,104 @@ mod tests {
         assert!(
             body.get("content_preview").is_none(),
             "no host-mirror preview may be served: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_rotate_fails_before_store_mutation_when_sandbox_is_unavailable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("agent.yaml"),
+            "sandbox:\n  providers:\n    - name: fal-a1b2c3\n      type: right-fal\n",
+        )
+        .expect("write agent config");
+        let mut state = test_state(temp.path().to_path_buf());
+        state.providers = Some(Arc::new(
+            right_providers::ProviderStore::open(temp.path())
+                .await
+                .expect("open provider store"),
+        ));
+        state.internal_client = Arc::new(right_mcp::internal_client::InternalClient::new(
+            temp.path().join("must-not-connect.sock"),
+        ));
+
+        let (status, body) = post_json_with_state(
+            "/dashboard/alpha/api/v1/providers/fal-a1b2c3/rotate",
+            Some(signed_init_data(42)),
+            state,
+            json!({ "credential": "test-credential" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "provider_propagation_failed");
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("not rotated")),
+            "the response must not imply durable or sandbox success: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_create_fails_before_durable_mutation_when_sandbox_is_unavailable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut state = test_state(temp.path().to_path_buf());
+        state.providers = Some(Arc::new(
+            right_providers::ProviderStore::open(temp.path())
+                .await
+                .expect("open provider store"),
+        ));
+        state.internal_client = Arc::new(right_mcp::internal_client::InternalClient::new(
+            temp.path().join("must-not-connect.sock"),
+        ));
+
+        let (status, body) = post_json_with_state(
+            "/dashboard/alpha/api/v1/providers",
+            Some(signed_init_data(42)),
+            state,
+            json!({ "type": "right-fal", "credential": "test-credential" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "provider_propagation_failed");
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("not created")),
+            "the response must prove the aggregator was not called: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_config_update_fails_before_durable_mutation_when_sandbox_is_unavailable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut state = test_state(temp.path().to_path_buf());
+        state.providers = Some(Arc::new(
+            right_providers::ProviderStore::open(temp.path())
+                .await
+                .expect("open provider store"),
+        ));
+        state.internal_client = Arc::new(right_mcp::internal_client::InternalClient::new(
+            temp.path().join("must-not-connect.sock"),
+        ));
+
+        let (status, body) = patch_json_with_state(
+            "/dashboard/alpha/api/v1/providers/generic-a1b2c3/config",
+            Some(signed_init_data(42)),
+            state,
+            json!({ "generic": { "upstream_hosts": ["new.example.test"] } }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "provider_propagation_failed");
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("not updated")),
+            "the response must prove the aggregator was not called: {body}"
         );
     }
 

@@ -21,9 +21,9 @@
 >   agent.yaml; no secret is read back or copied. Owner deletion re-homes
 >   the record to a surviving borrower.
 > - **Redaction.** Store read APIs structurally carry no credential;
->   `ProviderStore::source_ref_binding` is the only reader and publishes the
->   value into the spawning process's environment under
->   `RIGHT_PROVIDER_<NAME>` (never returned to the caller).
+>   `ProviderStore::source_ref_binding` is the only reader and returns a
+>   redacted binding whose value is consumed only by the sandbox apply path's
+>   scoped, zeroizing SDK resolver. No process environment mutation occurs.
 >
 
 > **Status:** descriptive doc. Re-read and update when modifying this
@@ -47,25 +47,25 @@ substituted, so accepting it would promise an injection that cannot happen.
 ## Placeholder substitution
 
 A provider reaches the guest as a `right_sandbox::SecretBinding`, built by
-`ProviderStore::source_ref_binding`. The binding carries *references only*:
+`ProviderStore::source_ref_binding`. It carries:
 
 - `env_var` — the guest-visible environment variable.
 - `placeholder` — what the guest actually sees in that variable
   (`$MSB_<ENV_VAR>` by default). Stable across rotation.
-- `source_env_var` — the host environment variable the real value is read
-  from at spawn and at rotation. The store publishes the credential there
-  (`RIGHT_PROVIDER_<NAME>`) and never returns it to the caller.
+- `source_env_var` — a durable owner-and-record-scoped source identity. It is
+  persisted instead of plaintext and does not refer to process environment.
 - `allowed_hosts` — exact hosts (`api.example.com`) or suffix wildcards
   (`*.example.com`) permitted to receive the substituted value.
 - `inject_query` — opt-in query-parameter substitution. Headers and
   basic-auth are on by default; body injection is never enabled.
+- a private `SecretString` credential, redacted from `Debug`, installed in the
+  SDK's scoped resolver only while create/start/apply runs.
 
-The SDK persists the placeholder and the source reference, so no secret
-material is at rest in the sandbox's durable config and the guest never holds
-a credential. Substitution happens on the intercepted connection: the agent
-writes the auth header exactly as the API documents, using the placeholder
-(for example `Authorization: Key $MSB_FAL_KEY`), and only the placeholder
-token is replaced.
+The SDK persists the placeholder and source identity, so no secret material is
+at rest in the sandbox's durable config and the guest never holds a credential.
+Substitution happens on the intercepted connection: the agent writes the auth
+header exactly as the API documents, using the placeholder, and only the
+placeholder token is replaced.
 
 **TLS interception is a bypass deny-list (ADR-0003).** Declaring any secret
 enables interception for every destination on the intercepted ports *except*
@@ -82,26 +82,40 @@ that owns the credential. Do not rely on a provider's declared hosts to
 confine a credential across an agent's own providers. Tracked in
 onsails/right-agent#92.
 
-**Secret structure is create-time.** Which bindings exist, and their allowed
-hosts, are fixed when the sandbox is created. Only the *value* rotates on a
-live sandbox, through `SandboxHandle::rotate_secret` (driven by
-`sandbox_supervisor::hot_reconcile_providers`). A provider that is declared
-in `agent.yaml` but has no binding on the live sandbox is reported as needing
-a recreate — never silently skipped, which would leave the agent
-unauthenticated with no signal.
+Because the SDK keys substitution by guest env var, an agent may declare at
+most one provider per env var. Reconciliation rejects duplicate identities
+(for example `github` plus `right-github`) before mutating the sandbox; otherwise
+removing either record could ambiguously revoke the survivor.
+
+**Secret structure is normally create-time, with SDK-managed upgrade and
+revocation paths.** For an existing binding, `SandboxHandle::apply_secret`
+computes host additions and removals, shrinks removed destinations while the
+old credential is live, rotates, and widens additions only after rotation
+succeeds. A rotation failure therefore cannot expose the old credential to a
+new destination. If a provider was `NeedsValue` when the sandbox was created,
+its first usable value adds the missing binding through
+`modify().secret(...).restart().apply()`. That stop/persist/start cycle keeps
+the same sandbox and preserves its writable filesystem. Removing a binding uses
+`modify().remove_secret(name).apply()` and revokes substitution live in the
+runtime while deleting the entry from durable config. Removing the final secret
+disables TLS interception in desired config; the already-running VM keeps it
+enabled (with no bindings or credentials) until its next start because SDK
+0.6.10 has no live TLS toggle. microsandbox 0.6.10 cannot express query-parameter
+injection on a new binding through `modify`; Right fails that addition rather
+than silently installing weaker semantics.
 
 ## State of truth split
 
 `providers.db` is the single authority. `agent.yaml` carries definitions
 only:
 
-| What                             | Where                                         |
-| -------------------------------- | --------------------------------------------- |
-| Per-agent list of declared names | `agent.yaml::sandbox::providers: [...]`       |
-| Credential bytes                 | `providers.db` (`providers.credential`, 0600) |
-| Non-secret provider config       | `providers.db`                                |
-| Ownership / borrowing            | `providers.owner_agent` + `provider_borrows`  |
-| Live guest bindings              | the sandbox's create-time secret set          |
+| What                             | Where                                           |
+| -------------------------------- | ----------------------------------------------- |
+| Per-agent list of declared names | `agent.yaml::sandbox::providers: [...]`         |
+| Credential bytes                 | `providers.db` (`providers.credential`, 0600)   |
+| Non-secret provider config       | `providers.db`                                  |
+| Ownership / borrowing            | `providers.owner_agent` + `provider_borrows`    |
+| Live guest bindings              | sandbox config; live-rotated, added, or revoked |
 
 `agent.yaml` wins on drift for *which* providers an agent declares; the store
 wins on everything about a provider. `shared_from` in `agent.yaml` is legacy
@@ -109,21 +123,36 @@ migration input only — the internal API writers never emit it.
 
 ## Reconciler walkthrough
 
-Runs at bot bring-up, after the sandbox is ready and before the bot starts
-serving messages, and again on a `sandbox.providers`-only edit.
+For each declared provider, `ProviderStore::source_ref_binding` resolves the
+owning row and returns a redacted binding with an owner-scoped source identity.
+The credential is installed into the vendored SDK's scoped resolver only for
+the create/start/apply call; the guard removes and zeroizes it afterward.
 
-For each entry in `agent.yaml::sandbox::providers`,
-`ProviderStore::source_ref_binding` resolves the record (following a borrow
-row to its true owner), publishes the credential into the spawning process's
-environment under `RIGHT_PROVIDER_<NAME>`, and returns a `SecretBinding`.
+- At create, ready bindings go into `agent_sandbox_spec`; `NeedsValue` records
+  are deliberately skipped so migrated agents can start and receive their
+  first value from the dashboard.
+- On every bot bring-up, after the sandbox reports ready and before it is
+  published Ready or synced, each ready binding goes through
+  `SandboxHandle::apply_secret`. Existing bindings converge with the safe
+  shrink→rotate→widen order, while missing non-query bindings are added with
+  the SDK-managed restart path. `NeedsValue` records remain skipped, and any
+  apply error fails bring-up.
+- Config hot-reconcile verifies that obsolete live entries have both a known
+  provider env var and a Right-minted hashed source identity before removal.
+- Dashboard create, remove, share, borrow, and watcher/startup/recovery
+  reconciliation take the destination agent's cross-process advisory provider
+  lock before touching its sandbox. The lock path is under Right's home and is
+  keyed by agent identity only; credentials never enter the path.
+- Owner rotate and generic config-update enumerate the owner plus every
+  borrower from `providers.db`, then resolve each holder's current config and
+  sandbox under that destination lock. Success means every holder converged;
+  post-commit failure names failed agents without including credentials.
 
-- At **create**, the resolved bindings go into `agent_sandbox_spec`, so the
-  sandbox is created with exactly that secret structure.
-- On a **live** sandbox, `hot_reconcile_providers` rotates each binding's
-  value with `SandboxHandle::rotate_secret`. A binding the live sandbox does
-  not have (`RotationTargetMissing`) is collected and reported as needing a
-  recreate — the secret *structure* is create-time and cannot be added to a
-  running microVM.
+The bot's process-local mutex serializes its config publication with recovery,
+while the per-agent advisory file lock is authoritative across bot, aggregator,
+watcher, startup, CLI, and cross-agent destination processes. A missing
+declaration/store record, unavailable sandbox, or failed SDK apply returns an
+error instead of falsely reporting that durable state is live everywhere.
 
 A record whose built-in slug no longer resolves fails fast
 (`unknown_builtin_slug`, HTTP 500) on rotation and config-update; the list
@@ -148,46 +177,44 @@ the TLS bypass list, not by the egress allow list.
 A `sandbox.providers`-only edit to `agent.yaml` does not force a restart:
 `config_watcher` classifies it `ProvidersReload` and signals
 `sandbox_supervisor::hot_reconcile_providers`. The lib.rs consumer retries
-the hot path with bounded backoff. There is no periodic provider reconcile,
-so a persistent failure can leave a credential stale on the live sandbox
-until the next bot restart or sandbox bring-up — re-edit `sandbox.providers`
-or restart to retry.
+the hot path with bounded backoff. Startup always runs reconciliation after the
+sandbox reports ready. Hot reconcile uses the previously accepted config to
+remove declarations absent from the new config; dashboard remove/unshare revoke
+synchronously. A durable rotation self-heals on the next bot start.
 
 ## Lifecycle
 
-**Create.** Generic providers run: author/import profile →
-`CreateProvider` with the profile ID as gateway type →
-`Sandbox.provider.attach` → `ensure_provider_policy_loaded` →
-endpoint-aware `wait_for_provider_composed` → write `agent.yaml`. Built-in
-providers skip the profile-authoring step and use rule-presence
-composition confirmation. Any failure triggers ordered rollback: a failed
-`attach` removes the freshly created provider; a failed policy-load,
-composition-confirmation, or `agent.yaml` write triggers best-effort detach
-and delete, then a rollback reload.
+**Create.** The internal API validates and stores the provider, then appends
+its definition-only entry to `agent.yaml`. Bot bring-up resolves ready records
+from `ProviderStore` into source-ref bindings. Migrated `NeedsValue` records
+stay declared but unbound until their first dashboard rotation.
 
-**Rotate.** `UpdateProvider` only. No sandbox restart. The gateway
-issues a new placeholder version; the next outbound request from the
-sandbox carries the new placeholder and resolves to the new
-credential.
+**Rotate.** The owner bot verifies durable state, then asks the aggregator to
+write the new credential to `providers.db`. It enumerates every holder from the
+store and applies the named provider using each holder's own config and sandbox
+under that destination's advisory lock. The dashboard returns success only
+after owner and borrower sandboxes converge; a post-commit failure names the
+failed agents without exposing credential material.
 
-**Edit non-secret config.** Generic providers only. Re-author/import the
-profile, `ensure_provider_policy_loaded`, `wait_for_provider_composed` with
-the expected endpoint host/path, then write `agent.yaml`. This path does not
-call `UpdateProvider` because the provider record does not change. A failed
-profile import, policy-load, composition confirmation, or YAML write triggers
-profile rollback plus a rollback reload. The `env_var` is stable after
-creation unless a credential is supplied through a rotate/update path that can
-update gateway credentials consistently.
+**Edit non-secret config.** Generic-provider endpoint changes update the
+store's non-secret definition, then fan out to every holder through the same
+per-destination locked convergence path.
 
-**Remove.** `Sandbox.provider.detach` → `DeleteProvider` → remove the
-`agent.yaml` row → reload provider-profile composition. Generic providers
-also run legacy folded-policy cleanup.
+**Share/borrow.** Both mutations preflight the destination sandbox, commit the
+borrow reference and destination `agent.yaml`, then directly apply the binding
+to the destination before success. Cross-agent share does not assume another
+bot process's watcher has converged the live sandbox.
 
-**Ghost (post-restore).** When `agent.yaml` lists a provider that the
-gateway doesn't have (typical after backup/restore to a new host),
-the reconciler marks the row `Status::Missing`. The dashboard's
-*Resolve* action either re-creates the provider with a fresh
-credential or strips the entry from `agent.yaml`.
+**Remove/unshare.** The bot first preflights the target and live sandbox. The
+internal API rewrites `agent.yaml` while retaining its exact original, removes
+the store row/reference, and restores YAML if the store mutation fails so retry
+sees the original declaration. Before HTTP success the bot explicitly revokes
+the obsolete binding from the runtime and durable sandbox config.
+
+**NeedsValue after migration.** The definition exists in both `agent.yaml` and
+`providers.db`, but the store refuses to produce a binding until a real
+credential is rotated in. That rotate immediately adds the binding to the
+existing sandbox without deleting it.
 
 **Cascade on `right agent destroy`.** Before tearing down the sandbox, Right
 cascades the agent's provider rows in the store: owned records are removed
@@ -318,8 +345,9 @@ surviving borrower rather than deleted; an owned record with no borrowers is
 removed; a borrowed record is unshared. The cascade runs inside the store, so
 `providers.db` is never left with an orphaned row.
 
-**Connected rotation.** Rotating the owner's record rotates the secret on
-every borrower's live sandbox through `hot_reconcile_providers` — no restart.
+**Connected rotation.** Dashboard share/borrow applies the owner's current
+credential to the destination before success; later destination reconcile
+resolves the owner's current credential from the shared store. No copy is made.
 
 **Redaction guard (retained).** Even with copy retired,
 `check_source_credential_readable` + the `SourceCredentialUnreadable` (422)
@@ -330,4 +358,5 @@ Backend: `internal_api_providers::{handle_provider_share, handle_provider_unshar
 plan_share, plan_unshare, handle_provider_peers, build_peers, require_trusted}`;
 `right_providers::ProviderStore` (borrow rows, destroy cascade,
 `source_ref_binding`). Dashboard routes:
-`/dashboard/{agent}/api/v1/providers/{peers,share,unshare}`.
+`/dashboard/{agent}/api/v1/providers/{peers,share,borrow,unshare}` plus
+`DELETE /dashboard/{agent}/api/v1/providers/{provider_name}`.

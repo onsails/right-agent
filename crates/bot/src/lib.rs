@@ -473,6 +473,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // handler share the same Arc. The watcher writes; the handler reads.
     let model_arc: Arc<arc_swap::ArcSwap<Option<String>>> =
         Arc::new(arc_swap::ArcSwap::from_pointee(config.model.clone()));
+    // Provider-only reloads publish accepted YAML here. The supervisor reads a
+    // fresh snapshot for every recovery rather than retaining startup config.
+    let provider_config: Arc<arc_swap::ArcSwap<right_agent::agent::types::AgentConfig>> =
+        Arc::new(arc_swap::ArcSwap::from_pointee(config.clone()));
     let (providers_tx, providers_rx) =
         tokio::sync::mpsc::unbounded_channel::<Box<right_agent::agent::types::AgentConfig>>();
     config_watcher::spawn_config_watcher(
@@ -564,6 +568,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             .await
             .map_err(|e| miette::miette!("failed to open the provider store: {e:#}"))?,
     );
+    // Serializes config-watcher and dashboard provider operations that mutate
+    // provider state or address the sandbox.
+    let provider_mutation = Arc::new(tokio::sync::Mutex::new(()));
 
     // Shared flag for healthz "webhook_set"; flipped by Task 10's register loop.
     let webhook_set_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -614,7 +621,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // still propagate via `?` and crash startup (they can't self-heal).
     //
     // The supervisor (monitor + recovery) owns the long-lived sync task from
-    // here on; on the happy path it is seeded with the startup sync task.
+    // here on; startup takes the same authoritative per-agent provider lock
+    // used by every later sandbox mutation.
+    let _startup_provider_guard = providers
+        .agent_lock(&args.agent)
+        .await
+        .map_err(|error| miette::miette!("failed to lock startup provider reconcile: {error:#}"))?;
     let bring_up_ctx = sandbox_supervisor::BringUpCtx {
         agent: &args.agent,
         agent_dir: &agent_dir,
@@ -622,7 +634,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         config: &config,
         providers: &providers,
     };
-    let initial_sandbox = match sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await? {
+    let startup_bring_up = sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await;
+    drop(_startup_provider_guard);
+    let initial_sandbox = match startup_bring_up? {
         Ok(sandbox_supervisor::SandboxBringUp { sandbox }) => Ok(sandbox),
         Err(diagnosis) => {
             tracing::error!(
@@ -661,8 +675,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             args.agent.clone(),
             agent_dir.clone(),
             sandbox_name.clone(),
-            config.clone(),
+            Arc::clone(&provider_config),
             std::sync::Arc::clone(&providers),
+            Arc::clone(&provider_mutation),
             shutdown.clone(),
         ),
         sync_seed,
@@ -677,10 +692,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .await
         .map_err(|error| miette::miette!("failed to recover bootstrap finalization: {error:#}"))?;
 
-    // Drain providers-reconcile signals from the config watcher (no restart
-    // path). Credential *values* rotate live; a newly declared or removed
-    // provider needs a sandbox recreate, which `hot_reconcile_providers`
-    // reports rather than silently skipping.
+    // Drain providers-reconcile signals from the config watcher. Existing
+    // bindings rotate live; a newly usable binding is added through the SDK's
+    // restart-backed modify path without deleting the sandbox.
     {
         // The watcher has already advanced past this change, so there is no
         // automatic retry elsewhere: bound a few in-task attempts to ride out a
@@ -693,6 +707,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let store = std::sync::Arc::clone(&providers);
         let runtime = std::sync::Arc::clone(&sandbox_runtime);
         let shutdown = shutdown.clone();
+        let provider_mutation = Arc::clone(&provider_mutation);
+        let provider_config = Arc::clone(&provider_config);
         tokio::spawn(async move {
             loop {
                 // Don't start a fresh reconcile once shutdown begins: a queued
@@ -705,6 +721,21 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         None => break, // watcher dropped the sender (restart/shutdown)
                     },
                 };
+                let _mutation = provider_mutation.lock().await;
+                let _agent_guard = match store.agent_lock(&agent).await {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        tracing::error!(error = %format!("{error:#}"),
+                            "providers hot-reconcile could not acquire the agent mutation lock");
+                        continue;
+                    }
+                };
+                // Capture the previously accepted provider declarations before
+                // publishing the new durable truth. Reconcile needs that union
+                // to identify bindings removed by this edit without ever
+                // considering unrelated sandbox secrets.
+                let previous_cfg = provider_config.load_full();
+                provider_config.store(Arc::new((*new_cfg).clone()));
                 let Some(sandbox) = runtime.current_sandbox() else {
                     tracing::warn!(
                         "providers changed while the sandbox is unavailable; \
@@ -716,14 +747,18 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 let mut attempt = 0usize;
                 loop {
                     match sandbox_supervisor::hot_reconcile_providers(
-                        &agent, &new_cfg, &store, &sandbox,
+                        &agent,
+                        std::slice::from_ref(previous_cfg.as_ref()),
+                        &new_cfg,
+                        &store,
+                        &sandbox,
                     )
                     .await
                     {
                         Ok(()) => break,
                         Err(e) if attempt >= HOT_RECONCILE_BACKOFFS_MS.len() => {
                             tracing::warn!(error = %format!("{e:#}"),
-                                "providers hot-reconcile failed after retries; live sandbox credentials may stay stale until next bot restart — re-edit sandbox.providers or restart to retry");
+                                "providers hot-reconcile failed after retries; live sandbox credentials may stay stale until next bot restart — obsolete credentials remain a security failure, re-edit sandbox.providers or restart to retry");
                             break;
                         }
                         Err(e) => {
@@ -763,6 +798,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             allowlist: allowlist.clone(),
             foreground: Arc::clone(&dashboard_foreground),
             internal_client: Arc::clone(&internal_client),
+            providers: Some(Arc::clone(&providers)),
+            provider_mutation: Arc::clone(&provider_mutation),
+            provider_config: Arc::clone(&provider_config),
             pending_auth: Arc::clone(&pending_auth),
             oauth_status: oauth_status.clone(),
             #[cfg(test)]
@@ -778,8 +816,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // context. These are constructed here (once) and the resulting `Arc`s are
     // shared with the cron/delivery/keepalive tasks spawned later.
 
-    // Per-main-session mutex map and per-(chat,thread) bg-request flags.
-    // Shared across worker, delivery, and callback handlers.
     let session_locks: crate::telegram::SessionLocks = Arc::new(dashmap::DashMap::new());
 
     // Shared idle timestamp: tracks last handler/worker interaction for async delivery gating.

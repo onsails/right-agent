@@ -15,12 +15,15 @@
 
 use std::time::{Duration, Instant};
 
-use microsandbox::{MicrosandboxError, ModificationDisposition, PlannedChange, Sandbox};
+use microsandbox::{MicrosandboxError, PlannedChange, Sandbox};
 
 use crate::error::SandboxError;
 use crate::exec::{ExecOutcome, ExecRequest, ExecStream, apply_request};
 use crate::phase::SandboxPhase;
-use crate::secrets::{RotationDisposition, SecretBinding, SecretRotation};
+use crate::secrets::{
+    SecretApply, SecretApplyDisposition, SecretBinding, SecretRemove, SecretRemoveDisposition,
+    addition_supported, classify_apply_change, host_rotation_stages,
+};
 use crate::spec::SandboxSpec;
 
 /// How long readiness polling waits for a mid-boot sandbox to come up.
@@ -38,6 +41,15 @@ const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Grace period given to a sandbox to stop during destroy before it is
 /// killed (matches the stage-1 probe cleanup timeout).
 const DESTROY_KILL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Never-routable exact host used as a crash-window sentinel while rotating a
+/// secret's allow-list down to empty. The SDK treats an empty host list as
+/// "unchanged", so a shrink that removes every old host must name a single
+/// impossible destination until rotation succeeds; the winning rotation then
+/// replaces this placeholder outright. `.invalid.` is reserved by RFC 2606
+/// and can never resolve, so no substituted credential can reach it even if a
+/// crash leaves the sandbox configured with this host.
+const INVALID_HOST_SENTINEL: &str = "invalid.";
 
 /// An owned connection to an Agent Sandbox.
 ///
@@ -59,22 +71,25 @@ impl SandboxHandle {
     /// mid-boot is awaited per [`DEFAULT_READY_TIMEOUT`].
     pub async fn create_or_attach(spec: &SandboxSpec) -> Result<Self, SandboxError> {
         spec.validate()?;
+        let _resolver = microsandbox::sandbox::install_secret_resolvers(
+            spec.secrets.iter().map(SecretBinding::resolver_value),
+        );
         match Self::attach(&spec.name).await {
             Ok(handle) => {
                 tracing::debug!(sandbox = %spec.name, "attached to existing sandbox");
                 Ok(handle)
             }
             Err(SandboxError::NotFound { .. }) => {
-                tracing::info!(sandbox = %spec.name, "creating sandbox");
-                let sandbox = spec
-                    .to_builder()?
-                    .create_detached()
-                    .await
-                    .map_err(|source| SandboxError::Operation {
-                        name: spec.name.clone(),
-                        operation: "create",
-                        source: Box::new(crate::error::SdkError(source)),
-                    })?;
+                let builder = spec.to_builder()?;
+                let sandbox =
+                    builder
+                        .create_detached()
+                        .await
+                        .map_err(|source| SandboxError::Operation {
+                            name: spec.name.clone(),
+                            operation: "create",
+                            source: Box::new(crate::error::SdkError(source)),
+                        })?;
                 Ok(Self::from_sandbox(spec.name.clone(), sandbox))
             }
             Err(err) => Err(err),
@@ -260,78 +275,221 @@ impl SandboxHandle {
         })
     }
 
-    /// Rotate a source-ref secret on this sandbox, keeping the placeholder
-    /// stable.
+    /// Apply one store-backed provider binding to this sandbox.
     ///
-    /// The patch re-asserts only the identity (`env`) and the host-side
-    /// source reference; the placeholder and allowed hosts are left
-    /// untouched, so the change classifies as `Rotated` and applies live when
-    /// the runtime advertises the `secrets_update` capability (stage-1 probe
-    /// `ci_msb_source_ref_secret_rotates_live`). The new value is resolved
-    /// from the host environment at apply time by the SDK.
+    /// Existing bindings first replace their complete host allow-list through
+    /// the SDK's live `HostsUpdated` path, then rotate source material live.
+    /// Omitting injection fields preserves the existing query-injection policy.
+    /// A missing binding is added with the full non-secret structure through
+    /// restart-backed apply, preserving its writable filesystem.
     ///
-    /// Egress/secret *structure* (adding a binding) is create-time only; this
-    /// path exists for value rotation of a binding the sandbox booted with.
-    pub async fn rotate_secret(
-        &self,
-        binding: &SecretBinding,
-    ) -> Result<SecretRotation, SandboxError> {
-        binding.validate_ref()?;
+    /// microsandbox 0.6.10 cannot set query-parameter injection through
+    /// `modify().secret()`. Missing bindings that require it therefore fail
+    /// explicitly instead of being added with weaker semantics.
+    pub async fn apply_secret(&self, binding: &SecretBinding) -> Result<SecretApply, SandboxError> {
+        binding.validate()?;
+        let _resolver = microsandbox::sandbox::install_secret_resolvers([binding.resolver_value()]);
 
-        let plan = self
-            .sandbox
+        // Plan with the complete non-secret shape. A missing binding otherwise
+        // produces a false "needs at least one allowed host" conflict before
+        // Right can classify it as a restart-backed addition. For an existing
+        // binding, material still classifies the patch as a rotation; matching
+        // placeholder/hosts do not change that live disposition.
+        let fresh = Sandbox::get(&self.name)
+            .await
+            .map_err(|source| get_error(&self.name, source))?;
+        let plan = fresh
             .modify()
             .secret(|s| {
-                s.env(&binding.env_var)
+                let mut secret = s
+                    .env(&binding.env_var)
                     .source(microsandbox::SecretSource::Env {
                         var: binding.source_env_var.clone(),
                     })
+                    .placeholder(&binding.placeholder);
+                for host in &binding.allowed_hosts {
+                    secret = secret.allow_host(host);
+                }
+                secret
             })
             .dry_run()
             .await
-            .map_err(|source| operation_error(&self.name, "plan secret rotation", source))?;
+            .map_err(|source| operation_error(&self.name, "plan secret apply", source))?;
 
-        let mut disposition = RotationDisposition::Live;
-        for change in &plan.changes {
-            let PlannedChange::Secret(secret) = change else {
-                continue;
-            };
-            // A rotation re-asserts only env+source, so a sandbox that has the
-            // binding classifies the change as Rotated. Anything else (notably
-            // Added) means the sandbox has no such secret. This must be checked
-            // BEFORE the conflicts gate: the SDK also emits a "needs at least
-            // one allowed host" conflict for an Added secret, and Right's
-            // rotation patch never sets hosts, so the conflict would otherwise
-            // mask the real "no such binding" error.
-            if secret.change != microsandbox::SecretChangeKind::Rotated {
-                return Err(SandboxError::RotationTargetMissing {
-                    name: self.name.clone(),
-                    env_var: binding.env_var.clone(),
-                });
+        let secret_change = plan.changes.iter().find_map(|change| match change {
+            PlannedChange::Secret(secret) if secret.name == binding.env_var => {
+                Some((secret.change, secret.disposition))
             }
-            match secret.disposition {
-                ModificationDisposition::Live => {}
-                ModificationDisposition::NextStart => {
-                    if disposition == RotationDisposition::Live {
-                        disposition = RotationDisposition::NextStart;
-                    }
-                }
-                ModificationDisposition::RequiresRestart => {
-                    disposition = RotationDisposition::RequiresRestart;
-                }
-                _ => {
-                    return Err(SandboxError::RotationUnsupported {
+            _ => None,
+        });
+        let secret_change_kind = secret_change.as_ref().map(|(change, _)| *change);
+        let secret_disposition = secret_change.as_ref().map(|(_, disposition)| *disposition);
+        match secret_change_kind.and_then(classify_apply_change) {
+            Some(SecretApplyDisposition::RotatedLive) => {
+                if secret_disposition != Some(microsandbox::ModificationDisposition::Live) {
+                    return Err(SandboxError::SecretApplyUnsupported {
                         name: self.name.clone(),
                         env_var: binding.env_var.clone(),
                     });
                 }
-            }
-        }
+                if !plan.conflicts.is_empty() {
+                    return Err(secret_conflict(&self.name, binding, &plan.conflicts));
+                }
 
-        if !plan.conflicts.is_empty() {
-            return Err(SandboxError::RotationConflict {
+                // Failure-safe host ordering:
+                // 1. remove obsolete hosts while the old credential is live;
+                // 2. rotate the credential;
+                // 3. add new hosts only after rotation succeeds.
+                // A rotation failure can therefore only leave a narrower
+                // policy and can never expose the old credential to a new host.
+                let current_hosts = self.secret_allowed_hosts(&binding.env_var).await?;
+                let (shrink_hosts, widen_hosts) =
+                    host_rotation_stages(&current_hosts, &binding.allowed_hosts);
+                let mut warnings = modification_warnings(&plan.warnings);
+                if let Some(hosts) = shrink_hosts {
+                    let fresh = Sandbox::get(&self.name)
+                        .await
+                        .map_err(|source| get_error(&self.name, source))?;
+                    let mut hosts_modify = fresh.modify().secret(|s| {
+                        let mut secret = s.env(&binding.env_var);
+                        for host in &hosts {
+                            secret = secret.allow_host(host);
+                        }
+                        secret
+                    });
+                    // The SDK treats an empty host list as "unchanged". When
+                    // every old host is removed, use one never-routable exact
+                    // sentinel until rotation succeeds, then replace it.
+                    if hosts.is_empty() {
+                        hosts_modify = fresh
+                            .modify()
+                            .secret(|s| s.env(&binding.env_var).allow_host(INVALID_HOST_SENTINEL));
+                    }
+                    let applied = hosts_modify.apply().await.map_err(|source| {
+                        operation_error(&self.name, "shrink secret hosts", source)
+                    })?;
+                    warnings.extend(modification_warnings(&applied.warnings));
+                }
+
+                let fresh = Sandbox::get(&self.name)
+                    .await
+                    .map_err(|source| get_error(&self.name, source))?;
+                let applied = fresh
+                    .modify()
+                    .secret(|s| {
+                        s.env(&binding.env_var)
+                            .source(microsandbox::SecretSource::Env {
+                                var: binding.source_env_var.clone(),
+                            })
+                    })
+                    .apply()
+                    .await
+                    .map_err(|source| operation_error(&self.name, "rotate secret", source))?;
+                warnings.extend(modification_warnings(&applied.warnings));
+
+                if let Some(hosts) = widen_hosts {
+                    let fresh = Sandbox::get(&self.name)
+                        .await
+                        .map_err(|source| get_error(&self.name, source))?;
+                    let hosts_modify = fresh.modify().secret(|s| {
+                        let mut secret = s.env(&binding.env_var);
+                        for host in &hosts {
+                            secret = secret.allow_host(host);
+                        }
+                        secret
+                    });
+                    let applied = hosts_modify.apply().await.map_err(|source| {
+                        operation_error(&self.name, "widen secret hosts", source)
+                    })?;
+                    warnings.extend(modification_warnings(&applied.warnings));
+                }
+                Ok(SecretApply {
+                    disposition: SecretApplyDisposition::RotatedLive,
+                    warnings,
+                })
+            }
+            Some(SecretApplyDisposition::AddedWithRestart) => {
+                // Full validation already ran before planning.
+                if secret_disposition
+                    != Some(microsandbox::ModificationDisposition::RequiresRestart)
+                {
+                    return Err(SandboxError::SecretApplyUnsupported {
+                        name: self.name.clone(),
+                        env_var: binding.env_var.clone(),
+                    });
+                }
+                if !addition_supported(binding) {
+                    return Err(SandboxError::SecretAdditionUnsupported {
+                        name: self.name.clone(),
+                        env_var: binding.env_var.clone(),
+                        reason: "the SDK modify API cannot preserve query-parameter injection for a new binding",
+                    });
+                }
+                if !plan.conflicts.is_empty() {
+                    return Err(secret_conflict(&self.name, binding, &plan.conflicts));
+                }
+                let fresh = Sandbox::get(&self.name)
+                    .await
+                    .map_err(|source| get_error(&self.name, source))?;
+                let mut modify = fresh.modify().secret(|s| {
+                    let mut secret = s
+                        .env(&binding.env_var)
+                        .source(microsandbox::SecretSource::Env {
+                            var: binding.source_env_var.clone(),
+                        })
+                        .placeholder(&binding.placeholder);
+                    for host in &binding.allowed_hosts {
+                        secret = secret.allow_host(host);
+                    }
+                    secret
+                });
+                modify = modify.restart();
+                let full_plan = modify.clone().dry_run().await.map_err(|source| {
+                    operation_error(&self.name, "plan secret addition", source)
+                })?;
+                if !full_plan.conflicts.is_empty() {
+                    return Err(secret_conflict(&self.name, binding, &full_plan.conflicts));
+                }
+                let applied = modify
+                    .apply()
+                    .await
+                    .map_err(|source| operation_error(&self.name, "add secret", source))?;
+                Ok(SecretApply {
+                    disposition: SecretApplyDisposition::AddedWithRestart,
+                    warnings: modification_warnings(&applied.warnings),
+                })
+            }
+            _ => Err(SandboxError::SecretApplyUnsupported {
                 name: self.name.clone(),
                 env_var: binding.env_var.clone(),
+            }),
+        }
+    }
+
+    /// Revoke one guest-visible secret binding from the running sandbox and
+    /// its durable configuration.
+    ///
+    /// Removal is explicit and idempotent. A present binding must plan as a
+    /// live removal; Right refuses restart-only or unsupported dispositions so
+    /// callers never report success while the old credential is still usable.
+    /// Removing the final binding disables TLS interception in desired config;
+    /// the running VM keeps TLS interception enabled until next start because
+    /// microsandbox 0.6.10 has no live TLS toggle.
+    pub async fn remove_secret(&self, env_var: &str) -> Result<SecretRemove, SandboxError> {
+        validate_secret_env_var(env_var)?;
+        let fresh = Sandbox::get(&self.name)
+            .await
+            .map_err(|source| get_error(&self.name, source))?;
+        let modify = fresh.modify().remove_secret(env_var);
+        let plan = modify
+            .clone()
+            .dry_run()
+            .await
+            .map_err(|source| operation_error(&self.name, "plan secret removal", source))?;
+        if !plan.conflicts.is_empty() {
+            return Err(SandboxError::SecretApplyConflict {
+                name: self.name.clone(),
+                env_var: env_var.to_owned(),
                 details: plan
                     .conflicts
                     .iter()
@@ -340,28 +498,114 @@ impl SandboxHandle {
                     .join("; "),
             });
         }
+        let change = plan.changes.iter().find_map(|change| match change {
+            PlannedChange::Secret(secret) if secret.name == env_var => Some(secret),
+            _ => None,
+        });
+        let Some(change) = change else {
+            return Ok(SecretRemove {
+                disposition: SecretRemoveDisposition::AlreadyAbsent,
+                warnings: modification_warnings(&plan.warnings),
+            });
+        };
+        if change.change != microsandbox::SecretChangeKind::Removed
+            || change.disposition != microsandbox::ModificationDisposition::Live
+        {
+            return Err(SandboxError::SecretApplyUnsupported {
+                name: self.name.clone(),
+                env_var: env_var.to_owned(),
+            });
+        }
 
-        let applied = self
-            .sandbox
-            .modify()
-            .secret(|s| {
-                s.env(&binding.env_var)
-                    .source(microsandbox::SecretSource::Env {
-                        var: binding.source_env_var.clone(),
-                    })
-            })
+        let applied = modify
             .apply()
             .await
-            .map_err(|source| operation_error(&self.name, "rotate secret", source))?;
-
-        Ok(SecretRotation {
-            disposition,
-            warnings: applied
-                .warnings
-                .iter()
-                .map(|warning| format!("{}: {}", warning.field, warning.message))
-                .collect(),
+            .map_err(|source| operation_error(&self.name, "remove secret", source))?;
+        Ok(SecretRemove {
+            disposition: SecretRemoveDisposition::RemovedLive,
+            warnings: modification_warnings(&applied.warnings),
         })
+    }
+
+    /// Guest environment variables currently backed by sandbox secret
+    /// substitution entries. This exposes identities only; material and source
+    /// references never leave the SDK configuration.
+    pub async fn secret_env_vars(&self) -> Result<Vec<String>, SandboxError> {
+        let fresh = Sandbox::get(&self.name)
+            .await
+            .map_err(|source| get_error(&self.name, source))?;
+        let config = fresh
+            .config()
+            .map_err(|source| operation_error(&self.name, "read secret configuration", source))?;
+        Ok(config
+            .spec
+            .network
+            .secrets
+            .map(|secrets| {
+                secrets
+                    .secrets
+                    .into_iter()
+                    .map(|entry| entry.env_var)
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn secret_allowed_hosts(&self, env_var: &str) -> Result<Vec<String>, SandboxError> {
+        let fresh = Sandbox::get(&self.name)
+            .await
+            .map_err(|source| get_error(&self.name, source))?;
+        let config = fresh
+            .config()
+            .map_err(|source| operation_error(&self.name, "read secret configuration", source))?;
+        Ok(config
+            .spec
+            .network
+            .secrets
+            .and_then(|secrets| {
+                secrets
+                    .secrets
+                    .into_iter()
+                    .find(|entry| entry.env_var == env_var)
+            })
+            .map(|entry| {
+                entry
+                    .allowed_hosts
+                    .into_iter()
+                    .map(|host| match host {
+                        microsandbox::HostPattern::Exact(host)
+                        | microsandbox::HostPattern::Wildcard(host) => host,
+                        microsandbox::HostPattern::Any => "*".to_owned(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Current source-reference secret identities as `(guest env var, host
+    /// source env var)`. Raw values and inline-value secrets are never exposed.
+    pub async fn secret_source_refs(&self) -> Result<Vec<(String, String)>, SandboxError> {
+        let fresh = Sandbox::get(&self.name)
+            .await
+            .map_err(|source| get_error(&self.name, source))?;
+        let config = fresh
+            .config()
+            .map_err(|source| operation_error(&self.name, "read secret configuration", source))?;
+        Ok(config
+            .spec
+            .network
+            .secrets
+            .map(|secrets| {
+                secrets
+                    .secrets
+                    .into_iter()
+                    .filter_map(|entry| match entry.source {
+                        Some(microsandbox::SecretSource::Env { var }) => Some((entry.env_var, var)),
+                        Some(microsandbox::SecretSource::Store { .. }) | None => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     /// Wrap an fs future's error with sandbox context.
@@ -428,13 +672,57 @@ pub struct SandboxHealthReport {
 
     /// Guest-visible writable-layer free bytes, when available.
     pub writable_layer_free_bytes: Option<u64>,
-
     /// Sandbox uptime at sampling time.
     pub uptime: Duration,
 }
 
-/// Poll the runtime catalog until `name` is running, a terminal phase is
-/// observed, or the timeout expires with the last phase preserved.
+#[cfg(test)]
+mod secret_removal_tests {
+    use super::*;
+
+    #[test]
+    fn removal_env_var_validation_matches_binding_identity_rules() {
+        assert!(validate_secret_env_var("RIGHT_PROVIDER_KEY").is_ok());
+        assert!(validate_secret_env_var("").is_err());
+        assert!(validate_secret_env_var("A=B").is_err());
+        assert!(validate_secret_env_var("A\0B").is_err());
+    }
+}
+
+fn validate_secret_env_var(env_var: &str) -> Result<(), SandboxError> {
+    if env_var.is_empty() || env_var.contains(['=', '\0']) {
+        return Err(SandboxError::InvalidSpec {
+            field: "secrets.env_var",
+            reason: "must be non-empty and contain no '=' or NUL".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Convert an SDK plan conflict into Right's redacted error taxonomy.
+fn secret_conflict(
+    name: &str,
+    binding: &SecretBinding,
+    conflicts: &[microsandbox::ModificationConflict],
+) -> SandboxError {
+    SandboxError::SecretApplyConflict {
+        name: name.to_owned(),
+        env_var: binding.env_var.clone(),
+        details: conflicts
+            .iter()
+            .map(|conflict| format!("{}: {}", conflict.field, conflict.message))
+            .collect::<Vec<_>>()
+            .join("; "),
+    }
+}
+
+fn modification_warnings(warnings: &[microsandbox::ModificationWarning]) -> Vec<String> {
+    warnings
+        .iter()
+        .map(|warning| format!("{}: {}", warning.field, warning.message))
+        .collect()
+}
+
 async fn wait_ready_by_name(name: &str, timeout: Duration) -> Result<(), SandboxError> {
     let deadline = Instant::now() + timeout;
     loop {

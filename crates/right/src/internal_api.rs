@@ -156,9 +156,9 @@ pub(crate) struct InternalState {
     /// records and credentials, replacing the retired OpenShell provider
     /// gateway. Never exposes a credential value on a read path.
     pub(crate) providers: std::sync::Arc<right_providers::ProviderStore>,
-    // Per-agent provider-mutation serialization lives in the store
-    // (`ProviderStore::agent_lock`), which is the single lock owner — there is
-    // no second per-agent lock domain here to fall out of sync with it.
+    // Per-agent provider mutation serialization lives in ProviderStore. Its
+    // advisory file lock is authoritative across processes; the in-process
+    // mutex is only the cheap first queue for same-process callers.
 }
 
 #[cfg(test)]

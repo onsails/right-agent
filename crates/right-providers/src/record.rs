@@ -108,6 +108,14 @@ pub enum ProviderStatus {
     Error,
 }
 
+/// Identity-only view of an agent that currently holds a provider record.
+/// The owner is included alongside every borrower; no definition or credential
+/// data crosses this API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderHolder {
+    pub agent: String,
+}
+
 /// A stored provider record, as returned by every read API.
 ///
 /// There is deliberately no credential field: the value never leaves the

@@ -1,10 +1,9 @@
 //! Right's provider credential store.
 //!
 //! Replaces the OpenShell provider gateway. Credentials live in
-//! `~/.right/providers.db` (SQLite, mode 0600) and reach a sandbox as
-//! microsandbox *source-ref* secrets: only the environment-variable name and a
-//! placeholder are ever persisted, and the value is resolved at spawn
-//! (ADR 0002).
+//! `~/.right/providers.db` (SQLite, mode 0600) and reach a sandbox through a
+//! redacted binding and the SDK's scoped in-process resolver. Durable sandbox
+//! config stores only an owner-scoped source identity and placeholder.
 //!
 //! Three rules hold everywhere in this crate:
 //!
@@ -30,12 +29,10 @@ pub use catalog::{
     BUILTIN_CATALOG, BuiltinProvider, GENERIC_SLUG, ProviderCategory, RESERVED_TYPE_SLUG,
 };
 pub use error::StoreError;
-pub use plan::{
-    DestroyProviderPlan, HeldProvider, plan_destroy_provider_cascade, plan_share, plan_unshare,
-};
+pub use plan::{DestroyProviderPlan, HeldProvider, plan_destroy_provider_cascade};
 pub use record::{
-    Credential, GenericSpec, NewProvider, ProviderKind, ProviderRecord, ProviderStatus,
-    REDACTION_SENTINEL,
+    Credential, GenericSpec, NewProvider, ProviderHolder, ProviderKind, ProviderRecord,
+    ProviderStatus, REDACTION_SENTINEL,
 };
-pub use store::{AgentGuard, PROVIDERS_DB_FILE, ProviderStore, source_env_var};
+pub use store::{AgentGuard, PROVIDERS_DB_FILE, ProviderStore, is_source_identity, source_env_var};
 pub use validate::{new_record_name, validate_name, validate_type_slug};

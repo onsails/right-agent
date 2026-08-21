@@ -72,6 +72,7 @@ chrono-tz = "0.10"
 cron = "0.16"
 cron-descriptor = "0.1"
 sha2 = "0.11"
+hex = "0.4"
 hmac = "0.13"
 rand = "0.10"
 base64 = "0.22"
@@ -92,7 +93,11 @@ signal-hook = { version = "0.4", features = ["extended-siginfo"] }
 const_format = "0.2"
 arc-swap = "1.0"
 secrecy = { version = "0.10", features = ["serde"] }
+zeroize = "1.8"
 semver = "1.0"
+
+[patch.crates-io]
+microsandbox = { path = "vendor/microsandbox" }
 
 [profile.dev]
 panic = "abort"

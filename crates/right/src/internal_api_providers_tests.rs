@@ -443,7 +443,8 @@ mod store_err_mapping_tests {
 
 #[cfg(test)]
 mod plan_share_tests {
-    use right_providers::{HeldProvider, plan_share, plan_unshare};
+    use right_providers::HeldProvider;
+    use right_providers::plan::{plan_share, plan_unshare};
 
     use super::*;
 
@@ -1111,7 +1112,11 @@ mod handler_tests {
             let state = state.clone();
             let agent_yaml = agent_yaml.clone();
             tasks.push(tokio::spawn(async move {
-                let _guard = state.providers.agent_lock("hostagent").await;
+                let _guard = state
+                    .providers
+                    .agent_lock("hostagent")
+                    .await
+                    .expect("acquire provider agent lock");
                 let existing = tokio::fs::read_to_string(&agent_yaml).await.unwrap();
                 // Hold open the RMW window: under a per-name lock every task
                 // reaches this sleep concurrently; under the per-agent lock
@@ -1194,6 +1199,30 @@ mod handler_tests {
             ),
             "borrowed entry must be rejected: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_remove_store_failure_restores_yaml_and_remains_retryable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_provider_test_state(tmp.path()).await;
+        let agent_yaml = tmp.path().join("agents/hostagent/agent.yaml");
+        let original = "sandbox:\n  name: hostagent\n  providers:\n    - name: 'missing-a1b2c3'\n      type: 'right-fal'\n";
+        std::fs::write(&agent_yaml, original).unwrap();
+
+        let request = || ProviderRemoveReq {
+            agent: "hostagent".into(),
+            name: "missing-a1b2c3".into(),
+        };
+        let first =
+            handle_provider_remove(axum::extract::State(state.clone()), axum::Json(request()))
+                .await;
+        assert!(first.is_err(), "missing store row must fail removal");
+        assert_eq!(std::fs::read_to_string(&agent_yaml).unwrap(), original);
+
+        let second =
+            handle_provider_remove(axum::extract::State(state), axum::Json(request())).await;
+        assert!(second.is_err(), "retry must see the same store failure");
+        assert_eq!(std::fs::read_to_string(&agent_yaml).unwrap(), original);
     }
 
     #[tokio::test]

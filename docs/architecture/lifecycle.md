@@ -11,11 +11,9 @@ right init  /  right agent init <name>
   ├─ Resolve Claude authentication before agent creation: accept setup-token
   │   automation only from `RIGHT_CLAUDE_SETUP_TOKEN` (never argv), securely
   │   prompt interactive calls, and reject non-interactive calls without a
-  │   token. Restore never trusts the source backup's token. The no-MCP probe
-  │   clears competing auth and requires setup-token auth plus either final exact
-  │   `OK` or an authenticated account rate-limit rejection; sandbox tokens use SSH stdin.
-  ├─ Before no-sandbox state creation, execute `claude --version` (falling back
-  │   to the supported `claude-bun` wrapper, including on NixOS) and require it
+  │   token. Restore never trusts the source backup's token.
+  ├─ Before creating agent state, execute `claude --version` (falling back to
+  │   the supported `claude-bun` wrapper, including on NixOS) and require it
   │   to identify as Claude Code. A path entry alone is not readiness.
   ├─ Before `agent init` (fresh or restore) can wipe or create state, load
   │   global tunnel config. External providers receive configuration-shape
@@ -31,10 +29,11 @@ right init  /  right agent init <name>
   │   IDs, stt, memory) and writes the sandbox config to the agent dir.
   │   `init` skips the wizard and also writes ~/.right/config.yaml + detects
   │   Telegram token / cloudflared tunnel. The declared `network_policy`
-  │   becomes a `right_sandbox::Egress` value at sandbox create; there is no
-  │   generated policy file and no post-create policy apply. The guest reaches
-  │   the host aggregator through the always-open host destination group.
-  │   `right-config` owns global config loading, saving, and path helpers.
+  │   becomes a `right_sandbox::Egress` value when the bot creates the
+  │   microsandbox; there is no generated policy file or post-create policy
+  │   apply. The guest reaches the host aggregator through the always-open host
+  │   destination group. `right-config` owns global config loading, saving, and
+  │   path helpers.
   ├─ Create ~/.right/agents/<name>/ with template files
   ├─ Write BOOTSTRAP.md, TOOLS.md, agent.yaml
   │   (IDENTITY.md, USER.md created later by bootstrap CC session;
@@ -44,47 +43,53 @@ right init  /  right agent init <name>
   │   restore overwrites any source token after the canonical DB is installed.
   │   Once opened, database sidecars are Turso-owned and init never manually
   │   checkpoints or deletes them; restore removes copied sidecars pre-open.
-  ├─ Make execution transport available (host directly, or sandbox + SSH)
-  ├─ Run the truthful one-turn Claude API auth/model/network probe
+  ├─ Fresh `init` and `agent init` leave microsandbox creation to the bot's
+  │   supervisor on first start; they report the stored credential and pending
+  │   sandbox honestly rather than claiming an API validation.
+  ├─ Restore creates its microsandbox through the shared sandbox spec, injects
+  │   `CLAUDE_CODE_OAUTH_TOKEN` only into the probe's per-exec environment, and
+  │   requires setup-token `system/init` plus either exit-0 final exact `OK` or
+  │   authenticated rejected rate-limit evidence. The token is absent from the
+  │   guest script, argv, captured stderr, and failure diagnostics.
   ├─ Symlink credentials from ~/.claude/
   └─ Register with running process-compose, then render `ready`/`restored` with
       the matching next action. Registration failure retains initialized state,
-      warns the operator, and directs `right reload` or a Right restart. Restore
-      later-error cleanup confirms a created sandbox reaches gRPC `NotFound`
-      before removing its SSH config and partial target directory; if remote
-      deletion cannot be confirmed, both local recovery handles are retained.
+      warns the operator, and directs `right reload` or a Right restart. A
+      later restore failure deletes its created microsandbox before removing
+      the partial target directory; deletion failure retains that directory as
+      the recovery handle.
 right up [--agents x,y] [--detach] [--non-interactive]
   ├─ Discover only the selected agents (`--agents` does not let unrelated
   │   broken agent configuration gate a targeted start)
-  ├─ Before provider provisioning or any codegen, validate the configured
-  │   tunnel, every selected Telegram token with live `getMe`, every selected
-  │   Claude credential with the no-MCP real auth probe, and existing-sandbox
-  │   transport. Sandboxed agents must already have a resolvable sandbox;
-  │   readiness never creates or recreates one, but interactive mode may write
-  │   a missing SSH config for that existing sandbox.
-  ├─ Default mode offers targeted repair: replace only a rejected Telegram
-  │   token after live validation; validate a candidate Claude token in memory
-  │   and persist it only after the real no-MCP probe succeeds; or replace the
-  │   configured Right-owned Cloudflared tunnel with a create-before-delete
-  │   cutover. Tunnel repair identifies the configured UUID/name, validates the
-  │   replacement credential TunnelID and account, preserves the public hostname
-  │   and aggregator settings, atomically swaps config, then deletes the old
-  │   tunnel. Cancellation and failed probes leave stored credentials unchanged;
-  │   failures before tunnel cutover leave the old tunnel and config intact.
-  │   External tunnel providers receive configuration-shape validation only
-  │   because Right cannot prove operator-owned ingress reachability.
-  ├─ `--non-interactive` never prompts or mutates state. It enumerates the raw
-  │   selected agent directories (or every directory when unfiltered), records
-  │   missing/unreadable/malformed agent configuration per name, continues live
-  │   Telegram and Claude checks for every valid agent, and reports one aggregated
-  │   error. Provider provisioning, codegen, and process-compose remain unreachable
-  │   until every readiness issue is fixed.
+  ├─ Before codegen, validate the configured tunnel and every selected
+  │   Telegram token with live `getMe`. Claude authentication and microsandbox
+  │   availability are deliberately absent from host readiness: the bot owns
+  │   sandbox create-or-attach and only an in-guest Claude invocation can
+  │   validate the stored setup token.
+  ├─ Default mode offers targeted repair for a rejected Telegram token after
+  │   live validation, or for the configured Right-owned Cloudflared tunnel
+  │   with a create-before-delete cutover. Tunnel repair identifies the
+  │   configured UUID/name, validates the replacement credential TunnelID and
+  │   account, preserves the public hostname and aggregator settings, atomically
+  │   swaps config, then deletes the old tunnel. Failures before cutover leave
+  │   the old tunnel and config intact. External tunnel providers receive
+  │   configuration-shape validation only because Right cannot prove
+  │   operator-owned ingress reachability.
+  ├─ `--non-interactive` never prompts or mutates readiness state. It enumerates
+  │   the raw selected agent directories (or every directory when unfiltered),
+  │   records missing/unreadable/malformed agent configuration per name,
+  │   continues live Telegram checks for every valid agent, and reports one
+  │   aggregated error. Codegen and process-compose remain unreachable until
+  │   every readiness issue is fixed.
   ├─ Per agent: resolve secret for token map (generate if missing)
   ├─ Generate agent-tokens.json
   ├─ Generate process-compose.yaml (minijinja)
   ├─ Generate cloudflared config, including `/dashboard/<agent>/.*` rules,
   │   and record whether content changed
-  └─ Launch process-compose (TUI or detached)
+  └─ Launch process-compose (TUI or detached); each bot installs/checks the
+      pinned microsandbox runtime, diagnoses the host, creates or attaches its
+      VM, waits for readiness, syncs guest state, and starts its in-guest
+      Claude health probe.
 
 right reload / running agent register / running agent destroy
   ├─ Discover agents from agents/ directory
@@ -101,11 +106,10 @@ right bot --agent <name>  (spawned by process-compose)
   │   ├─ TOOLS.md, skills install, policy.yaml
   │   └─ data.db init, git init, secret generation
   ├─ Clear Telegram webhook, verify bot identity
-  ├─ Sandbox lifecycle (`right-sandbox`):
+  ├─ Microsandbox lifecycle (`right-sandbox`):
   │   ├─ ensure_runtime_installed + diagnose_host (hypervisor preflight)
-  │   ├─ SandboxHandle::create_or_attach — attach wins over create
-  │   └─ wait_ready (attach-race only; create already blocks until serving)
-  ├─ Initial sync (blocking): `right-platform-store` deploys platform files to /sandbox/.platform/ (content-addressed + symlinks)
+  │   ├─ SandboxHandle::create_or_attach, then wait_ready
+  │   └─ initial guest sync completes before the sandbox is published ready
   ├─ Identity mirror sync: pull IDENTITY.md / SOUL.md / USER.md from /sandbox
   │   into host agent_dir/ when present. During bootstrap, the Telegram worker
   │   asks and records five fixed questions without Claude, then invokes Claude
@@ -118,8 +122,8 @@ right bot --agent <name>  (spawned by process-compose)
   │   clearing intent; failed rollback leaves intent for startup recovery.
   ├─ Start background sync task (every 5 min — `right-platform-store` re-deploys /sandbox/.platform/, GC stale entries)
   ├─ Start Claude health loop:
-  │   ├─ immediate startup Haiku probe with strict MCP config (separate from
-  │   │   init auth validation; the aggregator is available here)
+  │   ├─ immediate startup Haiku probe with strict MCP config after sandbox
+  │   │   bring-up (the aggregator is available here)
   │   ├─ hourly Haiku probe for Claude OAuth keepalive + agent-facing MCP init
   │   └─ stale `right` MCP needs-auth cache repair for terminal unhealthy `system/init` statuses
   ├─ Start cron engine and refresh scheduler
@@ -147,7 +151,7 @@ right bot --agent <name>  (spawned by process-compose)
       │   finish
       ├─ Flush already-ready async deliveries without idle-delay politeness
       │   when the normal loop exits cleanly
-      └─ Tear down SSH control master and exit
+      └─ Exit
 
 Per message:
   ├─ Extract text + attachments from Telegram message
@@ -209,10 +213,12 @@ Config change (right agent config):
   ├─ process-compose restarts bot (on_failure policy)
   └─ Bot re-runs per-agent codegen with new config
 
-Create-time-only fields (`network_policy`, the set of declared providers,
-resources) cannot be applied to a live microVM. A change to one is reported
-and takes effect on the next sandbox recreate; only provider credential
-*values* hot-apply, via `hot_reconcile_providers`.
+`network_policy` and resource changes still require sandbox recreation. Provider
+bindings are reconciled in place: existing credentials and complete allowed-host
+sets update live, while a missing binding is added through the SDK's
+restart-backed modify path without deleting the sandbox or its writable layer.
+Provider-only YAML reloads publish the accepted config for both immediate
+reconcile and any later supervisor recovery.
 
 right agent backup <name> [--sandbox-only] [--include-rebuildable]
   ├─ Sandbox mode: tar /sandbox/ through the guest → sandbox.tar.gz
@@ -244,12 +250,15 @@ right agent init <name> --from-backup <path>
   ├─ Remove copied data.db-* sidecars before opening the DB; discard
   │   tar-extracted data.db and use only backup/data.db as canonical
   ├─ Normalize agent.yaml and regenerate bootstrap policy
-  ├─ Create a timestamped sandbox when configured, generate SSH config,
-  │   restore files, and reconcile the identity mirror
-  ├─ On any later failure, request deletion of the created sandbox and wait for
-  │   gRPC `NotFound` before deleting its SSH config and partial target directory;
-  │   retain those local recovery handles and report cleanup failure otherwise
-  ├─ Overwrite authentication, run codegen, and pass the no-MCP init auth probe
+  ├─ Create a timestamped microsandbox through the shared bot sandbox spec,
+  │   upload and extract the archive, and reconcile the identity mirror
+  ├─ On any later failure, delete the created microsandbox before removing the
+  │   partial target directory; retain the directory and report the cleanup
+  │   error if deletion cannot be confirmed
+  ├─ Overwrite authentication, run codegen, and run the no-MCP init auth probe
+  │   with the token only in its per-exec environment. Exact final `OK` requires
+  │   exit 0; only authenticated rejected rate-limit evidence may validate a
+  │   nonzero exit.
   └─ Attempt registration with running process-compose, then render `restored`;
       registration failure is a warning and directs `right reload` or restart,
       while a stopped runtime uses `right up` and a live one uses Telegram `/start`

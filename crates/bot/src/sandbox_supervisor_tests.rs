@@ -1,4 +1,8 @@
-use super::{agent_sandbox_spec_for, degrade_decision, diagnose};
+use super::{
+    SupervisorDeps, agent_sandbox_spec_for, degrade_decision, diagnose, resolve_named_provider,
+    right_managed_secret_env_vars, right_managed_secret_env_vars_with, secret_bindings,
+    secret_bindings_with,
+};
 use right_agent::agent::types::AgentConfig;
 use right_providers::{Credential, NewProvider, ProviderKind, ProviderStore};
 use right_sandbox::{SandboxCause, SandboxError, SandboxPhase};
@@ -212,6 +216,104 @@ async fn a_declared_provider_with_no_record_still_hard_fails() {
     );
 }
 
+#[tokio::test]
+async fn named_resolution_rejects_a_provider_absent_from_current_config() {
+    let (_home, store) = store().await;
+    store
+        .create(
+            declared_provider(),
+            Credential::from("test-credential".to_owned()),
+        )
+        .await
+        .expect("seed provider");
+    let empty: AgentConfig = serde_saphyr::from_str("sandbox: {}\n").expect("config parses");
+
+    let error = resolve_named_provider("riskoff", "riskoff-right-fal", &empty, &store)
+        .await
+        .expect_err("a stored provider absent from current agent config must fail");
+
+    assert!(
+        format!("{error:#}").contains("not declared"),
+        "error must clearly name the config disagreement: {error:#}"
+    );
+}
+
+#[tokio::test]
+async fn named_resolution_rejects_a_missing_store_record() {
+    let (_home, store) = store().await;
+    let error = resolve_named_provider("riskoff", "riskoff-right-fal", &provider_config(), &store)
+        .await
+        .expect_err("a declared provider absent from the store must fail");
+
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("riskoff-right-fal") && rendered.contains("not found"),
+        "error must identify the absent provider: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn named_resolution_turns_a_needs_value_record_into_a_store_backed_binding() {
+    let (_home, store) = store().await;
+    store
+        .create(declared_provider(), Credential::absent())
+        .await
+        .expect("seed migrated provider");
+    store
+        .rotate(
+            "riskoff",
+            "riskoff-right-fal",
+            Credential::from("test-credential".to_owned()),
+        )
+        .await
+        .expect("dashboard-equivalent rotate");
+
+    let binding =
+        resolve_named_provider("riskoff", "riskoff-right-fal", &provider_config(), &store)
+            .await
+            .expect("rotated migrated provider resolves");
+
+    assert_eq!(binding.env_var, "FAL_KEY");
+    assert!(
+        binding.source_env_var.starts_with("RIGHT_PROVIDER_"),
+        "the seam carries an owner-scoped source identity rather than credential bytes"
+    );
+}
+
+/// Startup uses the bulk resolver rather than the dashboard's named resolver.
+/// A durable rotation made before restart must therefore be visible through
+/// this exact seam before bring-up applies the binding to an attached sandbox.
+#[tokio::test]
+async fn startup_reconciliation_resolves_a_rotated_stored_credential() {
+    let (_home, store) = store().await;
+    store
+        .create(
+            declared_provider(),
+            Credential::from("credential-before-restart".to_owned()),
+        )
+        .await
+        .expect("seed the provider bound by the existing sandbox");
+    store
+        .rotate(
+            "riskoff",
+            "riskoff-right-fal",
+            Credential::from("credential-after-rotation".to_owned()),
+        )
+        .await
+        .expect("persist a dashboard-equivalent rotation");
+
+    let bindings = secret_bindings("riskoff", &provider_config(), &store)
+        .await
+        .expect("startup reconciliation resolves the durable rotation");
+
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].env_var, "FAL_KEY");
+    assert!(
+        bindings[0].source_env_var.starts_with("RIGHT_PROVIDER_"),
+        "startup must apply an owner-scoped source identity rather than credential bytes"
+    );
+}
+
 /// The skip is targeted: a provider that does hold a credential still binds,
 /// so tolerating one awaiting its value cannot quietly unbind the rest.
 #[tokio::test]
@@ -220,7 +322,7 @@ async fn a_provider_that_holds_a_credential_still_binds() {
     store
         .create(
             declared_provider(),
-            Credential::from("real-value".to_owned()),
+            Credential::from("test-credential".to_owned()),
         )
         .await
         .expect("create");
@@ -231,8 +333,185 @@ async fn a_provider_that_holds_a_credential_still_binds() {
 
     assert_eq!(spec.secrets.len(), 1);
     assert_eq!(spec.secrets[0].env_var, "FAL_KEY");
+}
+
+#[tokio::test]
+async fn borrower_resolution_uses_the_borrowed_entry_name_and_owner_definition() {
+    let (_home, store) = store().await;
+    store
+        .create(
+            declared_provider(),
+            Credential::from("shared-value".to_owned()),
+        )
+        .await
+        .expect("create owner record");
+    store
+        .share("riskoff", "riskoff-right-fal", "borrower")
+        .await
+        .expect("share record");
+    let borrower_config: AgentConfig = serde_saphyr::from_str(
+        "sandbox:\n  providers:\n    - name: riskoff-right-fal\n      type: right-fal\n",
+    )
+    .expect("borrower config parses");
+
+    let binding = resolve_named_provider("borrower", "riskoff-right-fal", &borrower_config, &store)
+        .await
+        .expect("borrower resolves the owner's current credential");
+    assert_eq!(binding.env_var, "FAL_KEY");
+    assert_eq!(
+        binding.source_env_var,
+        right_providers::source_env_var("riskoff", "riskoff-right-fal")
+    );
+}
+
+#[tokio::test]
+async fn recovery_snapshots_the_latest_accepted_provider_config() {
+    let (_temp, providers) = store().await;
+    let startup = provider_config();
+    let latest: AgentConfig = serde_saphyr::from_str(
+        "sandbox:\n  providers:\n    - name: later-provider\n      type: right-fal\n",
+    )
+    .expect("latest config parses");
+    let config = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(startup));
+    let deps = SupervisorDeps::new(
+        "riskoff".to_owned(),
+        std::path::PathBuf::from("/tmp/riskoff"),
+        "right-riskoff".to_owned(),
+        std::sync::Arc::clone(&config),
+        std::sync::Arc::new(providers),
+        std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        tokio_util::sync::CancellationToken::new(),
+    );
+
+    config.store(std::sync::Arc::new(latest));
+    let snapshot = deps.config_snapshot();
+    let names = snapshot
+        .providers()
+        .iter()
+        .map(|provider| provider.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["later-provider"]);
+}
+
+#[test]
+fn removal_candidates_cover_current_and_previous_guest_bindings() {
+    let previous: AgentConfig = serde_saphyr::from_str(
+        "sandbox:\n  providers:\n    - name: old-generic\n      type: generic\n      generic:\n        env_var: OLD_TOKEN\n        upstream_hosts: [api.old.test]\n    - name: fal\n      type: right-fal\n",
+    )
+    .expect("previous config parses");
+    let current: AgentConfig = serde_saphyr::from_str(
+        "sandbox:\n  providers:\n    - name: github\n      type: right-github\n",
+    )
+    .expect("current config parses");
+
+    let candidates =
+        right_managed_secret_env_vars(&[previous], &current).expect("identities resolve");
+    assert_eq!(
+        candidates,
+        ["OLD_TOKEN", "FAL_KEY", "GITHUB_TOKEN"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+}
+
+#[test]
+fn duplicate_provider_types_collapse_to_one_guest_binding_identity() {
+    let previous: AgentConfig = serde_saphyr::from_str(
+        "sandbox:\n  providers:\n    - name: github-old\n      type: github\n",
+    )
+    .expect("previous config parses");
+    let current: AgentConfig = serde_saphyr::from_str(
+        "sandbox:\n  providers:\n    - name: github-new\n      type: right-github\n",
+    )
+    .expect("current config parses");
+
+    assert_eq!(
+        right_managed_secret_env_vars(&[previous], &current).expect("identities resolve"),
+        [String::from("GITHUB_TOKEN")].into_iter().collect()
+    );
+}
+
+#[tokio::test]
+async fn duplicate_provider_env_bindings_fail_before_sandbox_mutation() {
+    let (_home, store) = store().await;
+    store
+        .create(
+            NewProvider {
+                owner_agent: "riskoff".to_owned(),
+                name: "github-a".to_owned(),
+                kind: ProviderKind::Builtin("github".to_owned()),
+                label: String::new(),
+            },
+            Credential::from("test-credential".to_owned()),
+        )
+        .await
+        .expect("seed first binding provider");
+
+    let error = store
+        .create(
+            NewProvider {
+                owner_agent: "riskoff".to_owned(),
+                name: "github-b".to_owned(),
+                kind: ProviderKind::Builtin("right-github".to_owned()),
+                label: String::new(),
+            },
+            Credential::from("test-credential".to_owned()),
+        )
+        .await
+        .expect_err("duplicate guest binding identity must fail in the store");
+
+    let rendered = format!("{error:#}");
     assert!(
-        !format!("{:?}", spec.secrets[0]).contains("real-value"),
-        "a binding carries references only"
+        rendered.contains("GITHUB_TOKEN"),
+        "unexpected error: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn tolerant_reconcile_skips_unknown_builtin_slug() {
+    let (_home, store) = store().await;
+    let config: AgentConfig = serde_saphyr::from_str(
+        "sandbox:\n  providers:\n    - name: mystery\n      type: right-mystery\n",
+    )
+    .expect("config with unknown built-in slug parses");
+
+    // Tolerant mode must not propagate the unknown-slug error, so revocation
+    // of other obsolete bindings can still proceed.
+    let bindings = secret_bindings_with("riskoff", &config, &store, true)
+        .await
+        .expect("tolerant reconcile must skip the unresolvable provider");
+    assert!(
+        bindings.is_empty(),
+        "an unknown built-in slug resolves to no binding"
+    );
+
+    let managed =
+        right_managed_secret_env_vars_with(&[], &config, true).expect("managed identities resolve");
+    assert!(managed.is_empty(), "the skipped provider manages nothing");
+}
+
+#[tokio::test]
+async fn tolerant_reconcile_skips_a_missing_store_record() {
+    let (_home, store) = store().await;
+
+    // The record is resolvable (a known built-in slug) but absent from the
+    // store; tolerant mode downgrades the store error to a skip, while strict
+    // mode (create-time) must still hard-fail.
+    let strict_err = secret_bindings("riskoff", &provider_config(), &store)
+        .await
+        .expect_err("create-time resolution must still hard-fail on a missing record");
+    let rendered = format!("{strict_err:#}");
+    assert!(
+        rendered.contains("riskoff-right-fal"),
+        "error names the provider"
+    );
+
+    let bindings = secret_bindings_with("riskoff", &provider_config(), &store, true)
+        .await
+        .expect("tolerant reconcile must skip the unresolvable provider");
+    assert!(
+        bindings.is_empty(),
+        "a missing store record resolves to no binding in tolerant mode"
     );
 }

@@ -30,8 +30,8 @@ use crate::catalog::{self, BuiltinProvider, GENERIC_SLUG};
 use crate::error::StoreError;
 use crate::plan::{self, HeldProvider};
 use crate::record::{
-    Credential, GenericSpec, NewProvider, ProviderKind, ProviderRecord, ProviderStatus,
-    check_source_credential_readable,
+    Credential, GenericSpec, NewProvider, ProviderHolder, ProviderKind, ProviderRecord,
+    ProviderStatus, check_source_credential_readable,
 };
 use crate::validate;
 
@@ -49,7 +49,7 @@ const SCHEMA_VERSION: u32 = 1;
 const KIND_BUILTIN: &str = "builtin";
 const KIND_GENERIC: &str = "generic";
 
-/// Prefix of the host environment variable a source-ref secret resolves from.
+/// Prefix of a durable owner-and-record-scoped source identity.
 const SOURCE_ENV_PREFIX: &str = "RIGHT_PROVIDER_";
 
 /// Columns of an owning row, in the order [`owned_row`] decodes them. The
@@ -65,24 +65,69 @@ static OWNED_COLUMNS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| 
     )
 });
 
-/// The host environment variable a record's credential is resolved from at
-/// sandbox spawn.
+/// Stable source identity for one owning provider record.
 ///
-/// Deterministic in the record name so the spawning process and the sandbox
-/// spec agree without persisting anything secret.
-pub fn source_env_var(name: &str) -> String {
-    let mut var = String::with_capacity(SOURCE_ENV_PREFIX.len() + name.len());
-    var.push_str(SOURCE_ENV_PREFIX);
-    for c in name.chars() {
-        var.push(if c.is_ascii_alphanumeric() {
-            c.to_ascii_uppercase()
-        } else {
-            '_'
-        });
-    }
-    var
+/// Owner and record names are length-delimited before hashing, so records with
+/// the same display name under different owners can never collide.
+pub fn source_env_var(owner_agent: &str, name: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(owner_agent.len().to_be_bytes());
+    hasher.update(owner_agent.as_bytes());
+    hasher.update(name.len().to_be_bytes());
+    hasher.update(name.as_bytes());
+    let digest = hasher.finalize();
+    format!(
+        "{SOURCE_ENV_PREFIX}{}",
+        hex::encode(&digest[..16]).to_ascii_uppercase()
+    )
 }
 
+/// Whether a durable secret source identity was minted by this provider store.
+pub fn is_source_identity(source: &str) -> bool {
+    source
+        .strip_prefix(SOURCE_ENV_PREFIX)
+        .is_some_and(|suffix| suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+fn agent_lock_path(db_path: &Path, agent: &str) -> PathBuf {
+    let mut encoded = String::with_capacity(agent.len() * 2);
+    use std::fmt::Write as _;
+    for byte in agent.as_bytes() {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    db_path
+        .with_file_name("provider-locks")
+        .join(format!("{encoded}.lock"))
+}
+
+fn acquire_agent_file_lock(path: &Path) -> Result<std::fs::File, StoreError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| StoreError::storage(path, "provider lock path has no parent directory"))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| StoreError::storage(parent, format!("create lock directory: {error}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| StoreError::storage(parent, format!("chmod provider lock directory: {error}")),
+        )?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(DB_FILE_MODE);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| StoreError::storage(path, format!("open provider lock: {error}")))?;
+    file.lock()
+        .map_err(|error| StoreError::storage(path, format!("lock provider mutation: {error}")))?;
+    Ok(file)
+}
 /// A decoded owning row, before the borrower overlay is applied.
 struct OwnedRow {
     owner_agent: String,
@@ -191,8 +236,12 @@ impl std::fmt::Debug for ProviderStore {
             .finish_non_exhaustive()
     }
 }
-/// A held per-agent lock. Dropping it releases the critical section.
-pub struct AgentGuard(tokio::sync::OwnedMutexGuard<()>);
+/// A held per-agent lock. Dropping it releases both the process-local mutex
+/// and the cross-process advisory file lock.
+pub struct AgentGuard {
+    _local: tokio::sync::OwnedMutexGuard<()>,
+    _file: std::fs::File,
+}
 
 impl std::fmt::Debug for AgentGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -266,18 +315,17 @@ impl ProviderStore {
         &self.db_path
     }
 
-    /// Take the per-agent lock.
+    /// Take the per-agent provider mutation lock.
     ///
-    /// Ported from the internal API's `provider_lock`: a caller that performs
-    /// a multi-step flow (validate, mutate the store, rewrite `agent.yaml`)
-    /// holds this for the whole flow. Callers validate the record name
-    /// *before* taking the lock, and a share locks only the destination
-    /// agent.
+    /// The process-local mutex avoids occupying a blocking thread while a
+    /// sibling task waits. The advisory file lock is authoritative across bot,
+    /// aggregator, watcher, startup, and CLI processes that can address the
+    /// same agent sandbox. The kernel releases it if a process exits.
     ///
     /// The store's own methods never take this lock — their atomicity comes
-    /// from immediate transactions — so holding a guard across a store call
-    /// cannot deadlock.
-    pub async fn agent_lock(&self, agent: &str) -> AgentGuard {
+    /// from immediate transactions — so callers may hold it across durable
+    /// store/YAML work or live sandbox convergence without self-deadlock.
+    pub async fn agent_lock(&self, agent: &str) -> Result<AgentGuard, StoreError> {
         let mutex = {
             let mut locks = self
                 .locks
@@ -285,7 +333,22 @@ impl ProviderStore {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             Arc::clone(locks.entry(agent.to_owned()).or_default())
         };
-        AgentGuard(mutex.lock_owned().await)
+        let local = mutex.lock_owned().await;
+        let lock_path = agent_lock_path(&self.db_path, agent);
+        let lock_path_for_task = lock_path.clone();
+        let file =
+            tokio::task::spawn_blocking(move || acquire_agent_file_lock(&lock_path_for_task))
+                .await
+                .map_err(|error| {
+                    StoreError::storage(
+                        &lock_path,
+                        format!("provider lock task failed for agent {agent:?}: {error}"),
+                    )
+                })??;
+        Ok(AgentGuard {
+            _local: local,
+            _file: file,
+        })
     }
 
     /// The whole built-in catalog, hidden entries included.
@@ -516,6 +579,32 @@ impl ProviderStore {
                 .map(|row| row.into_record(Some(agent.to_owned()))),
         );
         Ok(records)
+    }
+
+    /// Every agent currently holding the owned record `name`, owner first and
+    /// borrowers sorted by agent name. Identity only; definitions and
+    /// credential material never leave the existing holder-specific APIs.
+    pub async fn holders(
+        &self,
+        owner_agent: &str,
+        name: &str,
+    ) -> Result<Vec<ProviderHolder>, StoreError> {
+        let resolved = resolve(&self.conn, owner_agent, name).await?;
+        reject_if_borrowed(&resolved)?;
+        let mut holders = vec![ProviderHolder {
+            agent: resolved.row.owner_agent.clone(),
+        }];
+        holders.extend(
+            self.conn
+                .query_all(
+                    "SELECT borrower_agent FROM provider_borrows
+                     WHERE owner_agent = ?1 AND name = ?2 ORDER BY borrower_agent",
+                    params![owner_agent, name],
+                    |row| Ok(ProviderHolder { agent: row.get(0)? }),
+                )
+                .await?,
+        );
+        Ok(holders)
     }
 }
 
@@ -899,58 +988,14 @@ impl ProviderStore {
     }
 }
 
-/// Serializes every `set_var` this crate performs. `std::env` is process
-/// global; this is the only writer in Right.
-static ENV_PUBLISH: Mutex<()> = Mutex::new(());
-
-/// Publish `value` under `var` in the current process environment.
-///
-/// # Why this exists
-///
-/// A microsandbox source-ref secret names a *host* environment variable and
-/// the runtime reads it at spawn and at rotation apply. That is the only
-/// mechanism upstream exposes, so the spawning process must carry the value —
-/// there is no API that accepts it directly. Nothing is persisted: the
-/// sandbox config stores the variable name and a placeholder, never the
-/// secret.
-///
-/// # Safety
-///
-/// `std::env::set_var` is unsound if another thread reads the environment
-/// concurrently. Writes are serialized here, and Right performs no other
-/// environment mutation at runtime (`right::main` only sets `NO_COLOR`,
-/// before any provider work).
-fn publish_source_value(var: &str, value: &str) {
-    let _guard = ENV_PUBLISH
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // SAFETY: serialized against every other writer in this process; see the
-    // function docs for why an environment write is unavoidable here.
-    unsafe { std::env::set_var(var, value) };
-}
-
-/// Remove a published source variable. Test-only: lets tests of the
-/// source-ref publish path leave the process environment as they found it, so
-/// a later test never observes a value an earlier test set.
-#[cfg(test)]
-pub(crate) fn remove_source_value(var: &str) {
-    let _guard = ENV_PUBLISH
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // SAFETY: serialized against every other writer in this process.
-    unsafe { std::env::remove_var(var) };
-}
-
 impl ProviderStore {
     /// Resolve a record into a microsandbox source-ref secret binding.
     ///
-    /// This is the only code path that reads a stored credential. The value
-    /// is published into this process's environment under the binding's
-    /// `source_env_var` and is never returned: the caller receives names, a
-    /// placeholder, and the hosts allowed to receive the substitution.
-    ///
-    /// An empty or already-redacted credential is a hard error rather than a
-    /// binding that would silently substitute nothing.
+    /// This tightly scoped API is the only code path that reads a stored
+    /// credential. The returned binding carries the value privately in a
+    /// redacted `SecretString`; right-sandbox installs it into the SDK's
+    /// ephemeral resolver only while create/start/apply executes. Durable
+    /// sandbox configuration stores only the source identity.
     pub async fn source_ref_binding(
         &self,
         agent: &str,
@@ -982,10 +1027,12 @@ impl ProviderStore {
             .await?;
         check_source_credential_readable(&credential, name)?;
 
-        let source_env_var = source_env_var(name);
-        publish_source_value(&source_env_var, &credential);
-
-        let mut binding = right_sandbox::SecretBinding::new(env_var, source_env_var);
+        let source_env_var = source_env_var(&owner, name);
+        let mut binding = right_sandbox::SecretBinding::new(
+            env_var,
+            source_env_var,
+            secrecy::SecretString::from(credential),
+        );
         binding.allowed_hosts = allowed_hosts;
         binding.inject_query = query_injection;
         Ok(binding)

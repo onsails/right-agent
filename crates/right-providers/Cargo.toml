@@ -6,9 +6,12 @@ license.workspace = true
 publish = false
 
 [dependencies]
+fs4 = { workspace = true }
 right-db = { path = "../right-db" }
 right-sandbox = { path = "../right-sandbox" }
 secrecy = { workspace = true }
+hex.workspace = true
+sha2.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

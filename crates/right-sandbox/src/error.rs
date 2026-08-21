@@ -208,23 +208,25 @@ pub enum SandboxError {
     #[error("sandbox '{name}': exec session for '{cmd}' ended without an exit event")]
     ExecLost { name: String, cmd: String },
 
-    /// The runtime reported the secret rotation cannot be applied through
-    /// `modify()` at all (e.g. capability missing on an old runtime).
-    #[error("sandbox '{name}': rotating secret '{env_var}' is not supported by the runtime")]
-    RotationUnsupported { name: String, env_var: String },
+    /// The runtime did not produce a supported add/rotate plan for a binding.
+    #[error("sandbox '{name}': applying secret '{env_var}' is not supported by the runtime")]
+    SecretApplyUnsupported { name: String, env_var: String },
 
-    /// The rotation plan carried conflicts that must be resolved first.
-    #[error("sandbox '{name}': rotating secret '{env_var}' has conflicts: {details}")]
-    RotationConflict {
+    /// A missing binding cannot be added without losing required semantics.
+    #[error("sandbox '{name}': cannot add secret '{env_var}': {reason}")]
+    SecretAdditionUnsupported {
+        name: String,
+        env_var: String,
+        reason: &'static str,
+    },
+
+    /// The secret apply plan carried conflicts that must be resolved first.
+    #[error("sandbox '{name}': applying secret '{env_var}' has conflicts: {details}")]
+    SecretApplyConflict {
         name: String,
         env_var: String,
         details: String,
     },
-
-    /// The sandbox has no secret bound to this env var to rotate. The plan
-    /// classified the change as an add rather than a rotation.
-    #[error("sandbox '{name}' has no secret '{env_var}' to rotate")]
-    RotationTargetMissing { name: String, env_var: String },
 }
 
 impl SandboxError {
@@ -232,7 +234,7 @@ impl SandboxError {
     /// something about backend health.
     ///
     /// `None` means the error is a caller/config/command error (invalid spec,
-    /// guest command spawn failure, rotation misuse) and says nothing about
+    /// guest command spawn failure, secret-apply misuse) and says nothing about
     /// the backend. Callers that always need a cause fall back to
     /// [`SandboxCause::Unreachable`], matching the old `GatewayCause`
     /// "inconclusive" fallback.
@@ -256,9 +258,9 @@ impl SandboxError {
             Self::InvalidSpec { .. }
             | Self::ExecSpawn { .. }
             | Self::ExecStdin { .. }
-            | Self::RotationUnsupported { .. }
-            | Self::RotationTargetMissing { .. }
-            | Self::RotationConflict { .. } => None,
+            | Self::SecretApplyUnsupported { .. }
+            | Self::SecretAdditionUnsupported { .. }
+            | Self::SecretApplyConflict { .. } => None,
         }
     }
 }
@@ -379,6 +381,13 @@ mod tests {
             message: "no such file".to_owned(),
         };
         assert_eq!(spawn.cause(), None);
+
+        let unsupported_add = SandboxError::SecretAdditionUnsupported {
+            name: "right-a".to_owned(),
+            env_var: "API_KEY".to_owned(),
+            reason: "query injection unavailable",
+        };
+        assert_eq!(unsupported_add.cause(), None);
     }
 
     #[test]

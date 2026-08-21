@@ -377,7 +377,11 @@ pub(crate) async fn handle_provider_create(
     };
     let name = right_providers::new_record_name(&req.type_);
     validate_name(&req.agent, &name)?;
-    let _guard = state.providers.agent_lock(&req.agent).await;
+    let _guard = state
+        .providers
+        .agent_lock(&req.agent)
+        .await
+        .map_err(store_err)?;
 
     let cfg = load_agent_config(&state.agents_dir, &req.agent)
         .map_err(ProviderApiError::AgentYamlWrite)?;
@@ -445,7 +449,11 @@ pub(crate) async fn handle_provider_rotate(
     axum::Json(req): axum::Json<ProviderRotateReq>,
 ) -> Result<axum::Json<ProviderView>, ProviderApiError> {
     validate_name(&req.agent, &req.name)?;
-    let _guard = state.providers.agent_lock(&req.agent).await;
+    let _guard = state
+        .providers
+        .agent_lock(&req.agent)
+        .await
+        .map_err(store_err)?;
 
     require_known_agent(&state.agents_dir, &req.agent)?;
 
@@ -493,7 +501,11 @@ pub(crate) async fn handle_provider_config_update(
     axum::Json(req): axum::Json<ProviderConfigUpdateReq>,
 ) -> Result<axum::Json<ProviderView>, ProviderApiError> {
     validate_name(&req.agent, &req.name)?;
-    let _guard = state.providers.agent_lock(&req.agent).await;
+    let _guard = state
+        .providers
+        .agent_lock(&req.agent)
+        .await
+        .map_err(store_err)?;
 
     let cfg = load_agent_config(&state.agents_dir, &req.agent)
         .map_err(ProviderApiError::AgentYamlWrite)?;
@@ -627,7 +639,11 @@ pub(crate) async fn handle_provider_share(
     validate_name(&req.dest_agent, &req.provider)?;
     // Share locks the DEST agent only: the dest agent.yaml RMW is the only
     // mutation on that side (byte-compat contract).
-    let _guard = state.providers.agent_lock(&req.dest_agent).await;
+    let _guard = state
+        .providers
+        .agent_lock(&req.dest_agent)
+        .await
+        .map_err(store_err)?;
 
     // The store resolves the true owner for a re-share and enforces the
     // share plan (no share into self, no name collision at the destination)
@@ -667,7 +683,11 @@ pub(crate) async fn handle_provider_unshare(
 ) -> Result<axum::Json<ProviderRemoveResp>, ProviderApiError> {
     require_trusted(&state.agents_dir, &req.borrower_agent, req.actor_user_id)?;
     validate_name(&req.borrower_agent, &req.provider)?;
-    let _guard = state.providers.agent_lock(&req.borrower_agent).await;
+    let _guard = state
+        .providers
+        .agent_lock(&req.borrower_agent)
+        .await
+        .map_err(store_err)?;
 
     require_known_agent(&state.agents_dir, &req.borrower_agent)?;
 
@@ -732,27 +752,35 @@ pub(crate) async fn handle_provider_remove(
     axum::Json(req): axum::Json<ProviderRemoveReq>,
 ) -> Result<axum::Json<ProviderRemoveResp>, ProviderApiError> {
     validate_name(&req.agent, &req.name)?;
-    let _guard = state.providers.agent_lock(&req.agent).await;
+    let _guard = state
+        .providers
+        .agent_lock(&req.agent)
+        .await
+        .map_err(store_err)?;
 
     require_known_agent(&state.agents_dir, &req.agent)?;
 
-    // The store enforces owner-only removal (borrowed references are
-    // read-only) and re-homes the record to a surviving borrower when the
-    // owner deletes it — the credential stays reachable for every agent that
-    // still declares it and exactly one authority remains.
-    //
-    // Accepted divergence: once the credential is destroyed the store
-    // mutation cannot be compensated, so a subsequent agent.yaml failure
-    // leaves the yaml declaring a provider the store no longer has. That
-    // diverges fail-loud (the next spawn's source_ref_binding returns
-    // NotFound) rather than silently. Matches the old gateway behavior.
-    state
-        .providers
-        .remove(&req.agent, &req.name)
-        .await
-        .map_err(store_err)?;
-    remove_provider_from_yaml(&state.agents_dir, &req.agent, &req.name)
+    // Rewrite YAML first while retaining the exact original. If the store
+    // mutation fails, restore that original before returning so a retry sees
+    // the same declaration and credential state. This avoids the irreversible
+    // store-first gap that could strand stale YAML without its credential.
+    let path = state.agents_dir.join(&req.agent).join("agent.yaml");
+    let original = std::fs::read_to_string(&path)
+        .map_err(|e| ProviderApiError::AgentYamlWrite(format!("read {}: {e}", path.display())))?;
+    let updated = remove_provider_entry(&original, &req.name);
+    right_codegen::contract::write_merged_rmw(&path, |_| Ok(updated.clone()))
         .map_err(|e| ProviderApiError::AgentYamlWrite(format!("{e:#}")))?;
+
+    if let Err(store_error) = state.providers.remove(&req.agent, &req.name).await {
+        right_codegen::contract::write_merged_rmw(&path, |_| Ok(original.clone())).map_err(
+            |restore_error| {
+                ProviderApiError::Internal(format!(
+                    "provider store removal failed ({store_error:#}) AND agent.yaml restore failed: {restore_error:#}"
+                ))
+            },
+        )?;
+        return Err(store_err(store_error));
+    }
 
     Ok(axum::Json(ProviderRemoveResp { removed: true }))
 }

@@ -15,6 +15,8 @@
 //! - [`SandboxSpec`] — everything a create needs, with Right's defaults.
 //! - [`SandboxHandle::create_or_attach`]/[`SandboxHandle::attach`] — the
 //!   unified handle replacing `resolved_sandbox` + `ssh_config_path`.
+//! - [`SandboxHandle::apply_secret`]/[`SandboxHandle::remove_secret`] — live
+//!   provider credential convergence without exposing credential material.
 //! - [`SandboxError`]/[`SandboxCause`] — the error taxonomy the supervisor
 //!   and Telegram UX match on.
 
@@ -45,8 +47,8 @@ pub use phase::SandboxPhase;
 pub use resources::{DEFAULT_CPUS, DEFAULT_MEMORY_MIB, DEFAULT_WRITABLE_LAYER_MIB, Resources};
 pub use runtime::{diagnose_host, ensure_runtime_installed};
 pub use secrets::{
-    RotationDisposition, SecretBinding, SecretRotation, TLS_BYPASS_HOSTS, default_placeholder,
-    tls_bypass_list,
+    SecretApply, SecretApplyDisposition, SecretBinding, SecretRemove, SecretRemoveDisposition,
+    TLS_BYPASS_HOSTS, default_placeholder, tls_bypass_list,
 };
 pub use spec::SandboxSpec;
 

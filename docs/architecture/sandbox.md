@@ -29,12 +29,11 @@ migration is durable. The recap warns and prints the manual
 `openshell sandbox delete <name>` to run, and only claims the sandbox was
 deleted when deletion was confirmed.
 
-Provider credentials do not come along: OpenShell redacted them on read, so the
-migration reports the provider names the old sandbox had attached and the
-operator re-adds them from the dashboard's `/providers` flow. Writing
-credential-less provider records instead would be worse than useless — the bot
-hard-fails startup on a provider it cannot bind, which would take the dashboard
-down with it.
+Provider credentials do not come along: OpenShell redacted them on read, so
+migration writes definition-only `NeedsValue` provider records. Bot bring-up
+skips those records, keeping the dashboard available. When the operator enters
+the first real value in `/providers`, the dashboard adds the missing binding to
+the existing sandbox through SDK-managed restart without deleting it.
 
 Everything that still touches OpenShell lives in
 `crates/right/src/migrate_sandbox/legacy_openshell.rs`, a frozen CLI-only
@@ -65,6 +64,11 @@ Bot startup (bring_up_sandbox, crates/bot/src/sandbox_supervisor.rs):
   ├─ wait_ready (DEFAULT_READY_TIMEOUT, 120s) — covers only the attach race
   │   (Created/Starting); create/start already block until the guest agent
   │   is serving
+  ├─ hot_reconcile_providers — after the guest is ready, re-resolve every
+  │   credential-bearing provider from `providers.db` and apply it to the live
+  │   sandbox through a scoped in-process resolver; existing bindings rotate
+  │   live, missing bindings restart-add, `NeedsValue` remains skipped, and any
+  │   apply error fails bring-up
   ├─ fs_mkdir /sandbox/inbox and /sandbox/outbox — recreated every bring-up
   │   because a recreated sandbox starts from the stock image
   ├─ initial_sync (blocking — before the Telegram bot starts)
@@ -75,15 +79,24 @@ Bot startup (bring_up_sandbox, crates/bot/src/sandbox_supervisor.rs):
   │   └─ Write .claude.json, verify trust keys, fix if CC overwrote them
   └─ reverse_sync_md — startup identity mirror (advisory: logged, not fatal)
 
-Create-time-only state (changing it needs a sandbox recreate):
+Create-time state:
   ├─ egress policy — the SDK cannot change network policy on a running VM
-  ├─ secret *structure* — which bindings exist and their allowed hosts
-  └─ resources (cpus, memory, writable layer)
+  └─ initial resources (cpus, memory, writable layer)
 
-Hot-appliable state:
-  └─ secret *values* — hot_reconcile_providers rotates every declared
-      provider's value; a provider with no binding on the live sandbox is
-      reported as needing a recreate, never silently skipped
+Provider state:
+  ├─ existing bindings diff complete allowed-host sets: shrink removals while
+  │   the old credential is live, rotate, then widen additions only after the
+  │   rotation succeeds; a failed rotation therefore cannot expose an old
+  │   credential to a new destination
+  ├─ obsolete Right-managed bindings are explicitly revoked live through
+  │   modify().remove_secret(...).apply(); unrelated sandbox secrets are not
+  │   candidates, and removing the final binding persists TLS-off for next
+  │   start while the current VM remains TLS-on with no usable credentials
+  ├─ a missing non-query binding is added through
+  │   modify().secret(...).restart().apply(); this stops and starts the same
+  │   sandbox, preserving its writable filesystem
+  └─ a missing query-injected binding fails clearly because the pinned SDK's
+      modify API cannot express that injection policy
 
 Sandbox network:
   ├─ Egress is a typed value applied at create: Permissive, or Restrictive
@@ -95,11 +108,14 @@ Sandbox network:
       `host.microsandbox.internal`.
 
 Provider secrets (ADR-0003):
-  ├─ A SecretBinding carries references only: the guest-visible env var (which
-  │   holds a placeholder), the host env var the value is read from at
-  │   spawn/rotate time, and the hosts allowed to receive the real value.
-  ├─ The SDK persists the placeholder and the source reference — no secret
-  │   material at rest, and the guest never sees a credential.
+  ├─ A SecretBinding carries a private `SecretString` credential plus durable
+  │   references: the guest-visible env var, an owner-and-record-scoped source
+  │   identity, and the hosts allowed to receive the real value.
+  ├─ Right installs the credential in the vendored SDK's scoped, zeroizing
+  │   in-process resolver only across create/start/apply. No process environment
+  │   mutation is used.
+  ├─ The SDK persists the placeholder and source identity only — no secret
+  │   material at rest or in Debug output, and the guest sees only a placeholder.
   └─ TLS interception is a **bypass deny-list**: adding any secret enables
       interception for every destination on the intercepted ports except
       TLS_BYPASS_HOSTS, which always carries the Anthropic hosts so Claude's
@@ -222,3 +238,12 @@ Live-microVM coverage is CI-explicit: tests that boot a real sandbox use
 in `.github/workflows/tests.yml`. That job is opt-in (repository variable
 `SANDBOX_RUNNER`) because it needs a runner exposing `/dev/kvm`. Everything
 that does not need a live VM stays in the default workspace test path.
+
+`ci_msb_right_apply_secret_activates_tls_and_preserves_provider_contracts`
+starts a no-secret sandbox with TLS interception disabled, then exercises
+Right's production apply/remove paths for first and second provider additions,
+live value rotation, host confinement, placeholder opacity, writable-layer
+persistence, removing one binding without disturbing its survivor, restart
+persistence of revocation, and last-binding removal with desired TLS disabled
+(the active VM keeps TLS-on until restart). It uses local TLS fixtures and
+canary values.

@@ -494,6 +494,13 @@ pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> 
             .render(theme)
     );
 
+    // Serialize bring-up against the bot's sandbox supervisor, which reads
+    // credentials and applies them under this same per-agent lock. The spec
+    // build below resolves every declared provider's credential, and
+    // `create_or_attach` installs them, so both run while holding the lock.
+    let _provider_guard = providers.agent_lock(agent_name).await.map_err(|error| {
+        miette::miette!("lock provider store for agent {agent_name}: {error:#}")
+    })?;
     let spec = right_bot::agent_sandbox_spec_for(
         agent_name,
         &plan.new_name,
@@ -513,6 +520,7 @@ pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> 
     let sandbox = right_sandbox::SandboxHandle::create_or_attach(&spec)
         .await
         .map_err(|error| miette::miette!("create sandbox '{}': {error:#}", plan.new_name))?;
+    drop(_provider_guard);
 
     // From here the new sandbox exists, so every failure rolls it back.
     let restored = async {

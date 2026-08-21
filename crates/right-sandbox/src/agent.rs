@@ -65,9 +65,9 @@ pub fn egress_for(network_policy: NetworkPolicy) -> Egress {
 }
 
 /// Build the create-time specification for an agent's sandbox.
-///
-/// `secrets` are the agent's already-resolved provider bindings (source
-/// references only — no credential value ever enters a spec).
+/// `secrets` are the agent's resolved provider bindings. Credential values are
+/// private/redacted and enter only the SDK's scoped resolver; durable sandbox
+/// configuration receives source identities and placeholders.
 pub fn agent_sandbox_spec(
     sandbox_name: &str,
     network_policy: NetworkPolicy,

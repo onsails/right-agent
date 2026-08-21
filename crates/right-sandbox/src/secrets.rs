@@ -1,11 +1,10 @@
 //! Provider secret bindings: source-ref secrets over TLS interception.
 //!
-//! A [`SecretBinding`] never carries a credential value. It names the
-//! guest-visible environment variable (which holds the *placeholder*), the
-//! host-side environment variable the value is resolved from at spawn/apply
-//! time, and the hosts allowed to receive the real value. The SDK persists
-//! only the placeholder and the source reference — no secret material at
-//! rest.
+//! A [`SecretBinding`] carries a redacted, zeroizing credential value alongside
+//! its durable source identity. The value is installed into microsandbox's
+//! scoped in-process resolver only while create/start/apply executes. Durable
+//! config stores only the source identity and placeholder; the guest never
+//! receives the credential directly.
 //!
 //! TLS interception follows ADR-0003: it is a **bypass deny-list**. Adding
 //! any secret enables interception for every destination on the intercepted
@@ -13,8 +12,11 @@
 //! Anthropic hosts so the agent's primary path is never intercepted and needs
 //! no guest CA configuration.
 
+use std::sync::Arc;
+
 use microsandbox::SecretSource;
 use microsandbox::sandbox::SecretBuilder;
+use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::error::SandboxError;
 
@@ -48,16 +50,16 @@ pub fn default_placeholder(env_var: &str) -> String {
 
 /// A provider credential binding.
 ///
-/// Carries *references* only. The value is resolved from the host
-/// environment variable named by `source_env_var` at sandbox spawn and at
-/// rotation apply; it never enters this struct, the sandbox's durable config,
-/// or the guest (the guest sees `placeholder`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The credential is private, zeroized, and redacted from `Debug`. The SDK
+/// persists only `source_env_var`; `resolved_value` is made available through
+/// a scoped resolver during create/start/apply and is then dropped.
+#[derive(Clone)]
 pub struct SecretBinding {
     /// Guest-visible environment variable; holds the placeholder.
     pub env_var: String,
 
-    /// Host environment variable the real value is resolved from.
+    /// Durable host-side source identity. It identifies the owning record,
+    /// not only the provider's display name.
     pub source_env_var: String,
 
     /// Stable placeholder string the guest sees. Survives rotation.
@@ -70,17 +72,51 @@ pub struct SecretBinding {
     /// Opt in to query-parameter substitution (headers and basic-auth are on
     /// by default; body injection is never enabled).
     pub inject_query: bool,
+
+    resolved_value: Arc<SecretString>,
 }
+
+impl std::fmt::Debug for SecretBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretBinding")
+            .field("env_var", &self.env_var)
+            .field("source_env_var", &self.source_env_var)
+            .field("placeholder", &self.placeholder)
+            .field("allowed_hosts", &self.allowed_hosts)
+            .field("inject_query", &self.inject_query)
+            .field("resolved_value", &"<redacted>")
+            .finish()
+    }
+}
+
+impl PartialEq for SecretBinding {
+    fn eq(&self, other: &Self) -> bool {
+        self.env_var == other.env_var
+            && self.source_env_var == other.source_env_var
+            && self.placeholder == other.placeholder
+            && self.allowed_hosts == other.allowed_hosts
+            && self.inject_query == other.inject_query
+            && self.resolved_value.as_ref().expose_secret()
+                == other.resolved_value.as_ref().expose_secret()
+    }
+}
+
+impl Eq for SecretBinding {}
 
 impl SecretBinding {
     /// A binding with the SDK-default placeholder and no allowed hosts.
-    pub fn new(env_var: impl Into<String>, source_env_var: impl Into<String>) -> Self {
+    pub fn new(
+        env_var: impl Into<String>,
+        source_env_var: impl Into<String>,
+        resolved_value: SecretString,
+    ) -> Self {
         let env_var = env_var.into();
         Self {
             placeholder: default_placeholder(&env_var),
             env_var,
             source_env_var: source_env_var.into(),
             allowed_hosts: Vec::new(),
+            resolved_value: Arc::new(resolved_value),
             inject_query: false,
         }
     }
@@ -132,25 +168,6 @@ impl SecretBinding {
         Ok(())
     }
 
-    /// Validate only the identity half of the binding (rotation needs no
-    /// hosts or placeholder — those are deliberately left untouched so the
-    /// placeholder stays stable and the change classifies as `Rotated`).
-    pub(crate) fn validate_ref(&self) -> Result<(), SandboxError> {
-        if self.env_var.is_empty() || self.env_var.contains(['=', '\0']) {
-            return Err(SandboxError::InvalidSpec {
-                field: "secrets.env_var",
-                reason: "must be non-empty and contain no '=' or NUL".to_owned(),
-            });
-        }
-        if self.source_env_var.is_empty() {
-            return Err(SandboxError::InvalidSpec {
-                field: "secrets.source_env_var",
-                reason: "must be non-empty".to_owned(),
-            });
-        }
-        Ok(())
-    }
-
     /// Build the SDK secret builder. The value is a source reference; nothing
     /// secret is constructed here.
     pub(crate) fn sdk_builder(&self) -> SecretBuilder {
@@ -172,31 +189,90 @@ impl SecretBinding {
         }
         builder
     }
+
+    pub(crate) fn resolver_value(&self) -> (String, zeroize::Zeroizing<String>) {
+        (
+            self.source_env_var.clone(),
+            zeroize::Zeroizing::new(self.resolved_value.as_ref().expose_secret().to_owned()),
+        )
+    }
 }
 
-/// How a secret rotation takes effect, mirroring the SDK's modification
-/// disposition for the secret change.
+/// How a provider secret was made effective in the sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RotationDisposition {
-    /// Applied to the running sandbox without a restart (the runtime
-    /// advertised the `secrets_update` control capability).
-    Live,
+pub enum SecretApplyDisposition {
+    /// An existing binding's value was rotated in the running sandbox.
+    RotatedLive,
 
-    /// Persisted; takes effect the next time the sandbox starts.
-    NextStart,
-
-    /// The change requires a restart, which `apply()` performs.
-    RequiresRestart,
+    /// A missing binding was persisted and made effective by the SDK's
+    /// restart-backed apply. The sandbox filesystem is preserved.
+    AddedWithRestart,
 }
 
-/// The outcome of a secret rotation on a sandbox.
+/// How a provider secret removal converged in the sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretRemoveDisposition {
+    /// The binding was revoked through the running sandbox's live-control path.
+    RemovedLive,
+
+    /// The binding was already absent, so removal was a declarative no-op.
+    AlreadyAbsent,
+}
+
+/// The outcome of removing one provider secret binding.
 #[derive(Debug, Clone)]
-pub struct SecretRotation {
-    /// How the rotation took effect.
-    pub disposition: RotationDisposition,
+pub struct SecretRemove {
+    /// Whether the binding was removed live or was already absent.
+    pub disposition: SecretRemoveDisposition,
 
     /// Non-fatal planner/apply warnings, rendered as `field: message`.
     pub warnings: Vec<String>,
+}
+
+/// The outcome of applying one provider secret binding.
+#[derive(Debug, Clone)]
+pub struct SecretApply {
+    /// Whether the binding rotated live or was added with a restart.
+    pub disposition: SecretApplyDisposition,
+
+    /// Non-fatal planner/apply warnings, rendered as `field: message`.
+    pub warnings: Vec<String>,
+}
+
+/// Classify the SDK's secret change into Right's externally meaningful
+/// application path. Kept pure so routing is covered without booting a VM.
+pub(crate) fn classify_apply_change(
+    change: microsandbox::SecretChangeKind,
+) -> Option<SecretApplyDisposition> {
+    match change {
+        microsandbox::SecretChangeKind::Rotated => Some(SecretApplyDisposition::RotatedLive),
+        microsandbox::SecretChangeKind::Added => Some(SecretApplyDisposition::AddedWithRestart),
+        _ => None,
+    }
+}
+
+/// Host sets for failure-safe credential rotation. Removals are applied before
+/// rotation; additions are applied only after rotation succeeds.
+pub(crate) fn host_rotation_stages(
+    current: &[String],
+    desired: &[String],
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let retained: Vec<String> = current
+        .iter()
+        .filter(|host| desired.contains(host))
+        .cloned()
+        .collect();
+    let shrink = (retained.len() != current.len()).then_some(retained);
+    let widen = desired
+        .iter()
+        .any(|host| !current.contains(host))
+        .then(|| desired.to_vec());
+    (shrink, widen)
+}
+
+/// Whether the pinned SDK can add this binding without losing injection policy.
+pub(crate) fn addition_supported(binding: &SecretBinding) -> bool {
+    !binding.inject_query
 }
 
 #[cfg(test)]
@@ -206,9 +282,53 @@ mod tests {
     use super::*;
 
     fn valid_binding() -> SecretBinding {
-        let mut binding = SecretBinding::new("KEY", "HOST_KEY");
+        let mut binding = SecretBinding::new("KEY", "HOST_KEY", SecretString::from("secret"));
         binding.allowed_hosts = vec!["api.example.com".to_owned()];
         binding
+    }
+
+    #[test]
+    fn apply_change_routes_rotation_live_and_addition_to_restart() {
+        assert_eq!(
+            classify_apply_change(microsandbox::SecretChangeKind::Rotated),
+            Some(SecretApplyDisposition::RotatedLive)
+        );
+        assert_eq!(
+            classify_apply_change(microsandbox::SecretChangeKind::Added),
+            Some(SecretApplyDisposition::AddedWithRestart)
+        );
+        assert_eq!(
+            classify_apply_change(microsandbox::SecretChangeKind::Removed),
+            None,
+            "removal must never be mistaken for a successful provider apply"
+        );
+    }
+
+    #[test]
+    fn rotation_failure_never_exposes_old_credential_to_added_host() {
+        let current = vec!["old.example.com".to_owned(), "keep.example.com".to_owned()];
+        let desired = vec!["keep.example.com".to_owned(), "new.example.com".to_owned()];
+        let (shrink, widen) = host_rotation_stages(&current, &desired);
+
+        let mut effective = shrink.expect("removal must shrink before rotation");
+        let rotation_succeeded = false;
+        if rotation_succeeded {
+            effective = widen.expect("addition must widen after rotation");
+        }
+
+        assert_eq!(effective, ["keep.example.com"]);
+        assert!(!effective.contains(&"new.example.com".to_owned()));
+    }
+
+    #[test]
+    fn missing_query_injected_binding_is_not_supported_by_sdk_modify() {
+        let mut binding = valid_binding();
+        assert!(addition_supported(&binding));
+        binding.inject_query = true;
+        assert!(
+            !addition_supported(&binding),
+            "addition must fail rather than silently drop query injection"
+        );
     }
 
     #[test]
@@ -238,7 +358,11 @@ mod tests {
 
     #[test]
     fn binding_translation_carries_only_references() {
-        let mut binding = SecretBinding::new("RIGHT_PROVIDER_KEY", "HOST_KEY_VAR");
+        let mut binding = SecretBinding::new(
+            "RIGHT_PROVIDER_KEY",
+            "HOST_KEY_VAR",
+            SecretString::from("secret"),
+        );
         binding.allowed_hosts = vec!["api.example.com".to_owned(), "*.example.org".to_owned()];
         let entry = binding.sdk_builder().build();
 
@@ -315,12 +439,5 @@ mod tests {
         let mut bad_host = binding.clone();
         bad_host.allowed_hosts = vec!["*.".to_owned()];
         assert!(bad_host.validate().is_err(), "wildcard with empty suffix");
-    }
-
-    #[test]
-    fn rotation_refs_need_only_the_identity_half() {
-        let minimal = SecretBinding::new("KEY", "HOST_KEY");
-        assert!(minimal.validate_ref().is_ok());
-        assert!(minimal.validate().is_err(), "no hosts: not creatable");
     }
 }

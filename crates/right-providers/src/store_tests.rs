@@ -409,15 +409,17 @@ async fn list_returns_owned_then_borrowed() -> Result<()> {
 }
 
 #[tokio::test]
-async fn source_ref_binding_carries_names_and_hosts_only() -> Result<()> {
+async fn source_ref_binding_is_redacted_and_never_mutates_environment() -> Result<()> {
     let (_home, store) = store().await?;
     store
         .create(builtin("riskoff", "fal-a1b2c3"), cred("real-value"))
         .await?;
 
+    let source = source_env_var("riskoff", "fal-a1b2c3");
+    assert!(std::env::var_os(&source).is_none());
     let binding = store.source_ref_binding("riskoff", "fal-a1b2c3").await?;
     assert_eq!(binding.env_var, "FAL_KEY");
-    assert_eq!(binding.source_env_var, "RIGHT_PROVIDER_FAL_A1B2C3");
+    assert_eq!(binding.source_env_var, source);
     assert_eq!(binding.placeholder, "$MSB_FAL_KEY");
     assert_eq!(
         binding.allowed_hosts,
@@ -426,19 +428,9 @@ async fn source_ref_binding_carries_names_and_hosts_only() -> Result<()> {
     assert!(!binding.inject_query, "query injection is opt-in per entry");
 
     let rendered = format!("{binding:?}");
-    assert!(
-        !rendered.contains("real-value"),
-        "a binding must never carry the value: {rendered}"
-    );
-
-    // The value is resolvable by the spawning process under the source name,
-    // which is the whole point of a source-ref secret.
-    assert_eq!(
-        std::env::var("RIGHT_PROVIDER_FAL_A1B2C3").ok().as_deref(),
-        Some("real-value")
-    );
-    // Leave the process environment as we found it (AGENTS.rust.md §5).
-    crate::store::remove_source_value("RIGHT_PROVIDER_FAL_A1B2C3");
+    assert!(!rendered.contains("real-value"), "{rendered}");
+    assert!(rendered.contains("<redacted>"));
+    assert!(std::env::var_os(&binding.source_env_var).is_none());
     Ok(())
 }
 
@@ -456,7 +448,10 @@ async fn a_borrower_can_bind_the_owner_s_credential() -> Result<()> {
     let binding = store.source_ref_binding("right", "generic-b0rr0w").await?;
     assert_eq!(binding.env_var, "BORROW_KEY");
     assert_eq!(binding.allowed_hosts, vec!["api.example.com"]);
-    crate::store::remove_source_value("RIGHT_PROVIDER_GENERIC_B0RR0W");
+    assert_eq!(
+        binding.source_env_var,
+        source_env_var("riskoff", "generic-b0rr0w")
+    );
     Ok(())
 }
 
@@ -494,31 +489,144 @@ async fn an_unusable_credential_is_a_hard_error_not_an_empty_binding() -> Result
 }
 
 #[test]
-fn source_env_var_is_deterministic_and_shell_safe() {
-    assert_eq!(source_env_var("fal-a1b2c3"), "RIGHT_PROVIDER_FAL_A1B2C3");
-    assert_eq!(
-        source_env_var("riskoff-generic-1"),
-        "RIGHT_PROVIDER_RISKOFF_GENERIC_1"
+fn source_identity_is_owner_scoped_deterministic_and_shell_safe() {
+    let first = source_env_var("owner-a", "fal-a1b2c3");
+    assert_eq!(first, source_env_var("owner-a", "fal-a1b2c3"));
+    assert_ne!(first, source_env_var("owner-b", "fal-a1b2c3"));
+    assert!(is_source_identity(&first));
+    assert!(first.starts_with("RIGHT_PROVIDER_"));
+    assert!(
+        first
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
     );
 }
 
 #[tokio::test]
-async fn the_per_agent_lock_serializes_callers() -> Result<()> {
+async fn owner_rotation_is_immediately_resolvable_by_every_borrower() -> Result<()> {
     let (_home, store) = store().await?;
-    let store = std::sync::Arc::new(store);
+    store
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("before"))
+        .await?;
+    store.share("riskoff", "fal-a1b2c3", "borrower").await?;
 
-    let first = store.agent_lock("riskoff").await;
-    let contender = tokio::spawn({
-        let store = std::sync::Arc::clone(&store);
-        async move {
-            let _guard = store.agent_lock("riskoff").await;
+    store.rotate("riskoff", "fal-a1b2c3", cred("after")).await?;
+    let borrower_binding = store.source_ref_binding("borrower", "fal-a1b2c3").await?;
+    assert_eq!(borrower_binding.env_var, "FAL_KEY");
+    assert_eq!(
+        borrower_binding.source_env_var,
+        source_env_var("riskoff", "fal-a1b2c3")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn owner_host_update_is_immediately_resolvable_by_every_borrower() -> Result<()> {
+    let (_home, store) = store().await?;
+    store
+        .create(
+            generic("riskoff", "generic-a1b2c3", "EXAMPLE_KEY"),
+            cred("value"),
+        )
+        .await?;
+    store.share("riskoff", "generic-a1b2c3", "borrower").await?;
+
+    store
+        .update_generic(
+            "riskoff",
+            "generic-a1b2c3",
+            GenericSpec {
+                env_var: "EXAMPLE_KEY".into(),
+                upstream_hosts: vec!["new.example.test".into()],
+                upstream_path_prefix: Some("/v2".into()),
+            },
+        )
+        .await?;
+    let borrower_binding = store
+        .source_ref_binding("borrower", "generic-a1b2c3")
+        .await?;
+    assert_eq!(borrower_binding.allowed_hosts, ["new.example.test"]);
+    assert_eq!(
+        borrower_binding.source_env_var,
+        source_env_var("riskoff", "generic-a1b2c3")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn holders_returns_owner_then_borrowers_without_provider_definition() -> Result<()> {
+    let (_home, store) = store().await?;
+    store
+        .create(builtin("riskoff", "fal-a1b2c3"), cred("real-value"))
+        .await?;
+    store.share("riskoff", "fal-a1b2c3", "zeta").await?;
+    store.share("riskoff", "fal-a1b2c3", "alpha").await?;
+
+    assert_eq!(
+        store.holders("riskoff", "fal-a1b2c3").await?,
+        vec![
+            ProviderHolder {
+                agent: "riskoff".into(),
+            },
+            ProviderHolder {
+                agent: "alpha".into(),
+            },
+            ProviderHolder {
+                agent: "zeta".into(),
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn agent_lock_child_probe() -> Result<()> {
+    if std::env::var_os("RIGHT_PROVIDER_LOCK_CHILD").is_none() {
+        return Ok(());
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build child runtime")?;
+    runtime.block_on(async {
+        let cwd = std::env::current_dir().context("read child cwd")?;
+        let store = ProviderStore::open(&cwd).await?;
+        std::fs::write(cwd.join("child-ready"), b"ready").context("publish child readiness")?;
+        let _guard = store.agent_lock("riskoff").await?;
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+#[tokio::test]
+async fn the_per_agent_lock_serializes_separate_processes() -> Result<()> {
+    let home = TempDir::new()?;
+    let store = ProviderStore::open(home.path()).await?;
+    let first = store.agent_lock("riskoff").await?;
+    let mut child = tokio::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", "store::tests::agent_lock_child_probe"])
+        .env("RIGHT_PROVIDER_LOCK_CHILD", "1")
+        .current_dir(home.path())
+        .spawn()
+        .context("spawn lock contender process")?;
+    let ready = home.path().join("child-ready");
+    for _ in 0..100 {
+        if ready.exists() {
+            break;
         }
-    });
-    // A different agent is never blocked by this guard.
-    let _other = store.agent_lock("right").await;
-    assert!(!contender.is_finished(), "same-agent callers queue up");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(ready.exists(), "child must reach the lock attempt");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        child.try_wait()?.is_none(),
+        "a separate process must block on the same agent lock"
+    );
 
     drop(first);
-    contender.await.context("contender task")?;
+    let status = child
+        .wait()
+        .await
+        .context("wait for lock contender process")?;
+    assert!(status.success(), "lock contender failed: {status}");
     Ok(())
 }

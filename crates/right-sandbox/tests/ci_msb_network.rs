@@ -17,11 +17,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use microsandbox::logs::{LogOptions, LogSource};
 use microsandbox::sandbox::SandboxStatus;
-use microsandbox::{
-    ModificationDisposition, NetworkPolicy, NetworkProfile, PlannedChange, Sandbox,
-    SecretPlannedChange, SecretSource,
-};
+use microsandbox::{NetworkPolicy, NetworkProfile, Sandbox};
 use rcgen::{CertificateParams, KeyPair};
+use right_sandbox::{
+    ExecRequest, SandboxHandle, SecretApplyDisposition, SecretBinding, SecretRemoveDisposition,
+};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -49,6 +49,20 @@ const SECRET_ENV: &str = "RIGHT_PROVIDER_KEY";
 
 /// Placeholder microsandbox derives from [`SECRET_ENV`] by default.
 const SECRET_PLACEHOLDER: &str = "$MSB_RIGHT_PROVIDER_KEY";
+
+/// Second provider used to prove bindings remain independent.
+const SECOND_SECRET_ENV: &str = "RIGHT_SECOND_PROVIDER_KEY";
+
+/// Placeholder derived from [`SECOND_SECRET_ENV`].
+const SECOND_SECRET_PLACEHOLDER: &str = "$MSB_RIGHT_SECOND_PROVIDER_KEY";
+
+/// Host source references used by Right's production `apply_secret` path.
+const FIRST_SOURCE_ENV: &str = "RT_MSB_FIRST_PROVIDER_SECRET";
+const SECOND_SOURCE_ENV: &str = "RT_MSB_SECOND_PROVIDER_SECRET";
+
+/// Writable-layer sentinel that must survive restart-backed additions.
+const SECRET_APPLY_SENTINEL_PATH: &str = "/root/right-secret-apply-sentinel";
+const SECRET_APPLY_SENTINEL: &str = "persistent-across-secret-restarts";
 
 /// Subject organization of the interception CA microsandbox mints.
 const INTERCEPT_CA_MARKER: &str = "microsandbox";
@@ -297,9 +311,14 @@ rm -f "$err"
         .await
         .with_context(|| format!("exec curl {args}"))?;
     let stdout = output.stdout().context("curl probe stdout is not utf-8")?;
+    parse_curl_output(&stdout, args)
+}
+
+/// Parse the stable summary emitted by the curl probe script.
+fn parse_curl_output(stdout: &str, args: &str) -> Result<CurlOutcome> {
     let (summary, trace) = stdout
         .split_once('\n')
-        .ok_or_else(|| anyhow!("curl probe produced no summary line: {stdout:?}"))?;
+        .ok_or_else(|| anyhow!("curl probe produced no summary line for {args}: {stdout:?}"))?;
 
     let mut code = None;
     let mut status = None;
@@ -316,6 +335,29 @@ rm -f "$err"
         status: status.ok_or_else(|| anyhow!("curl probe summary lacks status=: {summary:?}"))?,
         trace: trace.to_string(),
     })
+}
+
+/// Run the same curl probe through Right's production sandbox handle.
+async fn right_curl(sandbox: &SandboxHandle, args: &str) -> Result<CurlOutcome> {
+    let script = format!(
+        r#"set +e
+err=$(mktemp)
+code=$(curl -sS --max-time 30 -o /dev/null -w '%{{http_code}}' {args} 2>"$err")
+status=$?
+printf 'code=%s status=%s\n' "$code" "$status"
+cat "$err"
+rm -f "$err"
+"#
+    );
+    let mut request = ExecRequest::new("/bin/sh");
+    request.args = vec!["-c".to_owned(), script];
+    request.user = Some("0".to_owned());
+    let output = sandbox
+        .exec(&request)
+        .await
+        .with_context(|| format!("exec curl {args} through Right handle"))?;
+    let stdout = std::str::from_utf8(&output.stdout).context("curl probe stdout is not utf-8")?;
+    parse_curl_output(stdout, args)
 }
 
 /// Retry a success-expecting public-internet probe.
@@ -342,19 +384,29 @@ async fn guest_env(sandbox: &Sandbox, var: &str) -> Result<String> {
     output.stdout().context("guest env value is not utf-8")
 }
 
+/// Read one guest environment variable through Right's production handle.
+async fn right_guest_env(sandbox: &SandboxHandle, var: &str) -> Result<String> {
+    let mut request = ExecRequest::new("/bin/sh");
+    request.args = vec!["-c".to_owned(), format!("printf '%s' \"${var}\"")];
+    request.user = Some("0".to_owned());
+    let output = sandbox
+        .exec(&request)
+        .await
+        .with_context(|| format!("read guest env {var} through Right handle"))?;
+    assert_eq!(output.code, 0, "read guest env {var}: {output:?}");
+    String::from_utf8(output.stdout).context("guest env value is not utf-8")
+}
+
 /// Every guest environment variable, for canary-leak assertions.
 async fn guest_env_dump(sandbox: &Sandbox) -> Result<String> {
     let output = sandbox.shell("env").await.context("dump guest env")?;
     output.stdout().context("guest env dump is not utf-8")
 }
 
-/// Where the runtime gets a secret's real value.
+/// Inline secret material used by assumption probes that bypass Right's API.
 enum SecretMaterial<'a> {
     /// Inline value stored in the sandbox config.
     Value(&'a str),
-
-    /// Host environment variable, resolved by the SDK at spawn and at apply.
-    HostEnv(&'a str),
 }
 
 /// Boot a curl sandbox that carries one host-bound secret and talks to the
@@ -377,9 +429,6 @@ async fn create_secret_sandbox(
             let s = s.env(SECRET_ENV).allow_host(allow_host);
             match material {
                 SecretMaterial::Value(value) => s.value(value),
-                SecretMaterial::HostEnv(var) => s.source(SecretSource::Env {
-                    var: var.to_string(),
-                }),
             }
         })
         .network(|n| {
@@ -770,39 +819,111 @@ async fn ci_msb_secret_blocked_toward_unbound_destination() -> Result<()> {
     guard.destroy().await
 }
 
-/// Host environment variable backing the rotation probe's source-ref secret.
-const ROTATION_HOST_VAR: &str = "RT_MSB_ROTATION_SECRET";
-
-/// Read the guest's boot id, which changes if and only if the VM rebooted.
-async fn guest_boot_id(sandbox: &Sandbox) -> Result<String> {
-    let output = sandbox
-        .shell("cat /proc/sys/kernel/random/boot_id")
-        .await
-        .context("read guest boot id")?;
-    Ok(output
-        .stdout()
-        .context("guest boot id is not utf-8")?
-        .trim()
-        .to_string())
+/// A complete source-ref binding for one logical provider host.
+fn source_binding(
+    env_var: &str,
+    source_env_var: &str,
+    allowed_host: &str,
+    value: &str,
+) -> SecretBinding {
+    let mut binding =
+        SecretBinding::new(env_var, source_env_var, secrecy::SecretString::from(value));
+    binding.allowed_hosts = vec![allowed_host.to_owned()];
+    binding
 }
 
-/// Send the placeholder to the fixture and return the credential the fixture
-/// actually received.
-async fn observed_credential(
-    sandbox: &Sandbox,
+/// Read the guest's boot id, which changes if and only if the VM rebooted.
+async fn right_guest_boot_id(sandbox: &SandboxHandle) -> Result<String> {
+    let mut request = ExecRequest::new("cat");
+    request.args = vec!["/proc/sys/kernel/random/boot_id".to_owned()];
+    request.user = Some("0".to_owned());
+    let output = sandbox.exec(&request).await.context("read guest boot id")?;
+    assert_eq!(output.code, 0, "read guest boot id: {output:?}");
+    Ok(String::from_utf8(output.stdout)
+        .context("guest boot id is not utf-8")?
+        .trim()
+        .to_owned())
+}
+
+/// Verify both persisted and running configurations carry the expected TLS state.
+async fn assert_tls_state(name: &str, port: u16, expected: bool) -> Result<()> {
+    let handle = Sandbox::get(name)
+        .await
+        .with_context(|| format!("inspect sandbox {name}"))?;
+    let persisted = handle.config().context("parse persisted sandbox config")?;
+    let persisted_tls = persisted
+        .spec
+        .network
+        .tls
+        .context("persisted sandbox config must carry explicit TLS state")?;
+    assert_eq!(persisted_tls.enabled, expected, "persisted TLS state");
+    assert!(
+        persisted_tls.intercepted_ports.contains(&port),
+        "secret apply must retain the fixture interception port"
+    );
+    let active = handle
+        .active_config()
+        .context("parse active sandbox config")?
+        .context("running sandbox must expose an active config snapshot")?;
+    let active_tls = active
+        .spec
+        .network
+        .tls
+        .context("active sandbox config must carry explicit TLS state")?;
+    assert_eq!(active_tls.enabled, expected, "active TLS state");
+    assert!(
+        active_tls.intercepted_ports.contains(&port),
+        "active config must retain the fixture interception port"
+    );
+    Ok(())
+}
+
+/// Verify persisted desired TLS is disabled after the final secret removal,
+/// while the current VM truthfully remains TLS-enabled until restart.
+async fn assert_last_removal_tls_state(name: &str) -> Result<()> {
+    let handle = Sandbox::get(name)
+        .await
+        .with_context(|| format!("inspect sandbox {name}"))?;
+    let persisted = handle.config().context("parse persisted sandbox config")?;
+    assert!(
+        !persisted
+            .spec
+            .network
+            .tls
+            .context("persisted TLS config")?
+            .enabled
+    );
+    let active = handle
+        .active_config()
+        .context("parse active sandbox config")?
+        .context("running sandbox must expose an active config snapshot")?;
+    assert!(
+        active
+            .spec
+            .network
+            .tls
+            .context("active TLS config")?
+            .enabled,
+        "SDK 0.6.10 has no live TLS disable toggle"
+    );
+    Ok(())
+}
+
+/// Send one provider placeholder to its logical TLS host and return what arrived.
+async fn observed_right_credential(
+    sandbox: &SandboxHandle,
     fixture: &mut HostServer,
     port: u16,
-) -> Result<String> {
-    let outcome = curl(
-        sandbox,
-        &format!(
-            "-k -H \"authorization: Bearer ${SECRET_ENV}\" https://{HOST_ALIAS}:{port}/rotate"
-        ),
-    )
-    .await?;
+    env_var: &str,
+    logical_host: &str,
+) -> Result<(String, String)> {
+    let args = format!(
+        "-k -H \"authorization: Bearer ${env_var}\" https://{logical_host}:{port}/provider"
+    );
+    let outcome = right_curl(sandbox, &args).await?;
     assert_eq!(
         outcome.code, "200",
-        "rotation probe request must reach the fixture: {outcome:?}"
+        "provider {env_var} request for {logical_host} must reach the fixture: {outcome:?}"
     );
 
     let head = fixture.next_request().await?;
@@ -811,125 +932,353 @@ async fn observed_credential(
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
             name.eq_ignore_ascii_case("authorization")
-                .then(|| value.trim().trim_start_matches("Bearer ").to_string())
+                .then(|| value.trim().trim_start_matches("Bearer ").to_owned())
         })
         .ok_or_else(|| anyhow!("fixture saw no authorization header: {head:?}"))?;
-    Ok(value)
+    Ok((value, head))
 }
 
-/// Assumption 5: a source-ref secret can be rotated on a running sandbox, and
-/// the plan's disposition tells the truth about whether that needs a restart.
+/// Production contract for provider addition, rotation, and revocation.
+///
+/// Starts with no secrets and explicit TLS-off state, then drives only Right's
+/// public `apply_secret`/`remove_secret` APIs. It proves live credential
+/// revocation, survivor isolation, durable restart state, last-removal
+/// credential invalidation, and TLS-off after restart without real credentials.
 #[tokio::test]
 #[ignore = "ci-msb: boots a live microVM"]
-async fn ci_msb_source_ref_secret_rotates_live() -> Result<()> {
+async fn ci_msb_right_apply_secret_activates_tls_and_preserves_provider_contracts() -> Result<()> {
     common::ensure_runtime_installed().await?;
-    let first = format!("{CANARY_SECRET}-v1");
-    let second = format!("{CANARY_SECRET}-v2");
-
-    // The SDK resolves `SecretSource::Env` in this process, at create and at
-    // apply, so rotating the credential means rewriting this variable. Test
-    // binaries are single sandbox processes under nextest, so nothing else
-    // reads it concurrently. This is the only mechanism upstream exposes for
-    // source-ref rotation, so the no-set_var-in-tests rule is bent here;
-    // cleanup removes the variable before the probe returns.
-    unsafe { std::env::set_var(ROTATION_HOST_VAR, &first) };
+    let first_v1 = format!("{CANARY_SECRET}-first-v1");
+    let first_v2 = format!("{CANARY_SECRET}-first-v2");
+    let second = format!("{CANARY_SECRET}-second");
 
     let mut fixture = HostServer::start_tls().await?;
     let port = fixture.port();
     let _slot = common::acquire_vm_slot();
     let guard = common::SandboxGuard::new("net");
 
-    let sandbox = create_secret_sandbox(
-        guard.name(),
-        port,
-        SecretMaterial::HostEnv(ROTATION_HOST_VAR),
-        HOST_ALIAS,
+    // Raw creation is intentional: Right's public create-time spec does not
+    // expose the test-only interception-port override. The resulting sandbox
+    // has production-equivalent no-secret/TLS-off state, and every mutation
+    // below goes through Right's public handle.
+    let created = Sandbox::builder(guard.name())
+        .detached(true)
+        .image(CURL_IMAGE)
+        .cpus(common::PROBE_CPUS)
+        .memory(common::PROBE_MEMORY_MIB)
+        .user("0")
+        .network(|network| {
+            network
+                .policy(NetworkPolicy::from_profiles([
+                    NetworkProfile::Public,
+                    NetworkProfile::Host,
+                ]))
+                .tls(|tls| {
+                    tls.enabled(false)
+                        .intercepted_ports(vec![port])
+                        .verify_upstream(false)
+                })
+        })
+        .create()
+        .await
+        .context("create empty Right sandbox")?;
+    drop(created);
+    let sandbox = SandboxHandle::attach(guard.name())
+        .await
+        .context("attach Right handle")?;
+    assert_tls_state(guard.name(), port, false).await?;
+    let mut write_sentinel = ExecRequest::new("/bin/sh");
+    write_sentinel.args = vec![
+        "-c".to_owned(),
+        format!("printf '%s' '{SECRET_APPLY_SENTINEL}' > {SECRET_APPLY_SENTINEL_PATH}"),
+    ];
+    write_sentinel.user = Some("0".to_owned());
+    let written = sandbox
+        .exec(&write_sentinel)
+        .await
+        .context("write restart-persistence sentinel")?;
+    assert_eq!(
+        written.code, 0,
+        "write restart-persistence sentinel: {written:?}"
+    );
+
+    let first_binding = source_binding(SECRET_ENV, FIRST_SOURCE_ENV, HOST_ALIAS, &first_v1);
+    let boot_before_first = right_guest_boot_id(&sandbox).await?;
+    let first_apply = sandbox.apply_secret(&first_binding).await?;
+    assert_eq!(
+        first_apply.disposition,
+        SecretApplyDisposition::AddedWithRestart
+    );
+    assert_ne!(
+        boot_before_first,
+        right_guest_boot_id(&sandbox).await?,
+        "first secret addition must take the restart-backed path"
+    );
+    let mut read_sentinel = ExecRequest::new("cat");
+    read_sentinel.args = vec![SECRET_APPLY_SENTINEL_PATH.to_owned()];
+    read_sentinel.user = Some("0".to_owned());
+    let first_sentinel = sandbox
+        .exec(&read_sentinel)
+        .await
+        .context("read sentinel after first addition")?;
+    assert_eq!(first_sentinel.code, 0, "read sentinel after first addition");
+    assert_eq!(
+        String::from_utf8(first_sentinel.stdout).context("first sentinel is not utf-8")?,
+        SECRET_APPLY_SENTINEL,
+        "first addition must preserve the writable layer"
+    );
+    assert_tls_state(guard.name(), port, true).await?;
+    assert_eq!(
+        right_guest_env(&sandbox, SECRET_ENV).await?,
+        SECRET_PLACEHOLDER,
+        "the guest must retain the first provider placeholder"
+    );
+    let (observed_first, _) =
+        observed_right_credential(&sandbox, &mut fixture, port, SECRET_ENV, HOST_ALIAS).await?;
+    assert_eq!(observed_first, first_v1);
+
+    let second_binding = source_binding(SECOND_SECRET_ENV, SECOND_SOURCE_ENV, HOST_ALIAS, &second);
+    let boot_before_second = right_guest_boot_id(&sandbox).await?;
+    let second_apply = sandbox.apply_secret(&second_binding).await?;
+    assert_eq!(
+        second_apply.disposition,
+        SecretApplyDisposition::AddedWithRestart
+    );
+    assert_ne!(
+        boot_before_second,
+        right_guest_boot_id(&sandbox).await?,
+        "second secret addition must take the restart-backed path"
+    );
+    let mut map_second_host = ExecRequest::new("/bin/sh");
+    map_second_host.args = vec![
+        "-c".to_owned(),
+        "ip=$(getent hosts host.microsandbox.internal | awk 'NR == 1 { print $1 }'); test -n \"$ip\" && printf '%s second.provider.test\\n' \"$ip\" >> /etc/hosts".to_owned(),
+    ];
+    map_second_host.user = Some("0".to_owned());
+    let mapped = sandbox
+        .exec(&map_second_host)
+        .await
+        .context("map second provider fixture host")?;
+    assert_eq!(
+        mapped.code, 0,
+        "map second provider fixture host: {mapped:?}"
+    );
+    let second_sentinel = sandbox
+        .exec(&read_sentinel)
+        .await
+        .context("read sentinel after second addition")?;
+    assert_eq!(
+        second_sentinel.code, 0,
+        "read sentinel after second addition"
+    );
+    assert_eq!(
+        String::from_utf8(second_sentinel.stdout).context("second sentinel is not utf-8")?,
+        SECRET_APPLY_SENTINEL,
+        "second addition must preserve the writable layer"
+    );
+    assert_eq!(
+        right_guest_env(&sandbox, SECOND_SECRET_ENV).await?,
+        SECOND_SECRET_PLACEHOLDER,
+        "the guest must retain the second provider placeholder"
+    );
+    let (observed_second, _) =
+        observed_right_credential(&sandbox, &mut fixture, port, SECOND_SECRET_ENV, HOST_ALIAS)
+            .await?;
+    assert_eq!(observed_second, second);
+    let (observed_first_again, _) =
+        observed_right_credential(&sandbox, &mut fixture, port, SECRET_ENV, HOST_ALIAS).await?;
+    assert_eq!(
+        observed_first_again, first_v1,
+        "adding a second provider must not disturb the first"
+    );
+
+    let cross_host = right_curl(
+        &sandbox,
+        &format!(
+            "-k -H 'host: second.provider.test' \
+             -H \"authorization: Bearer ${SECRET_ENV}\" \
+             https://{HOST_ALIAS}:{port}/wrong-provider"
+        ),
     )
     .await?;
-
-    let before = observed_credential(&sandbox, &mut fixture, port).await?;
-    assert_eq!(
-        before, first,
-        "source-ref secret must resolve from the host environment at spawn"
+    assert!(
+        !cross_host.reached_server(),
+        "the first provider placeholder must be blocked at the second provider host: {cross_host:?}"
     );
-    let boot_before = guest_boot_id(&sandbox).await?;
-
-    unsafe { std::env::set_var(ROTATION_HOST_VAR, &second) };
-
-    let plan = sandbox
-        .modify()
-        .secret(|s| {
-            s.env(SECRET_ENV).source(SecretSource::Env {
-                var: ROTATION_HOST_VAR.to_string(),
-            })
-        })
-        .dry_run()
-        .await
-        .context("dry-run secret rotation")?;
-
-    let changes: Vec<&SecretPlannedChange> = plan
-        .changes
-        .iter()
-        .filter_map(|change| match change {
-            PlannedChange::Secret(secret) => Some(secret),
-            PlannedChange::Config(_) => None,
-        })
-        .collect();
-    assert_eq!(
-        changes.len(),
-        1,
-        "rotation must plan exactly one secret change: {:?}",
-        plan.changes
-    );
-    let disposition = changes[0].disposition;
-    println!("[rotation] status={} plan={:?}", plan.status, changes[0]);
-    for warning in &plan.warnings {
-        println!(
-            "[rotation] warning: {} :: {}",
-            warning.field, warning.message
+    while let Some(event) = fixture.next_event(Duration::from_secs(5)).await {
+        assert!(
+            !event.head().contains(&first_v1) && !event.head().contains(SECRET_PLACEHOLDER),
+            "no first-provider material may reach the second host: {event:?}"
         );
     }
 
-    // The planner only reports `Live` for a running sandbox when the runtime
-    // advertises the `secrets_update` control capability, so the disposition
-    // is the capability report.
-    let live_capability = disposition == ModificationDisposition::Live;
-
-    let applied = sandbox
-        .modify()
-        .secret(|s| {
-            s.env(SECRET_ENV).source(SecretSource::Env {
-                var: ROTATION_HOST_VAR.to_string(),
-            })
-        })
-        .apply()
-        .await
-        .context("apply secret rotation")?;
-    assert!(applied.applied, "apply must report the plan as applied");
-
-    let boot_after = guest_boot_id(&sandbox).await?;
-    let after = observed_credential(&sandbox, &mut fixture, port).await?;
+    let boot_before_rotation = right_guest_boot_id(&sandbox).await?;
+    // Re-asserting the full host list exercises the live rotation path while
+    // retaining the production fixture host.
+    let proposed_host_update = source_binding(SECRET_ENV, FIRST_SOURCE_ENV, HOST_ALIAS, &first_v2);
+    let rotated = sandbox.apply_secret(&proposed_host_update).await?;
+    assert_eq!(rotated.disposition, SecretApplyDisposition::RotatedLive);
     assert_eq!(
-        after, second,
-        "the rotated credential must reach the bound destination"
+        boot_before_rotation,
+        right_guest_boot_id(&sandbox).await?,
+        "credential rotation must remain live"
     );
 
-    if live_capability {
-        assert_eq!(
-            boot_before, boot_after,
-            "a Live rotation must not reboot the guest"
-        );
-    } else {
-        assert_ne!(
-            boot_before, boot_after,
-            "a non-Live rotation only propagates because apply restarted the guest"
-        );
-    }
+    let (observed_rotated, rotated_head) =
+        observed_right_credential(&sandbox, &mut fixture, port, SECRET_ENV, HOST_ALIAS).await?;
+    assert_eq!(observed_rotated, first_v2);
+    assert!(
+        !rotated_head.contains(&first_v1),
+        "the old source value must not reach the replacement host"
+    );
+    assert_eq!(
+        right_guest_env(&sandbox, SECRET_ENV).await?,
+        SECRET_PLACEHOLDER,
+        "rotation must never replace the guest placeholder"
+    );
 
-    // Leave no residue for a later test process that reuses this binary under
-    // plain `cargo test`.
-    unsafe { std::env::remove_var(ROTATION_HOST_VAR) };
+    sandbox.stop().await.context("stop after live rotation")?;
+    drop(sandbox);
+    let restarted = Sandbox::get(guard.name())
+        .await
+        .context("load stopped sandbox after live rotation")?
+        .start_detached()
+        .await
+        .context("restart sandbox after live rotation")?;
+    drop(restarted);
+    let sandbox = SandboxHandle::attach(guard.name())
+        .await
+        .context("attach after live-rotation restart")?;
+    assert_tls_state(guard.name(), port, true).await?;
+    let restarted_sentinel = sandbox
+        .exec(&read_sentinel)
+        .await
+        .context("read sentinel after rotation restart")?;
+    assert_eq!(
+        restarted_sentinel.code, 0,
+        "read sentinel after rotation restart"
+    );
+    assert_eq!(
+        String::from_utf8(restarted_sentinel.stdout).context("restarted sentinel is not utf-8")?,
+        SECRET_APPLY_SENTINEL,
+        "rotation restart must preserve the writable layer"
+    );
+    assert_eq!(
+        right_guest_env(&sandbox, SECRET_ENV).await?,
+        SECRET_PLACEHOLDER
+    );
+    assert_eq!(
+        right_guest_env(&sandbox, SECOND_SECRET_ENV).await?,
+        SECOND_SECRET_PLACEHOLDER
+    );
+    let (restarted_first, restarted_first_head) =
+        observed_right_credential(&sandbox, &mut fixture, port, SECRET_ENV, HOST_ALIAS).await?;
+    assert_eq!(restarted_first, first_v2);
+    assert!(
+        !restarted_first_head.contains(&first_v1),
+        "old value must remain absent after restart"
+    );
+    let (restarted_second, _) =
+        observed_right_credential(&sandbox, &mut fixture, port, SECOND_SECRET_ENV, HOST_ALIAS)
+            .await?;
+    assert_eq!(restarted_second, second);
 
+    let boot_before_remove = right_guest_boot_id(&sandbox).await?;
+    let removed_first = sandbox.remove_secret(SECRET_ENV).await?;
+    assert_eq!(
+        removed_first.disposition,
+        SecretRemoveDisposition::RemovedLive
+    );
+    assert_eq!(
+        boot_before_remove,
+        right_guest_boot_id(&sandbox).await?,
+        "removing one of two bindings must be live"
+    );
+    assert_eq!(sandbox.secret_env_vars().await?, [SECOND_SECRET_ENV]);
+    assert_tls_state(guard.name(), port, true).await?;
+    let removed_request = right_curl(
+        &sandbox,
+        &format!(
+            "-k -H 'authorization: Bearer {SECRET_PLACEHOLDER}' https://{HOST_ALIAS}:{port}/removed"
+        ),
+    )
+    .await?;
+    assert!(
+        removed_request.reached_server(),
+        "without a binding the obsolete placeholder is ordinary opaque data"
+    );
+    let removed_head = fixture.next_request().await?;
+    assert!(
+        removed_head
+            .to_ascii_lowercase()
+            .contains(&SECRET_PLACEHOLDER.to_ascii_lowercase()),
+        "removed placeholder must stay opaque: {removed_head:?}"
+    );
+    assert!(!removed_head.contains(&first_v2));
+    let (surviving_second, _) =
+        observed_right_credential(&sandbox, &mut fixture, port, SECOND_SECRET_ENV, HOST_ALIAS)
+            .await?;
+    assert_eq!(surviving_second, second);
+
+    sandbox.stop().await.context("stop after first removal")?;
+    drop(sandbox);
+    let restarted = Sandbox::get(guard.name())
+        .await
+        .context("load sandbox after first removal")?
+        .start_detached()
+        .await
+        .context("restart sandbox after first removal")?;
+    drop(restarted);
+    let sandbox = SandboxHandle::attach(guard.name())
+        .await
+        .context("attach after first-removal restart")?;
+    assert_eq!(sandbox.secret_env_vars().await?, [SECOND_SECRET_ENV]);
+    let persisted_removed = right_curl(
+        &sandbox,
+        &format!(
+            "-k -H 'authorization: Bearer {SECRET_PLACEHOLDER}' https://{HOST_ALIAS}:{port}/removed-after-restart"
+        ),
+    )
+    .await?;
+    assert!(persisted_removed.reached_server());
+    let persisted_removed_head = fixture.next_request().await?;
+    assert!(persisted_removed_head.contains(SECRET_PLACEHOLDER));
+    assert!(!persisted_removed_head.contains(&first_v2));
+
+    let removed_last = sandbox.remove_secret(SECOND_SECRET_ENV).await?;
+    assert_eq!(
+        removed_last.disposition,
+        SecretRemoveDisposition::RemovedLive
+    );
+    assert!(sandbox.secret_env_vars().await?.is_empty());
+    assert_last_removal_tls_state(guard.name()).await?;
+    let last_removed = right_curl(
+        &sandbox,
+        &format!(
+            "-k -H 'authorization: Bearer {SECOND_SECRET_PLACEHOLDER}' https://{HOST_ALIAS}:{port}/last-removed"
+        ),
+    )
+    .await?;
+    assert!(last_removed.reached_server());
+    let last_removed_head = fixture.next_request().await?;
+    assert!(last_removed_head.contains(SECOND_SECRET_PLACEHOLDER));
+    assert!(!last_removed_head.contains(&second));
+
+    sandbox.stop().await.context("stop after last removal")?;
+    drop(sandbox);
+    let restarted = Sandbox::get(guard.name())
+        .await
+        .context("load sandbox after last removal")?
+        .start_detached()
+        .await
+        .context("restart sandbox after last removal")?;
+    drop(restarted);
+    let sandbox = SandboxHandle::attach(guard.name())
+        .await
+        .context("attach after last-removal restart")?;
+    assert!(sandbox.secret_env_vars().await?.is_empty());
+    assert_tls_state(guard.name(), port, false).await?;
+    drop(sandbox);
     guard.destroy().await
 }
 

@@ -1,0 +1,4 @@
+microsandbox
+Copyright Super Rad Company
+
+This vendored copy is based on microsandbox 0.6.10 and includes local modifications for scoped, ephemeral secret resolution and failure-safe provider credential updates.
