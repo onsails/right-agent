@@ -27,6 +27,10 @@
     cargo-nextest    # recommended test runner (process-per-test, faster CI/local loop)
   ] ++ lib.optionals pkgs.stdenv.isLinux [
     pkgs.bubblewrap
+    # libcap-ng: linked by the `capng` sys crate under `msb_krun_devices`
+    # (Linux-only cfg(target_os)). The vendored microsandbox fork pulls it in;
+    # without the system lib the Linux CI link fails (-lcap-ng).
+    pkgs.libcap_ng
   ];
 
   languages.rust = {
