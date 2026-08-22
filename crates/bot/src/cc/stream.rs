@@ -15,6 +15,10 @@ pub(crate) enum StreamEvent {
     ToolUse { tool: String, input_summary: String },
     /// Final result line (raw JSON)
     Result(String),
+    /// Streaming system-level progress (e.g. `system/thinking_tokens`): the
+    /// API call is live and producing output. Not displayed, but counts as
+    /// API progress for the foreground auth-heuristic watchdog.
+    SystemProgress,
     /// System init or other (ignored for display)
     Other,
 }
@@ -70,6 +74,14 @@ pub(crate) fn parse_stream_event(line: &str) -> StreamEvent {
 
     match event_type {
         "result" => StreamEvent::Result(line.to_string()),
+        "system" => {
+            let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+            match subtype {
+                // Heartbeat subtypes that prove the API call is streaming.
+                "thinking_tokens" | "status" => StreamEvent::SystemProgress,
+                _ => StreamEvent::Other,
+            }
+        }
         "assistant" => {
             let content = v.pointer("/message/content").and_then(|c| c.as_array());
             if let Some(blocks) = content {
@@ -597,7 +609,7 @@ pub(crate) fn format_event(event: &StreamEvent) -> Option<String> {
             let escaped = crate::cc::markdown_utils::html_escape(&truncated);
             Some(format!("{icon} {tool} <code>{escaped}</code>"))
         }
-        StreamEvent::Result(_) | StreamEvent::Other => None,
+        StreamEvent::Result(_) | StreamEvent::SystemProgress | StreamEvent::Other => None,
     }
 }
 
@@ -813,6 +825,24 @@ mod tests {
     #[tokio::test]
     async fn parse_invalid_json() {
         assert!(matches!(parse_stream_event("not json"), StreamEvent::Other));
+    }
+
+    #[tokio::test]
+    async fn parse_system_thinking_tokens_is_progress() {
+        let line = r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":106}"#;
+        assert!(matches!(
+            parse_stream_event(line),
+            StreamEvent::SystemProgress
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_system_status_is_progress() {
+        let line = r#"{"type":"system","subtype":"status"}"#;
+        assert!(matches!(
+            parse_stream_event(line),
+            StreamEvent::SystemProgress
+        ));
     }
 
     #[tokio::test]

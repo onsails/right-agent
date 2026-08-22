@@ -174,7 +174,7 @@ pub(crate) fn format_ring_event(event: &StreamEvent) -> Option<String> {
             let args: String = input_summary.chars().take(ACTIVITY_SNIPPET_LEN).collect();
             Some(format!("- called {tool}({args})"))
         }
-        StreamEvent::Result(_) | StreamEvent::Other => None,
+        StreamEvent::Result(_) | StreamEvent::SystemProgress | StreamEvent::Other => None,
     }
 }
 

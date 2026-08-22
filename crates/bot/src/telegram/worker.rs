@@ -70,6 +70,7 @@ fn stream_event_is_api_progress(event: &crate::cc::stream::StreamEvent) -> bool 
             | crate::cc::stream::StreamEvent::Thinking
             | crate::cc::stream::StreamEvent::ToolUse { .. }
             | crate::cc::stream::StreamEvent::Result(_)
+            | crate::cc::stream::StreamEvent::SystemProgress
     )
 }
 
@@ -5919,6 +5920,17 @@ mod tests {
         );
 
         assert_eq!(effective_input, "volatile prefix\n\nuser input");
+    }
+
+    #[test]
+    fn system_progress_heartbeats_count_as_api_progress() {
+        // Regression: CC ≥2.1.234 streams `system/thinking_tokens` heartbeats
+        // while a long-thinking turn is in flight. The old parser mapped them
+        // to `Other`, so the 20s foreground watchdog killed a healthy call
+        // and demanded a fresh setup token (false auth failure).
+        let heartbeat = r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":106}"#;
+        let event = crate::cc::stream::parse_stream_event(heartbeat);
+        assert!(stream_event_is_api_progress(&event));
     }
     use std::os::unix::fs::PermissionsExt;
 
