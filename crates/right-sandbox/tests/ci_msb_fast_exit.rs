@@ -17,9 +17,7 @@ use common::{
     NODE_IMAGE, PROBE_CPUS, PROBE_MEMORY_MIB, SandboxGuard, acquire_vm_slot,
     ensure_runtime_installed,
 };
-use right_sandbox::{
-    ExecEvent, ExecRequest, Resources, SandboxHandle, SandboxSpec, Stdin,
-};
+use right_sandbox::{ExecEvent, ExecRequest, Resources, SandboxHandle, SandboxSpec, Stdin};
 
 /// How long the fast-exit observation may take before the probe calls it a
 /// transport hang (the production symptom: exit never observed, task parked).
@@ -53,7 +51,8 @@ async fn ci_msb_fast_exit_stream_delivers_exited() -> Result<()> {
         cmd: "/bin/sh".to_owned(),
         args: vec![
             "-c".to_owned(),
-            "set -o pipefail\nmkdir -p /tmp/crons-logs\necho body | tee /tmp/crons-logs/x.ndjson".to_owned(),
+            "set -o pipefail\nmkdir -p /tmp/crons-logs\necho body | tee /tmp/crons-logs/x.ndjson"
+                .to_owned(),
         ],
         user: None,
         stdin: Stdin::Null,
@@ -122,9 +121,7 @@ async fn ci_msb_fast_exit_stream_delivers_exited() -> Result<()> {
             .context("no event for the healthy wrapper within the observe window")?
             .context("next_event failed")?;
         match event {
-            Some(ExecEvent::Stdout(bytes)) => {
-                ok_stdout.push_str(&String::from_utf8_lossy(&bytes))
-            }
+            Some(ExecEvent::Stdout(bytes)) => ok_stdout.push_str(&String::from_utf8_lossy(&bytes)),
             Some(ExecEvent::Exited { code }) => break code,
             Some(_) => {}
             None => bail!("healthy wrapper stream ended without Exited"),
