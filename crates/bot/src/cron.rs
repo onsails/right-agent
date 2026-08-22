@@ -1355,20 +1355,33 @@ async fn execute_job(
             .to_string();
             let run_note_detail: String = raw_detail.chars().take(200).collect();
 
-            // Reflection `--resume`s the run's session, whose `--max-budget-usd`
-            // is cumulative — so reflecting a budget-exhausted session always
-            // immediately re-hits the cap (a futile, billable turn). Skip it and
-            // report the deterministic reason.
-            let reflected_content = if matches!(
-                &failure_kind,
-                crate::reflection::FailureKind::BudgetExceeded { .. }
-            ) {
-                tracing::info!(
-                    job = %job_name,
-                    detail = %raw_detail,
-                    "cron hit budget cap; skipping futile reflection"
-                );
-                raw_content
+            // Reflection `--resume`s the run's session — a billable CC turn.
+            // Deterministic failures make it futile: a classified error result
+            // (529/429/5xx overload, rate limit, turn limit) fails the same
+            // way on resume, and a budget-exhausted session immediately
+            // re-hits its cumulative `--max-budget-usd` cap. Skip both and
+            // report the classified user message (or raw detail for the
+            // budget cap); reflect everything else.
+            let skip = skip_reflection_decision(&collected_lines, &failure_kind);
+            let reflected_content = if let Some(classified) = skip {
+                match classified {
+                    Some(c) => {
+                        tracing::info!(
+                            job = %job_name,
+                            detail = %c.detail,
+                            "cron failure classified; skipping futile reflection"
+                        );
+                        c.user_message
+                    }
+                    None => {
+                        tracing::info!(
+                            job = %job_name,
+                            detail = %raw_detail,
+                            "cron hit budget cap; skipping futile reflection"
+                        );
+                        raw_content
+                    }
+                }
             } else {
                 // Best-effort ring buffer: parse last ~5 stream-json lines from
                 // collected_lines, keeping only displayable events. Chronological
@@ -1480,6 +1493,32 @@ async fn execute_job(
             }
         }
     }
+}
+/// Decide whether a failed cron run may skip the reflection `--resume` turn.
+///
+/// Reflection resumes the run's session, so it is a billable CC turn. Two
+/// failure classes are deterministic — the resumed turn fails the same way:
+/// a classified error result (529/429/5xx overload, rate limit, turn limit)
+/// and the budget cap (whose `--max-budget-usd` is cumulative, so the resume
+/// immediately re-hits it).
+///
+/// Returns `Some(classified)` to skip reflection and report
+/// [`FailureClassification::user_message`] directly; `Some(None)` to skip
+/// reflection with only the raw detail (budget cap); `None` to reflect.
+fn skip_reflection_decision(
+    collected_lines: &[String],
+    failure_kind: &crate::reflection::FailureKind,
+) -> Option<Option<FailureClassification>> {
+    if let Some(classified) = classify_failed_result(collected_lines) {
+        return Some(Some(classified));
+    }
+    if matches!(
+        failure_kind,
+        crate::reflection::FailureKind::BudgetExceeded { .. }
+    ) {
+        return Some(None);
+    }
+    None
 }
 
 /// Return `true` iff the parsed NDJSON value is a CC `{"type":"result"}` event.
@@ -2525,6 +2564,48 @@ mod classify_tests {
         // A non-error result with no text yields no failure detail.
         assert_eq!(
             terminal_failure_detail(r#"{"type":"result","subtype":"success","is_error":false}"#),
+            None
+        );
+    }
+    #[test]
+    fn skip_reflection_for_deterministic_classified_failures() {
+        // A 529/429/5xx/turn-limit error result is deterministic: a reflection
+        // `--resume` turn would fail the same way and cost money. The skip
+        // decision must fire BEFORE the reflection call, using the
+        // classification alone.
+        let overloaded = vec![
+            r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":529,"result":"API Error: 529 Overloaded."}"#.to_string(),
+        ];
+        let decision = skip_reflection_decision(&overloaded, &FailureKind::NonZeroExit { code: 1 });
+        let classified = decision.expect("529 classifies → skip reflection").unwrap();
+        assert!(
+            classified.user_message.contains("overloaded"),
+            "{}",
+            classified.user_message
+        );
+
+        // Budget cap: classification is None, but the kind alone is
+        // deterministic — still skip, with no classified message.
+        let budget = skip_reflection_decision(&[], &FailureKind::BudgetExceeded { limit_usd: 1.5 });
+        assert!(budget.is_some() && budget.unwrap().is_none());
+    }
+
+    #[test]
+    fn reflection_runs_for_unclassifiable_failures() {
+        // No result line at all (transport wedge, kill -9) and a generic
+        // failure kind: nothing deterministic is known, so reflection must run.
+        assert_eq!(
+            skip_reflection_decision(&[], &FailureKind::NonZeroExit { code: -1 }),
+            None
+        );
+
+        // A result line that is NOT an error result (is_error absent/false)
+        // must not trip the classifier either.
+        let not_error = vec![
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#.to_string(),
+        ];
+        assert_eq!(
+            skip_reflection_decision(&not_error, &FailureKind::NonZeroExit { code: 1 }),
             None
         );
     }
