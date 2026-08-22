@@ -303,7 +303,7 @@ pub(crate) mod test_support {
             debug: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             stt: None,
             learning: right_agent::agent::types::LearningConfig::default(),
-            claude_health: crate::keepalive::ClaudeHealth::new(
+            mcp_init_health: crate::keepalive::McpInitHealth::new(
                 "test".to_owned(),
                 PathBuf::from("/tmp/router-test"),
                 Arc::clone(&sandbox_runtime),

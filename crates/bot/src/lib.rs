@@ -830,8 +830,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Upgrade lock: upgrade (write) vs CC sessions (read).
     let upgrade_lock = Arc::new(tokio::sync::RwLock::new(()));
 
-    // Token keepalive health (shared with the keepalive task spawned later).
-    let claude_health = keepalive::ClaudeHealth::new(
+    // Right MCP init health (shared with the keepalive task spawned later).
+    let mcp_init_health = keepalive::McpInitHealth::new(
         args.agent.clone(),
         agent_dir.clone(),
         std::sync::Arc::clone(&sandbox_runtime),
@@ -873,7 +873,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         prefetch_cache.clone(),
         Arc::clone(&upgrade_lock),
         stt.clone(),
-        Arc::clone(&claude_health),
+        Arc::clone(&mcp_init_health),
         std::sync::Arc::clone(&sandbox_runtime),
         Arc::clone(&session_locks),
         Arc::clone(&bg_requests),
@@ -1103,9 +1103,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         Arc::clone(&upgrade_lock),
     );
 
-    // Token keepalive: periodic `claude -p "hi"` to prevent OAuth token
-    // expiration. `claude_health` was built above (before `setup_telegram`).
-    let keepalive_handle = keepalive::spawn_keepalive(Arc::clone(&claude_health), shutdown.clone());
+    // Right MCP init keepalive: hourly probe of the `system/init` MCP
+    // handshake. `mcp_init_health` was built above (before `setup_telegram`).
+    let keepalive_handle =
+        keepalive::spawn_keepalive(Arc::clone(&mcp_init_health), shutdown.clone());
 
     // The telegram lifecycle future (built by `setup_telegram`) resolves when
     // the bot shuts down (SIGTERM/SIGINT or config change) after draining

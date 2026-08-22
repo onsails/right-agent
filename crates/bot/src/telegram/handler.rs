@@ -159,7 +159,7 @@ pub struct AgentSettings {
     /// Learning-review configuration captured at bot startup. Changes require restart.
     pub learning: right_agent::agent::types::LearningConfig,
     /// Shared Claude health state for MCP self-heal and one-shot repair notices.
-    pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
+    pub(crate) mcp_init_health: Arc<crate::keepalive::McpInitHealth>,
     /// Process shutdown token used to cancel detached user-turn repair work.
     pub(crate) shutdown: tokio_util::sync::CancellationToken,
     /// Shared sandbox-backend state. Read before every sandboxed turn by the
@@ -448,7 +448,7 @@ pub(crate) async fn handle_message(
                     upgrade_lock: Arc::clone(&settings.upgrade_lock),
                     stt: settings.stt.clone(),
                     learning: settings.learning.clone(),
-                    claude_health: Arc::clone(&settings.claude_health),
+                    mcp_init_health: Arc::clone(&settings.mcp_init_health),
                     shutdown: settings.shutdown.clone(),
                     sandbox_runtime: Arc::clone(&settings.sandbox_runtime),
                 };

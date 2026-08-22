@@ -97,7 +97,7 @@ pub(crate) async fn setup_telegram(
     prefetch_cache: Option<right_memory::prefetch::PrefetchCache>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     stt: Option<std::sync::Arc<crate::stt::SttContext>>,
-    claude_health: Arc<crate::keepalive::ClaudeHealth>,
+    mcp_init_health: Arc<crate::keepalive::McpInitHealth>,
     sandbox_runtime: std::sync::Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     session_locks: super::SessionLocks,
     bg_requests: super::BgRequests,
@@ -142,7 +142,7 @@ pub(crate) async fn setup_telegram(
         debug,
         stt,
         learning,
-        claude_health,
+        mcp_init_health,
         shutdown: worker_shutdown.clone(),
         sandbox_runtime,
     });

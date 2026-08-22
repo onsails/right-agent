@@ -256,7 +256,7 @@ fn should_trigger_mcp_repair_from_init(line: &str) -> bool {
 }
 
 fn schedule_user_turn_mcp_repair(
-    health: Arc<crate::keepalive::ClaudeHealth>,
+    health: Arc<crate::keepalive::McpInitHealth>,
     shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -265,7 +265,7 @@ fn schedule_user_turn_mcp_repair(
         }
         tokio::select! {
             _ = shutdown.cancelled() => {
-                tracing::debug!("claude_health: user-turn repair skipped during shutdown");
+                tracing::debug!("right_mcp_init: user-turn repair skipped during shutdown");
             }
             _ = health.trigger_repair("user-turn-init") => {}
         }
@@ -391,7 +391,7 @@ pub struct WorkerContext {
     /// Learning-review configuration captured at bot startup. Changes require restart.
     pub learning: right_agent::agent::types::LearningConfig,
     /// Shared Claude health state for MCP self-heal and one-shot repair notices.
-    pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
+    pub(crate) mcp_init_health: Arc<crate::keepalive::McpInitHealth>,
     /// Process shutdown token used to cancel detached user-turn repair work.
     pub(crate) shutdown: CancellationToken,
     /// Live sandbox-backend health; read by the fail-closed gate before each CC turn.
@@ -4351,7 +4351,7 @@ async fn invoke_cc(
     let repair_notice = if bootstrap_mode {
         None
     } else {
-        ctx.claude_health.consume_repair_notice()
+        ctx.mcp_init_health.consume_repair_notice()
     };
     let base_prompt = right_codegen::generate_system_prompt(&ctx.agent_name, "/sandbox");
 
@@ -5003,7 +5003,7 @@ async fn invoke_cc(
 
                         if should_trigger_mcp_repair_from_init(&line) {
                             schedule_user_turn_mcp_repair(
-                                Arc::clone(&ctx.claude_health),
+                                Arc::clone(&ctx.mcp_init_health),
                                 ctx.shutdown.clone(),
                             );
                         }
@@ -6332,7 +6332,7 @@ mod tests {
             upgrade_lock: Arc::new(tokio::sync::RwLock::new(())),
             stt: None,
             learning: right_agent::agent::types::LearningConfig::default(),
-            claude_health: crate::keepalive::ClaudeHealth::new(
+            mcp_init_health: crate::keepalive::McpInitHealth::new(
                 "test-agent".into(),
                 agent_dir.to_path_buf(),
                 Arc::clone(&sandbox_runtime),

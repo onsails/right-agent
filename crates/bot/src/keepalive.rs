@@ -1,7 +1,8 @@
-//! Claude health keepalive: periodic stream-json probe to verify agent-facing MCP status.
+//! Right MCP init keepalive: periodic stream-json probe that verifies the
+//! `system/init` MCP handshake, not overall Claude Code health.
 //!
-//! Runs every hour (default). Uses haiku model with max-turns=1 and strict MCP config,
-//! then inspects the `system/init` event for Right MCP connectivity.
+//! Runs every hour (default). Uses haiku model with max-turns=1 and strict MCP
+//! config, then inspects the `system/init` event for Right MCP connectivity.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,13 +10,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
 /// Default interval between keepalive pings.
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(3600);
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 const REPAIR_OPERATION_TIMEOUT: Duration = Duration::from_secs(180);
+/// Char bound for the stderr excerpt included in probe failure diagnostics.
+const STDERR_EXCERPT_CHARS: usize = 2 * 1024;
+/// Bound for the post-exit stderr drain; guards a wedged transport pipe.
+const PROBE_STDERR_TIMEOUT: Duration = Duration::from_secs(2);
 
 const HEALTH_PROMPT: &str = "Reply exactly OK. Do not use tools.";
 
@@ -390,7 +395,7 @@ fn health_probe_invocation(mcp_config_path: &str) -> crate::cc::invocation::Clau
     }
 }
 
-pub(crate) struct ClaudeHealth {
+pub(crate) struct McpInitHealth {
     agent_name: String,
     agent_dir: PathBuf,
     /// The live sandbox is resolved from here per probe/repair step: recovery
@@ -400,7 +405,7 @@ pub(crate) struct ClaudeHealth {
     repair_notice_pending: AtomicBool,
 }
 
-impl ClaudeHealth {
+impl McpInitHealth {
     pub(crate) fn new(
         agent_name: String,
         agent_dir: PathBuf,
@@ -465,12 +470,12 @@ impl ClaudeHealth {
             tracing::debug!(
                 agent = %self.agent_name,
                 reason,
-                "claude_health: repair already running"
+                "right_mcp_init: repair already running"
             );
             return;
         };
 
-        tracing::warn!(agent = %self.agent_name, reason, "claude_health: repairing MCP cache");
+        tracing::warn!(agent = %self.agent_name, reason, "right_mcp_init: repairing MCP cache");
 
         if tokio::time::timeout(timeout, make_repair(Arc::clone(self)))
             .await
@@ -480,50 +485,50 @@ impl ClaudeHealth {
                 agent = %self.agent_name,
                 reason,
                 timeout_secs = timeout.as_secs(),
-                "claude_health: repair timed out"
+                "right_mcp_init: repair timed out"
             );
         }
     }
 
     async fn run_repair_body(self: &Arc<Self>, reason: &'static str) {
         if let Err(e) = remove_needs_auth_cache(self).await {
-            tracing::warn!(agent = %self.agent_name, reason, "claude_health: {e}");
+            tracing::warn!(agent = %self.agent_name, reason, "right_mcp_init: {e}");
         }
 
         if let Err(e) = sync_after_cache_cleanup(self).await {
-            tracing::error!(agent = %self.agent_name, reason, "claude_health: {e}");
+            tracing::error!(agent = %self.agent_name, reason, "right_mcp_init: {e}");
             return;
         }
 
         match tokio::time::timeout(HEALTH_PROBE_TIMEOUT, run_health_probe(self)).await {
             Ok(Ok(HealthProbeOutcome::Healthy)) => {
                 self.mark_repaired_for_next_turn();
-                tracing::info!(agent = %self.agent_name, reason, "claude_health: repair succeeded");
+                tracing::info!(agent = %self.agent_name, reason, "right_mcp_init: repair succeeded");
             }
             Ok(Ok(HealthProbeOutcome::NeedsRepair { status })) => {
                 tracing::error!(
                     agent = %self.agent_name,
                     reason,
                     right_status = status.as_deref().unwrap_or("missing"),
-                    "claude_health: repair probe still unhealthy"
+                    "right_mcp_init: repair probe still unhealthy"
                 );
             }
             Ok(Ok(HealthProbeOutcome::NoInit)) => {
                 tracing::error!(
                     agent = %self.agent_name,
                     reason,
-                    "claude_health: repair probe had no init"
+                    "right_mcp_init: repair probe had no init"
                 );
             }
             Ok(Err(e)) => {
-                tracing::error!(agent = %self.agent_name, reason, "claude_health: repair probe failed: {e}");
+                tracing::error!(agent = %self.agent_name, reason, "right_mcp_init: repair probe failed: {e}");
             }
             Err(_) => {
                 tracing::error!(
                     agent = %self.agent_name,
                     reason,
                     timeout_secs = HEALTH_PROBE_TIMEOUT.as_secs(),
-                    "claude_health: repair probe timed out"
+                    "right_mcp_init: repair probe timed out"
                 );
             }
         }
@@ -538,7 +543,7 @@ impl ClaudeHealth {
 /// Guest path of the MCP `needs-auth` cache the repair path clears.
 const NEEDS_AUTH_CACHE_PATH: &str = "/sandbox/.claude/mcp-needs-auth-cache.json";
 
-async fn remove_needs_auth_cache(health: &ClaudeHealth) -> Result<(), String> {
+async fn remove_needs_auth_cache(health: &McpInitHealth) -> Result<(), String> {
     let sandbox = health.sandbox()?;
     let (output, code) = crate::sandbox::exec_argv(&sandbox, &["rm", "-f", NEEDS_AUTH_CACHE_PATH])
         .await
@@ -552,7 +557,7 @@ async fn remove_needs_auth_cache(health: &ClaudeHealth) -> Result<(), String> {
     Ok(())
 }
 
-async fn sync_after_cache_cleanup(health: &ClaudeHealth) -> Result<(), String> {
+async fn sync_after_cache_cleanup(health: &McpInitHealth) -> Result<(), String> {
     let sandbox = health.sandbox()?;
     crate::sync::sync_cycle(&health.agent_dir, &sandbox)
         .await
@@ -564,7 +569,7 @@ async fn sync_after_cache_cleanup(health: &ClaudeHealth) -> Result<(), String> {
 /// Returns the `JoinHandle` so the caller can await it during shutdown,
 /// preventing a tokio runtime panic from in-flight `Interval::tick()` futures.
 pub(crate) fn spawn_keepalive(
-    health: Arc<ClaudeHealth>,
+    health: Arc<McpInitHealth>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -572,7 +577,7 @@ pub(crate) fn spawn_keepalive(
     })
 }
 
-async fn run_keepalive_loop(health: Arc<ClaudeHealth>, shutdown: CancellationToken) {
+async fn run_keepalive_loop(health: Arc<McpInitHealth>, shutdown: CancellationToken) {
     run_one_health_cycle(Arc::clone(&health), "startup", &shutdown).await;
     if shutdown.is_cancelled() {
         return;
@@ -590,7 +595,7 @@ async fn run_keepalive_loop(health: Arc<ClaudeHealth>, shutdown: CancellationTok
                 }
             }
             _ = shutdown.cancelled() => {
-                tracing::debug!("claude_health: shutdown");
+                tracing::debug!("right_mcp_init: shutdown");
                 return;
             }
         }
@@ -598,15 +603,15 @@ async fn run_keepalive_loop(health: Arc<ClaudeHealth>, shutdown: CancellationTok
 }
 
 async fn run_one_health_cycle(
-    health: Arc<ClaudeHealth>,
+    health: Arc<McpInitHealth>,
     reason: &'static str,
     shutdown: &CancellationToken,
 ) {
-    tracing::info!(agent = %health.agent_name, reason, "claude_health: probing");
+    tracing::info!(agent = %health.agent_name, reason, "right_mcp_init: probing");
     let probe = tokio::time::timeout(HEALTH_PROBE_TIMEOUT, run_health_probe(&health));
     let result = tokio::select! {
         _ = shutdown.cancelled() => {
-            tracing::debug!(agent = %health.agent_name, reason, "claude_health: shutdown");
+            tracing::debug!(agent = %health.agent_name, reason, "right_mcp_init: shutdown");
             return;
         }
         result = probe => result,
@@ -619,7 +624,7 @@ async fn run_one_health_cycle(
                 agent = %health.agent_name,
                 reason,
                 timeout_secs = HEALTH_PROBE_TIMEOUT.as_secs(),
-                "claude_health: probe timed out"
+                "right_mcp_init: probe timed out"
             );
             health.report_backend_failure();
             return;
@@ -628,34 +633,34 @@ async fn run_one_health_cycle(
 
     match outcome {
         Ok(HealthProbeOutcome::Healthy) => {
-            tracing::info!(agent = %health.agent_name, reason, "claude_health: ok");
+            tracing::info!(agent = %health.agent_name, reason, "right_mcp_init: ok");
         }
         Ok(HealthProbeOutcome::NeedsRepair { status }) => {
             tracing::warn!(
                 agent = %health.agent_name,
                 reason,
                 right_status = status.as_deref().unwrap_or("missing"),
-                "claude_health: right MCP unhealthy; scheduling repair"
+                "right_mcp_init: right MCP unhealthy; scheduling repair"
             );
             health.trigger_repair(reason).await;
         }
         Ok(HealthProbeOutcome::NoInit) => {
-            tracing::warn!(agent = %health.agent_name, reason, "claude_health: no system/init");
+            tracing::warn!(agent = %health.agent_name, reason, "right_mcp_init: no system/init");
         }
         Err(e) => {
-            tracing::warn!(agent = %health.agent_name, reason, "claude_health: failed: {e}");
+            tracing::warn!(agent = %health.agent_name, reason, "right_mcp_init: failed: {e}");
             health.report_backend_failure();
         }
     }
 }
 
-async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, String> {
+async fn run_health_probe(health: &McpInitHealth) -> Result<HealthProbeOutcome, String> {
     let sandbox = health.sandbox()?;
     let args = health_probe_invocation(crate::sandbox::SANDBOX_MCP_JSON_PATH).into_args();
     let mut child = crate::cc::invocation::build_claude_command(&args, &health.agent_dir, &sandbox)
         .await
         .stdout(crate::cc::sandbox_process::Capture::Pipe)
-        .stderr(crate::cc::sandbox_process::Capture::Null)
+        .stderr(crate::cc::sandbox_process::Capture::Pipe)
         .spawn()
         .await
         .map_err(|e| format!("spawn failed: {e:#}"))?;
@@ -685,7 +690,7 @@ async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, S
         if let Err(e) = child.wait().await {
             tracing::warn!(
                 agent = %health.agent_name,
-                "claude_health: failed to wait unhealthy probe: {e:#}"
+                "right_mcp_init: failed to wait unhealthy probe: {e:#}"
             );
         }
     } else {
@@ -694,11 +699,45 @@ async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, S
             .await
             .map_err(|e| format!("wait failed: {e:#}"))?;
         if code != 0 {
-            return Err(format!("exit code: {code}"));
+            // Failure diagnostics carry the exit code AND a bounded stderr
+            // excerpt: the CLI writes the actual reason (auth, MCP, flags) to
+            // stderr, and an exit code alone reruns the #186 guessing game.
+            let stderr_tail = drain_probe_stderr(&mut child).await;
+            return Err(format!("exit code: {code}; stderr tail: {stderr_tail}"));
         }
     }
 
     Ok(init_outcome)
+}
+
+/// Bounded drain of the probe's stderr after guest exit, as a tail excerpt.
+///
+/// The pump closes the stderr writer on exit, so the read normally hits EOF;
+/// the timeout only guards a wedged transport pipe from stalling the cycle.
+async fn drain_probe_stderr(child: &mut crate::cc::sandbox_process::SandboxChild) -> String {
+    let Some(mut stderr) = child.stderr() else {
+        return String::new();
+    };
+    let mut buf = Vec::new();
+    match tokio::time::timeout(PROBE_STDERR_TIMEOUT, stderr.read_to_end(&mut buf)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::debug!("right_mcp_init: stderr drain read failed: {e:#}"),
+        Err(_) => tracing::debug!(
+            "right_mcp_init: stderr drain timed out after {:?} (transport keeps the pipe open; benign)",
+            PROBE_STDERR_TIMEOUT
+        ),
+    }
+    stderr_excerpt(&buf)
+}
+
+/// Tail excerpt of the probe's stderr, lossy-decoded and char-bounded.
+fn stderr_excerpt(bytes: &[u8]) -> String {
+    let lossy = String::from_utf8_lossy(bytes);
+    let len = lossy.chars().count();
+    if len <= STDERR_EXCERPT_CHARS {
+        return lossy.into_owned();
+    }
+    lossy.chars().skip(len - STDERR_EXCERPT_CHARS).collect()
 }
 
 #[cfg(test)]
@@ -726,6 +765,24 @@ mod tests {
         assert!(args.contains(&"1".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
         assert!(!args.contains(&"--session-id".to_string()));
+    }
+
+    #[test]
+    fn stderr_excerpt_keeps_tail_and_bounds_length() {
+        let short = b"boom\n".to_vec();
+        assert_eq!(stderr_excerpt(&short), "boom\n");
+
+        let long: Vec<u8> = (b'a'..=b'z').cycle().take(26 * 500).collect();
+        let excerpt = stderr_excerpt(&long);
+        assert!(excerpt.chars().count() <= STDERR_EXCERPT_CHARS);
+        // Tail, not head: the excerpt must end with the final byte written.
+        assert!(excerpt.ends_with('z'));
+    }
+
+    #[test]
+    fn stderr_excerpt_lossy_on_invalid_utf8() {
+        let excerpt = stderr_excerpt(&[0xff, 0xfe, b'!']);
+        assert!(excerpt.ends_with('!'));
     }
 
     #[test]
@@ -1042,7 +1099,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_repair_step_refuses_to_run_without_a_sandbox() {
-        let health = ClaudeHealth::new(
+        let health = McpInitHealth::new(
             "him".to_owned(),
             PathBuf::from("/tmp/agent"),
             unavailable_runtime(),
@@ -1068,7 +1125,7 @@ mod tests {
     #[tokio::test]
     async fn every_step_resolves_the_sandbox_at_use_time() {
         let runtime = unavailable_runtime();
-        let health = ClaudeHealth::new(
+        let health = McpInitHealth::new(
             "him".to_owned(),
             PathBuf::from("/tmp/agent"),
             Arc::clone(&runtime),
@@ -1076,7 +1133,7 @@ mod tests {
         assert_eq!(
             runtime.sandbox_reads(),
             0,
-            "building ClaudeHealth must not snapshot the sandbox"
+            "building McpInitHealth must not snapshot the sandbox"
         );
 
         let _ = run_health_probe(&health).await;
@@ -1092,7 +1149,7 @@ mod tests {
 
     #[tokio::test]
     async fn repair_notice_is_one_shot() {
-        let health = ClaudeHealth::new(
+        let health = McpInitHealth::new(
             "him".to_owned(),
             PathBuf::from("/tmp/agent"),
             unavailable_runtime(),
@@ -1106,7 +1163,7 @@ mod tests {
 
     #[tokio::test]
     async fn repair_lock_rejects_concurrent_second_holder() {
-        let health = ClaudeHealth::new(
+        let health = McpInitHealth::new(
             "him".to_owned(),
             PathBuf::from("/tmp/agent"),
             unavailable_runtime(),
@@ -1121,7 +1178,7 @@ mod tests {
 
     #[tokio::test]
     async fn repair_timeout_releases_repair_lock() {
-        let health = ClaudeHealth::new(
+        let health = McpInitHealth::new(
             "him".to_owned(),
             PathBuf::from("/tmp/agent"),
             unavailable_runtime(),
