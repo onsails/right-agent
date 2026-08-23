@@ -7,7 +7,7 @@ use tempfile::NamedTempFile;
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 
-use crate::sandbox::{Sandbox, exec_argv, upload_into_dir};
+use crate::sandbox::{Sandbox, exec_argv, exec_argv_with_timeout, upload_into_dir};
 use crate::sandbox_runtime::SandboxRuntimeHandle;
 
 /// Interval between sync cycles.
@@ -36,6 +36,10 @@ pub(crate) async fn initial_sync(agent_dir: &Path, sbox: &Sandbox) -> miette::Re
     // the platform tree is handed to the agent.
     ensure_sandbox_user(sbox).await?;
 
+    // Baseline toolchain: agents routinely need git/python/ffmpeg/etc. and
+    // the stock image has none of it. Idempotent; fast path adds no boot
+    // time on already-provisioned sandboxes.
+    ensure_baseline_toolchain(sbox).await?;
     sync_cycle(agent_dir, sbox).await?;
     Ok(())
 }
@@ -565,6 +569,73 @@ async fn ensure_sandbox_user(sbox: &Sandbox) -> miette::Result<()> {
     );
     Ok(())
 }
+/// Provisioning installs packages on first run — apt can take minutes on a
+/// cold guest. `DEFAULT_EXEC_TIMEOUT` (10s) SIGKILLs it mid-dpkg and leaves
+/// the package database interrupted, which the next run then has to repair.
+/// Budget real install time instead.
+const TOOLCHAIN_PROVISION_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Baseline toolchain provisioned into every Agent Sandbox at boot.
+///
+/// The stock `node:22-slim` image carries only node/npm, so agents hit
+/// missing-tool errors for everyday jobs (git for backups, python for
+/// analysis, ffmpeg for media). This provisioning step installs the set
+/// idempotently as root over `apt`, plus bun from its official installer
+/// (a single static binary; no apt channel). Fast path: every probe
+/// (`dpkg -s` per package, `bun --version` for bun) already satisfied
+/// means zero network traffic, so steady-state boot cost is unchanged.
+/// The set lives here, in exactly one place — it is platform policy, not
+/// per-agent config.
+async fn ensure_baseline_toolchain(sbox: &Sandbox) -> miette::Result<()> {
+    let script = toolchain_provisioning_script();
+    let (output, code) =
+        exec_argv_with_timeout(sbox, &["bash", "-lc", &script], TOOLCHAIN_PROVISION_TIMEOUT)
+            .await?;
+    if code != 0 {
+        return Err(miette::miette!(
+            "sync: baseline toolchain provisioning failed in {}: bash exited with {code}: {output}",
+            sbox.name()
+        ));
+    }
+    tracing::info!(sandbox = sbox.name(), "sync: ensured baseline toolchain");
+    Ok(())
+}
+
+fn toolchain_provisioning_script() -> String {
+    // One script, three stages, each fail-fast:
+    // 1. apt: update+install only when a package probe misses.
+    // 2. bun: download/install only when the binary is absent (curl is
+    //    guaranteed by stage 1).
+    // 3. chown the bun install dir to the guest user so self-upgrades work
+    //    without root.
+    let script = r#"set -eu
+NEED=""
+for pkg in git git-lfs python3 python3-pip python3-venv ffmpeg jq curl ca-certificates rsync sqlite3 zip unzip build-essential; do
+  dpkg -s "$pkg" >/dev/null 2>&1 || NEED="$NEED $pkg"
+done
+if [ -n "$NEED" ]; then
+  # An interrupted dpkg (OOM kill, crash mid-install) blocks every later
+  # install with exit 100; repair before retrying. Idempotent no-op when
+  # dpkg state is clean.
+  dpkg --configure -a
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $NEED
+fi
+if ! /sandbox/.local/bin/bun --version >/dev/null 2>&1; then
+  # Provisioning runs as root; BUN_INSTALL pins the target into the agent's
+  # home rather than /root/.bun, and the links put bun/bunx on the
+  # env.sh-managed PATH (/sandbox/.local/bin) the agent actually sees.
+  # Explicit export: the installer runs in a piped subshell (`bash -s`),
+  # which never inherits an unexported variable.
+  export BUN_INSTALL=/sandbox/.bun
+  curl -fsSL https://bun.sh/install | bash -s "bun-v1.2.20"
+  ln -sf /sandbox/.bun/bin/bun /sandbox/.local/bin/bun
+  ln -sf /sandbox/.bun/bin/bun /sandbox/.local/bin/bunx
+fi
+chown -R sandbox:sandbox /sandbox/.bun /sandbox/.local/bin/bun /sandbox/.local/bin/bunx 2>/dev/null || true
+"#;
+    script.to_owned()
+}
 
 #[cfg(test)]
 mod tests {
@@ -584,6 +655,62 @@ mod tests {
         .collect::<Vec<_>>();
 
         assert_eq!(obsolete_builtin_skill_paths(), expected);
+    }
+
+    #[test]
+    fn toolchain_script_installs_the_baseline_set() {
+        let script = toolchain_provisioning_script();
+        // The full baseline set agreed for the first iteration: every entry
+        // an agent can reasonably assume exists inside its sandbox.
+        for pkg in [
+            "git",
+            "git-lfs",
+            "python3",
+            "python3-pip",
+            "python3-venv",
+            "ffmpeg",
+            "jq",
+            "curl",
+            "ca-certificates",
+            "rsync",
+            "sqlite3",
+            "zip",
+            "unzip",
+            "build-essential",
+        ] {
+            assert!(script.contains(pkg), "script must install {pkg}");
+        }
+        assert!(script.contains("bun.sh/install"), "script must install bun");
+    }
+
+    #[test]
+    fn toolchain_script_is_idempotent_and_fails_fast() {
+        let script = toolchain_provisioning_script();
+        assert!(script.contains("set -eu"), "must fail fast");
+        // Idempotency: apt only fires on a missing-package probe, bun only
+        // on a missing binary — a re-provisioned sandbox pays no network.
+        assert!(script.contains("dpkg -s \"$pkg\""), "apt probe per package");
+        assert!(
+            script.contains("if [ -n \"$NEED\" ]"),
+            "apt update+install gated on missing set"
+        );
+        assert!(
+            script.contains("bun --version"),
+            "bun install gated on missing binary"
+        );
+    }
+
+    #[test]
+    fn toolchain_script_hands_bun_to_guest_user_on_agent_path() {
+        let script = toolchain_provisioning_script();
+        // Provisioning runs as root, so an unpinned installer would land bun
+        // in /root/.bun where the agent never sees it. The install is pinned
+        // to /sandbox/.bun and linked into the env.sh-managed PATH dir.
+        assert!(script.contains("BUN_INSTALL=/sandbox/.bun"));
+        assert!(script.contains("ln -sf /sandbox/.bun/bin/bun /sandbox/.local/bin/bun"));
+        // The guest user owns the install dir so `bun upgrade` works without
+        // root.
+        assert!(script.contains("chown -R sandbox:sandbox /sandbox/.bun"));
     }
 
     #[test]
