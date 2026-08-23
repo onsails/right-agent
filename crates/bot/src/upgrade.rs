@@ -98,19 +98,24 @@ async fn run_upgrade(sandbox: &Sandbox, agent_name: &str) {
     match exec_argv_with_timeout(sandbox, &CLAUDE_UPGRADE_CMD, UPGRADE_TIMEOUT).await {
         Ok((stdout, exit_code)) => {
             let stdout = stdout.trim();
+            // `output=` carries only the last line: `claude upgrade` prints a
+            // multi-line progress report whose first line is always
+            // `Current version: …`, so logging the whole buffer made every
+            // run — upgraded or not — read as a bare version line (#199).
+            let last_line = stdout.lines().last().unwrap_or(stdout);
             if exit_code != 0 {
                 tracing::error!(
                     agent = %agent_name,
                     exit_code,
-                    output = %stdout,
+                    output = %last_line,
                     "claude upgrade exited non-zero"
                 );
             } else if stdout.contains("Successfully updated") {
-                tracing::info!(agent = %agent_name, output = %stdout, "claude upgraded");
+                tracing::info!(agent = %agent_name, output = %last_line, "claude upgraded");
             } else if claude_upgrade_up_to_date(stdout) || stdout.contains("already") {
                 tracing::info!(agent = %agent_name, "claude is up to date");
             } else {
-                tracing::info!(agent = %agent_name, output = %stdout, "claude upgrade completed");
+                tracing::info!(agent = %agent_name, output = %last_line, "claude upgrade completed");
             }
         }
         Err(e) => {
@@ -124,8 +129,13 @@ fn claude_upgrade_success(exit: i32, stdout: &str) -> bool {
     exit == 0 || (exit == 1 && claude_upgrade_up_to_date(stdout))
 }
 
+/// True only when the CLI reported the current version and made no update
+/// attempt. Every `claude upgrade` run prints `Current version: …` first —
+/// matching on that alone classifies a real update as "up to date" (#199).
 fn claude_upgrade_up_to_date(stdout: &str) -> bool {
     stdout.contains("Current version")
+        && !stdout.contains("Updating to")
+        && !stdout.contains("Successfully updated")
 }
 
 #[cfg(test)]
@@ -205,5 +215,24 @@ mod tests {
     #[tokio::test]
     async fn claude_upgrade_rejects_unrelated_exit_one() {
         assert!(!super::claude_upgrade_success(1, "network failed"));
+    }
+
+    #[test]
+    fn up_to_date_requires_no_update_attempt() {
+        // A genuine up-to-date output.
+        assert!(super::claude_upgrade_up_to_date(
+            "Current version: 2.1.241\n\nClaude Code is up to date\n"
+        ));
+        // An output that both names the current version AND performs an
+        // update must never classify as up-to-date.
+        assert!(!super::claude_upgrade_up_to_date(
+            "Current version: 2.1.234\n\
+             Checking for updates to latest version...\n\
+             Updating to 2.1.241...\n\
+             Successfully updated from 2.1.234 to version 2.1.241\n"
+        ));
+        assert!(!super::claude_upgrade_up_to_date(
+            "Current version: 2.1.234\nUpdating to 2.1.241...\n"
+        ));
     }
 }
