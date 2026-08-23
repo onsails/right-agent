@@ -75,12 +75,15 @@ configuration. A request to a bypassed host is forwarded verbatim, which
 means the opaque placeholder reaches the upstream and the API rejects it
 (typically `401`). The real credential is never exposed.
 
-**Substitution is keyed by env-var name, not by the owning provider.** A
-placeholder is resolved on any intercepted destination in the binding's
-allowed-host set; nothing checks that the destination belongs to the provider
-that owns the credential. Do not rely on a provider's declared hosts to
-confine a credential across an agent's own providers. Tracked in
-onsails/right-agent#92.
+**Cross-provider substitution is impossible under microsandbox.** The SDK
+builds a per-connection `SecretsHandler` from the destination SNI; only
+bindings whose `allowed_hosts` match that SNI enter the substitution list
+(`microsandbox-network` `lib/secrets/handler.rs`). A placeholder sent to a
+host its binding does not allow is not substituted — the connection is
+dropped with `BlockAndLog`. This was verified against the pinned 0.6.10 SDK
+source (and its own tests) when closing onsails/right-agent#92, whose
+cross-provider leak was an OpenShell-era property and does not reproduce
+under microsandbox.
 
 Because the SDK keys substitution by guest env var, an agent may declare at
 most one provider per env var. Reconciliation rejects duplicate identities
@@ -242,8 +245,9 @@ kept for already-provisioned records.
 **One provider, not a toggle.** Providers are a credential-injection
 mechanism, not a read/write boundary, so there is no read/write toggle.
 Credential confinement (a token reaching only its own provider's hosts) is
-**not** enforced at runtime — substitution is keyed by env-var name, an
-accepted limitation tracked in `onsails/right-agent#92`.
+enforced at runtime by the SDK's per-SNI host gate (see "Placeholder
+substitution" above); `onsails/right-agent#92` tracked the OpenShell-era
+gap and is closed.
 
 **`right-fal`** covers fal.ai's authenticated API hosts only (`fal.run`,
 `queue.fal.run`, `rest.fal.ai`). Output-media CDN and upload targets are

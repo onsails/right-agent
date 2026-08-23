@@ -711,8 +711,9 @@ lives in the backend; the UI optimizes for user clarity.
   secret intercepts every destination on the intercepted ports except
   `TLS_BYPASS_HOSTS`. Adding a host to that list removes interception
   from it — treat the list as security-relevant inventory (ADR-0003).
-- **Substitution is keyed by env-var name**, not by the owning provider's
-  hosts, so a declared provider's hosts do not confine its credential.
+- **Substitution is per-SNI host-gated**: the SDK substitutes a placeholder
+  only on connections whose SNI matches its binding's `allowed_hosts`;
+  cross-provider substitution is impossible (#92, OpenShell-era, closed).
 - CC actively manages `.claude.json` — it strips unknown project trust
   entries on startup. Use `--dangerously-skip-permissions` instead of
   relying on trust entries.
