@@ -90,11 +90,28 @@ async fn save_token(agent_dir: &Path, token: &str) -> Result<(), String> {
 ///
 /// `agent_dir` is the agent directory (data.db lives inside it).
 pub(crate) async fn load_auth_token(agent_dir: &Path) -> Option<String> {
-    let conn = right_db::open_connection(agent_dir, false).await.ok()?;
-    right_mcp::credentials::get_auth_token(&conn)
-        .await
-        .ok()
-        .flatten()
+    let conn = match right_db::open_connection(agent_dir, false).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(
+                agent_dir = %agent_dir.display(),
+                error = format!("{e:#}"),
+                "load_auth_token: DB open failed; CC invocation will run without CLAUDE_CODE_OAUTH_TOKEN"
+            );
+            return None;
+        }
+    };
+    match right_mcp::credentials::get_auth_token(&conn).await {
+        Ok(token) => token,
+        Err(e) => {
+            tracing::warn!(
+                agent_dir = %agent_dir.display(),
+                error = format!("{e:#}"),
+                "load_auth_token: auth_tokens query failed; CC invocation will run without CLAUDE_CODE_OAUTH_TOKEN"
+            );
+            None
+        }
+    }
 }
 
 /// Instruction message sent to user when auth is needed.

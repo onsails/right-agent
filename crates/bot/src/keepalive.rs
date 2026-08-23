@@ -671,6 +671,7 @@ async fn run_health_probe(health: &McpInitHealth) -> Result<HealthProbeOutcome, 
 
     let mut init_outcome = HealthProbeOutcome::NoInit;
     let mut killed_for_repair = false;
+    let mut stdout_tail: Vec<String> = Vec::new();
     while let Some(line) = lines
         .next_line()
         .await
@@ -684,6 +685,13 @@ async fn run_health_probe(health: &McpInitHealth) -> Result<HealthProbeOutcome, 
             }
             break;
         }
+        stdout_tail.push(line);
+    }
+    // Keep draining after the init line: CC emits the rate-limit markers
+    // (`rate_limit_event` / result envelope with `api_error_status`) after
+    // init, and exits 1 on a weekly-limit rejection even when MCP connected.
+    while let Ok(Some(line)) = lines.next_line().await {
+        stdout_tail.push(line);
     }
 
     if killed_for_repair {
@@ -699,15 +707,74 @@ async fn run_health_probe(health: &McpInitHealth) -> Result<HealthProbeOutcome, 
             .await
             .map_err(|e| format!("wait failed: {e:#}"))?;
         if code != 0 {
-            // Failure diagnostics carry the exit code AND a bounded stderr
-            // excerpt: the CLI writes the actual reason (auth, MCP, flags) to
-            // stderr, and an exit code alone reruns the #186 guessing game.
+            // Failure diagnostics carry the exit code AND bounded excerpts:
+            // the CLI writes the actual reason (auth, MCP, flags) to stderr,
+            // and the rate-limit result envelope lives on stdout — an exit
+            // code alone reruns the #186 guessing game.
             let stderr_tail = drain_probe_stderr(&mut child).await;
-            return Err(format!("exit code: {code}; stderr tail: {stderr_tail}"));
+            probe_exit_verdict_with_stderr(code, &stdout_tail, &stderr_tail)?;
         }
     }
 
     Ok(init_outcome)
+}
+
+/// True when the probe's post-init stdout carries an authenticated
+/// rate-limit rejection: a `rate_limit_event` with status `rejected`, or a
+/// result envelope with `api_error_status` 429. Mirrors the
+/// `AuthenticatedRateLimitRejection` acceptance in
+/// `parse_init_auth_probe_success` — a weekly-limit 429 proves the
+/// credential authenticated and must not be reported as a probe failure.
+fn probe_tail_is_authenticated_rate_limit(lines: &[String]) -> bool {
+    lines.iter().any(|line| {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        let rate_limit_rejected = event.get("type").and_then(serde_json::Value::as_str)
+            == Some("rate_limit_event")
+            && event
+                .get("rate_limit_info")
+                .and_then(|info| info.get("status"))
+                .and_then(serde_json::Value::as_str)
+                == Some("rejected");
+        let result_429 = event.get("type").and_then(serde_json::Value::as_str) == Some("result")
+            && event
+                .get("api_error_status")
+                .and_then(serde_json::Value::as_i64)
+                == Some(429);
+        rate_limit_rejected || result_429
+    })
+}
+
+/// Exit-code verdict for a finished (not killed) health probe.
+///
+/// A non-zero exit with an authenticated rate-limit rejection in the stdout
+/// tail is healthy — the probe answered its question (MCP connected or not)
+/// before the weekly limit cut the turn. Any other non-zero exit stays an
+/// error, carrying both the stderr and stdout tails so `Not logged in` and
+/// rate-limit envelopes are distinguishable in the logs.
+fn probe_exit_verdict(code: i32, stdout_lines: &[String]) -> Result<(), String> {
+    probe_exit_verdict_with_stderr(code, stdout_lines, "")
+}
+
+fn probe_exit_verdict_with_stderr(
+    code: i32,
+    stdout_lines: &[String],
+    stderr_tail: &str,
+) -> Result<(), String> {
+    if probe_tail_is_authenticated_rate_limit(stdout_lines) {
+        return Ok(());
+    }
+    let stdout_tail = stdout_lines_excerpt(stdout_lines);
+    Err(format!(
+        "exit code: {code}; stderr tail: {stderr_tail}; stdout tail: {stdout_tail}"
+    ))
+}
+
+/// Bounded tail excerpt of the probe's raw stdout lines for diagnostics.
+fn stdout_lines_excerpt(lines: &[String]) -> String {
+    let joined = lines.join("\n");
+    stderr_excerpt(joined.as_bytes())
 }
 
 /// Bounded drain of the probe's stderr after guest exit, as a tail excerpt.
@@ -884,6 +951,54 @@ mod tests {
             stderr: Vec::new(),
         };
 
+        #[test]
+        fn probe_tail_detects_authenticated_rate_limit_rejection() {
+            const RATE_LIMIT: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day"}}"#;
+            const RESULT_429: &str = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You've hit your weekly limit"}"#;
+            const NOT_LOGGED_IN: &str = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;
+            const ECHO: &str = r#"{"type":"assistant","message":{"content":[]}}"#;
+
+            // rate_limit_event marker alone
+            assert!(probe_tail_is_authenticated_rate_limit(&[
+                RATE_LIMIT.to_owned(),
+                RESULT_429.to_owned(),
+            ]));
+            // api_error_status 429 marker alone
+            assert!(probe_tail_is_authenticated_rate_limit(&[
+                RESULT_429.to_owned()
+            ]));
+            // markers must survive interleaved noise lines
+            assert!(probe_tail_is_authenticated_rate_limit(&[
+                ECHO.to_owned(),
+                RATE_LIMIT.to_owned(),
+            ]));
+            // genuine auth failure must NOT be masked
+            assert!(!probe_tail_is_authenticated_rate_limit(&[
+                NOT_LOGGED_IN.to_owned()
+            ]));
+            assert!(!probe_tail_is_authenticated_rate_limit(&[]));
+            assert!(!probe_tail_is_authenticated_rate_limit(&[
+                "not-json".to_owned()
+            ]));
+        }
+
+        #[test]
+        fn probe_exit_verdict_accepts_authenticated_rate_limit_exit_one() {
+            const RATE_LIMIT: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day"}}"#;
+            const RESULT_429: &str = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You've hit your weekly limit"}"#;
+
+            assert!(probe_exit_verdict(1, &[RATE_LIMIT.to_owned(), RESULT_429.to_owned()]).is_ok());
+        }
+
+        #[test]
+        fn probe_exit_verdict_keeps_nonzero_exit_failure_with_stdout_tail() {
+            const NOT_LOGGED_IN: &str = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;
+
+            let err = probe_exit_verdict(1, &[NOT_LOGGED_IN.to_owned()])
+                .expect_err("non-429 nonzero exit must stay a failure");
+            assert!(err.contains("exit code: 1"), "{err}");
+            assert!(err.contains("Not logged in"), "{err}");
+        }
         assert!(init_auth_verdict(output).is_err());
     }
 
