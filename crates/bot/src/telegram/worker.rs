@@ -401,6 +401,32 @@ pub struct WorkerContext {
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
+enum RuntimeAuthDecision {
+    InvokeCc,
+    StartTokenRequest,
+    ReplyDataUnavailable {
+        message: &'static str,
+        error: anyhow::Error,
+    },
+}
+
+fn decide_runtime_auth_status(
+    status: anyhow::Result<crate::keepalive::RuntimeAuthStatus>,
+) -> RuntimeAuthDecision {
+    match status {
+        Ok(crate::keepalive::RuntimeAuthStatus::Valid) => RuntimeAuthDecision::InvokeCc,
+        Ok(crate::keepalive::RuntimeAuthStatus::Missing)
+        | Ok(crate::keepalive::RuntimeAuthStatus::Invalid) => {
+            RuntimeAuthDecision::StartTokenRequest
+        }
+        Err(error) => RuntimeAuthDecision::ReplyDataUnavailable {
+            message: "⚠️ This agent's local data storage is unavailable, so I can't process this message. Please try again.",
+            error,
+        },
+    }
+}
+
+#[derive(Debug)]
 enum BootstrapVerification {
     Verified,
     AnswersMissing,
@@ -2531,10 +2557,11 @@ pub fn spawn_worker(
 
             // Check only local token presence and syntax before session preparation.
             // The foreground turn itself is the sole runtime API validator.
-            match crate::keepalive::runtime_auth_status(&ctx.agent_db_dir).await {
-                Ok(crate::keepalive::RuntimeAuthStatus::Valid) => {}
-                Ok(crate::keepalive::RuntimeAuthStatus::Missing)
-                | Ok(crate::keepalive::RuntimeAuthStatus::Invalid) => {
+            match decide_runtime_auth_status(
+                crate::keepalive::runtime_auth_status(&ctx.agent_db_dir).await,
+            ) {
+                RuntimeAuthDecision::InvokeCc => {}
+                RuntimeAuthDecision::StartTokenRequest => {
                     if let Err(error) = start_token_request(&ctx, tg_chat_id, eff_thread_id).await {
                         tracing::warn!(
                             ?key,
@@ -2545,17 +2572,18 @@ pub fn spawn_worker(
                     typing_task.await.ok();
                     continue;
                 }
-                Err(error) => {
+                RuntimeAuthDecision::ReplyDataUnavailable { message, error } => {
                     tracing::error!(?key, "Claude authentication status check failed: {error:#}");
                     cancel_token.cancel();
                     typing_task.await.ok();
-                    let _ = send_tg(
-                        &ctx.bot,
-                        tg_chat_id,
-                        eff_thread_id,
-                        "⚠️ Claude authentication could not be checked because the credential store is unavailable. Please try again.",
-                    )
-                    .await;
+                    if let Err(send_error) =
+                        send_tg(&ctx.bot, tg_chat_id, eff_thread_id, message).await
+                    {
+                        tracing::warn!(
+                            ?key,
+                            "failed to send agent-data-unavailable reply: {send_error:#}"
+                        );
+                    }
                     continue;
                 }
             }
@@ -5883,6 +5911,46 @@ async fn send_error_to_telegram_inner(
 mod tests {
     use super::super::session::deactivate_current;
     use super::*;
+
+    #[tokio::test]
+    async fn runtime_auth_database_failure_replies_about_agent_data_without_starting_auth_or_cc() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_agent_dir = temp.path().join("missing-agent");
+
+        let decision = decide_runtime_auth_status(
+            crate::keepalive::runtime_auth_status(&missing_agent_dir).await,
+        );
+
+        let RuntimeAuthDecision::ReplyDataUnavailable { message, error } = decision else {
+            panic!("database-open failure must produce one Telegram reply, not CC or token flow");
+        };
+        assert!(
+            format!("{error:#}")
+                .contains("open agent database for runtime Claude authentication status"),
+            "the logged error must preserve its context chain: {error:#}"
+        );
+        assert!(
+            message.contains("agent's local data storage is unavailable"),
+            "reply must identify the agent-local storage failure: {message}"
+        );
+        assert!(
+            message.contains("process this message"),
+            "reply must explain that the message was not processed: {message}"
+        );
+        let lower = message.to_ascii_lowercase();
+        for forbidden in [
+            "credential",
+            "authentication",
+            "authenticate",
+            "re-auth",
+            "token",
+        ] {
+            assert!(
+                !lower.contains(forbidden),
+                "reply must not imply that the user needs to authenticate ({forbidden}): {message}"
+            );
+        }
+    }
 
     #[test]
     fn bootstrap_effective_input_ignores_all_volatile_content() {
