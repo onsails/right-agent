@@ -46,8 +46,8 @@ pub(crate) struct BringUpCtx<'a> {
     pub providers: &'a ProviderStore,
 }
 
-/// Successful bring-up. `initial_sync` + `reverse_sync_md` have already
-/// completed, so the sandbox is fully Ready.
+/// Successful bring-up. `initial_sync`, effective Claude validation, and
+/// `reverse_sync_md` have already completed, so the sandbox is fully Ready.
 pub(crate) struct SandboxBringUp {
     /// The live sandbox handle every consumer shares.
     pub sandbox: Sandbox,
@@ -69,6 +69,15 @@ fn retryable_sync_diagnosis(error: &miette::Report) -> Option<SandboxDiagnosis> 
     error
         .downcast_ref::<crate::claude_runtime::ClaudeRuntimeError>()
         .filter(|runtime| runtime.is_retryable())
+        .map(|_| SandboxCause::Unreachable.diagnose())
+}
+
+fn retryable_upgrade_diagnosis(
+    error: &crate::upgrade::StartupUpgradeError,
+) -> Option<SandboxDiagnosis> {
+    error
+        .sandbox_error()
+        .and_then(SandboxError::cause)
         .map(|_| SandboxCause::Unreachable.diagnose())
 }
 
@@ -309,13 +318,14 @@ async fn sandbox_spec(ctx: &BringUpCtx<'_>) -> miette::Result<SandboxSpec> {
 /// Bring the Agent Sandbox up.
 ///
 /// Returns:
-/// - `Ok(Ok(SandboxBringUp))` — Ready; initial + reverse-mirror sync done.
+/// - `Ok(Ok(SandboxBringUp))` — Ready; initial sync, effective Claude
+///   validation, and reverse-mirror sync done.
 /// - `Ok(Err(diagnosis))` — operator-fixable availability problem. The caller
 ///   MUST degrade to this rather than a hard `Err` for anything self-healing:
 ///   a hard `Err` lands on `recovery_step`'s `Err => Break` arm and
 ///   permanently stops auto-recovery.
 /// - `Err(_)` — genuine, non-self-healing error (unbindable provider, invalid
-///   spec, sync failure).
+///   spec, deterministic sync or Claude readiness failure).
 pub(crate) async fn bring_up_sandbox(
     ctx: &BringUpCtx<'_>,
 ) -> miette::Result<Result<SandboxBringUp, SandboxDiagnosis>> {
@@ -360,6 +370,13 @@ pub(crate) async fn bring_up_sandbox(
             return Ok(Err(diagnosis));
         }
         return Err(error);
+    }
+    if let Err(error) = crate::upgrade::run_startup_upgrade(&sandbox, ctx.agent).await {
+        if let Some(diagnosis) = retryable_upgrade_diagnosis(&error) {
+            tracing::warn!(agent = %ctx.agent, error = %format!("{error:#}"), "transient Claude readiness failure");
+            return Ok(Err(diagnosis));
+        }
+        return Err(error.into());
     }
     if let Err(e) = sync::reverse_sync_md(ctx.agent_dir, &sandbox).await {
         tracing::warn!(

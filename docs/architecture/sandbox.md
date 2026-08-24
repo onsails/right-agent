@@ -80,6 +80,9 @@ Bot startup (bring_up_sandbox, crates/bot/src/sandbox_supervisor.rs):
   │   └─ Host-download and verify pinned Claude Code, upload it to a unique
   │       root-owned `/opt/right/claude/` target, then atomically activate
   │       `/opt/right/bin/claude`; agent-owned `/sandbox/.platform` is irrelevant
+  ├─ run_startup_upgrade — invoke the effective `claude` through the managed
+  │   PATH; transport failures degrade and retry, while deterministic command
+  │   failures are hard, and neither path publishes Ready
   └─ reverse_sync_md — startup identity mirror (advisory: logged, not fatal)
 
 Create-time state:
@@ -192,10 +195,11 @@ single bring-up attempt) is the sole writer of `SandboxRuntimeHandle` after
 startup:
 
 - **Recovery loop:** retries `bring_up_sandbox` with a fixed backoff schedule
-  of 5 → 10 → 15 → 15 → 30 s (last value repeats). On success it calls
-  `handle.set_ready(sandbox)`, spawns the background sync task, and sends a
-  "✅ Sandbox back online" notice to every chat that received an
-  unavailability message during the outage.
+  of 5 → 10 → 15 → 15 → 30 s (last value repeats). Bring-up stages the pinned
+  runtime and validates/upgrades the effective `claude` before it can succeed;
+  only then does recovery call `handle.set_ready(sandbox)`, spawn the background
+  sync task, and send a "✅ Sandbox back online" notice to every chat that
+  received an unavailability message during the outage.
 - **Monitor mode:** when `Ready`, the supervisor waits for a failure report or
   shutdown. Worker, keepalive, and periodic sync failures all call
   `SandboxRuntimeHandle::report_suspected_failure()`; the supervisor verifies

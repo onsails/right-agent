@@ -41,17 +41,43 @@ fn claude_upgrade_request() -> ExecRequest {
     }
 }
 
+/// Failure of the startup readiness gate, preserving whether the sandbox
+/// transport failed or the effective Claude executable ran unsuccessfully.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StartupUpgradeError {
+    #[error("startup Claude upgrade failed: execute claude upgrade in sandbox")]
+    Sandbox(#[source] right_sandbox::SandboxError),
+    #[error("startup Claude upgrade failed: {0:#}")]
+    Command(miette::Report),
+}
+
+impl miette::Diagnostic for StartupUpgradeError {}
+
+impl StartupUpgradeError {
+    pub(crate) fn sandbox_error(&self) -> Option<&right_sandbox::SandboxError> {
+        match self {
+            Self::Sandbox(error) => Some(error),
+            Self::Command(_) => None,
+        }
+    }
+}
+
 /// Run a single upgrade attempt as a startup readiness gate.
 ///
 /// `initial_sync` first stages a pinned root-owned fallback. This attempt is
 /// nevertheless hard at startup because the guest-owned `.local` binary has
 /// precedence: a failed invocation means the effective Claude executable was
 /// not proven usable. Periodic attempts remain advisory and retry on later ticks.
-/// Called before cron/telegram tasks exist — no lock needed.
-pub(crate) async fn run_startup_upgrade(sandbox: &Sandbox, agent_name: &str) -> miette::Result<()> {
-    run_upgrade(sandbox, agent_name)
+pub(crate) async fn run_startup_upgrade(
+    sandbox: &Sandbox,
+    agent_name: &str,
+) -> Result<(), StartupUpgradeError> {
+    tracing::info!(agent = %agent_name, "checking for claude upgrade");
+    let outcome = sandbox
+        .exec(&claude_upgrade_request())
         .await
-        .map_err(|error| error.wrap_err("startup Claude upgrade failed"))
+        .map_err(StartupUpgradeError::Sandbox)?;
+    finish_upgrade_attempt(agent_name, Ok(outcome)).map_err(StartupUpgradeError::Command)
 }
 
 /// Spawn a background task that periodically runs `claude upgrade` in the sandbox.
