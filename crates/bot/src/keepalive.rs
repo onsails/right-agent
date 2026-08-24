@@ -4,13 +4,14 @@
 //! Runs every hour (default). Uses haiku model with max-turns=1 and strict MCP
 //! config, then inspects the `system/init` event for Right MCP connectivity.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
 /// Default interval between keepalive pings.
@@ -19,8 +20,6 @@ const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 const REPAIR_OPERATION_TIMEOUT: Duration = Duration::from_secs(180);
 /// Char bound for the stderr excerpt included in probe failure diagnostics.
 const STDERR_EXCERPT_CHARS: usize = 2 * 1024;
-/// Bound for the post-exit stderr drain; guards a wedged transport pipe.
-const PROBE_STDERR_TIMEOUT: Duration = Duration::from_secs(2);
 
 const HEALTH_PROMPT: &str = "Reply exactly OK. Do not use tools.";
 
@@ -659,61 +658,94 @@ async fn run_health_probe(health: &McpInitHealth) -> Result<HealthProbeOutcome, 
     let args = health_probe_invocation(crate::sandbox::SANDBOX_MCP_JSON_PATH).into_args();
     let mut child = crate::cc::invocation::build_claude_command(&args, &health.agent_dir, &sandbox)
         .await
+        .map_err(|e| format!("build health probe command: {e:#}"))?
         .stdout(crate::cc::sandbox_process::Capture::Pipe)
         .stderr(crate::cc::sandbox_process::Capture::Pipe)
         .spawn()
         .await
         .map_err(|e| format!("spawn failed: {e:#}"))?;
-    let stdout = child
-        .stdout()
-        .ok_or_else(|| "health probe missing stdout".to_string())?;
+
+    // Take both pipes before reading either one. The sandbox event pump writes
+    // them sequentially, so leaving stderr unread while waiting for stdout can
+    // fill stderr's bounded pipe and prevent the pump from delivering stdout
+    // or the process exit.
+    let stderr = child.stderr();
+    let stdout = child.stdout();
+    let Some(stderr) = stderr else {
+        drop(stdout);
+        child.kill().await;
+        child
+            .wait()
+            .await
+            .map_err(|e| format!("wait after missing stderr failed: {e:#}"))?;
+        return Err("health probe missing stderr".to_owned());
+    };
+    let stderr_drain = spawn_probe_stderr_drain(stderr);
+    let Some(stdout) = stdout else {
+        child.kill().await;
+        let wait_result = child
+            .wait()
+            .await
+            .map_err(|e| format!("wait after missing stdout failed: {e:#}"));
+        let stderr_result = await_probe_stderr(stderr_drain).await;
+        stderr_result?;
+        wait_result?;
+        return Err("health probe missing stdout".to_owned());
+    };
     let mut lines = tokio::io::BufReader::new(stdout).lines();
 
     let mut init_outcome = HealthProbeOutcome::NoInit;
     let mut killed_for_repair = false;
     let mut stdout_tail: Vec<String> = Vec::new();
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(|e| format!("stdout read failed: {e:#}"))?
-    {
-        if let Some(status) = crate::cc::stream::parse_right_mcp_init_status(&line) {
-            init_outcome = classify_init_status(status);
-            if matches!(init_outcome, HealthProbeOutcome::NeedsRepair { .. }) {
-                child.kill().await;
-                killed_for_repair = true;
-            }
-            break;
-        }
-        stdout_tail.push(line);
-    }
-    // Keep draining after the init line: CC emits the rate-limit markers
-    // (`rate_limit_event` / result envelope with `api_error_status`) after
-    // init, and exits 1 on a weekly-limit rejection even when MCP connected.
-    while let Ok(Some(line)) = lines.next_line().await {
-        stdout_tail.push(line);
-    }
-
-    if killed_for_repair {
-        if let Err(e) = child.wait().await {
-            tracing::warn!(
-                agent = %health.agent_name,
-                "right_mcp_init: failed to wait unhealthy probe: {e:#}"
-            );
-        }
-    } else {
-        let code = child
-            .wait()
+    let stdout_result = async {
+        while let Some(line) = lines
+            .next_line()
             .await
-            .map_err(|e| format!("wait failed: {e:#}"))?;
-        if code != 0 {
-            // Failure diagnostics carry the exit code AND bounded excerpts:
-            // the CLI writes the actual reason (auth, MCP, flags) to stderr,
-            // and the rate-limit result envelope lives on stdout — an exit
-            // code alone reruns the #186 guessing game.
-            let stderr_tail = drain_probe_stderr(&mut child).await;
-            probe_exit_verdict_with_stderr(code, &stdout_tail, &stderr_tail)?;
+            .map_err(|e| format!("stdout read failed: {e:#}"))?
+        {
+            if let Some(status) = crate::cc::stream::parse_right_mcp_init_status(&line) {
+                init_outcome = classify_init_status(status);
+                if matches!(init_outcome, HealthProbeOutcome::NeedsRepair { .. }) {
+                    child.kill().await;
+                    killed_for_repair = true;
+                }
+                break;
+            }
+            stdout_tail.push(line);
         }
+        // Keep draining after the init line: CC emits the rate-limit markers
+        // (`rate_limit_event` / result envelope with `api_error_status`) after
+        // init, and exits 1 on a weekly-limit rejection even when MCP connected.
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .map_err(|e| format!("stdout read failed: {e:#}"))?
+        {
+            stdout_tail.push(line);
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if stdout_result.is_err() {
+        child.kill().await;
+    }
+    let wait_result = child
+        .wait()
+        .await
+        .map_err(|e| format!("wait failed: {e:#}"));
+    let stderr_result = await_probe_stderr(stderr_drain).await;
+
+    // Complete both pipe drains before returning any failure so no read task
+    // is detached and every pipe error remains observable.
+    stdout_result?;
+    let stderr_tail = stderr_result?;
+    let code = wait_result?;
+    if !killed_for_repair && code != 0 {
+        // Failure diagnostics carry the exit code AND bounded excerpts: the
+        // CLI writes the actual reason (auth, MCP, flags) to stderr, and the
+        // rate-limit result envelope lives on stdout.
+        probe_exit_verdict_with_stderr(code, &stdout_tail, &stderr_tail)?;
     }
 
     Ok(init_outcome)
@@ -777,24 +809,52 @@ fn stdout_lines_excerpt(lines: &[String]) -> String {
     stderr_excerpt(joined.as_bytes())
 }
 
-/// Bounded drain of the probe's stderr after guest exit, as a tail excerpt.
-///
-/// The pump closes the stderr writer on exit, so the read normally hits EOF;
-/// the timeout only guards a wedged transport pipe from stalling the cycle.
-async fn drain_probe_stderr(child: &mut crate::cc::sandbox_process::SandboxChild) -> String {
-    let Some(mut stderr) = child.stderr() else {
-        return String::new();
-    };
-    let mut buf = Vec::new();
-    match tokio::time::timeout(PROBE_STDERR_TIMEOUT, stderr.read_to_end(&mut buf)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::debug!("right_mcp_init: stderr drain read failed: {e:#}"),
-        Err(_) => tracing::debug!(
-            "right_mcp_init: stderr drain timed out after {:?} (transport keeps the pipe open; benign)",
-            PROBE_STDERR_TIMEOUT
-        ),
+/// Drain stderr concurrently, retaining only the bounded diagnostic tail.
+fn spawn_probe_stderr_drain<R>(stderr: R) -> tokio::task::JoinHandle<Result<String, String>>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+{
+    tokio::spawn(drain_probe_stderr(stderr))
+}
+
+async fn await_probe_stderr(
+    drain: tokio::task::JoinHandle<Result<String, String>>,
+) -> Result<String, String> {
+    drain
+        .await
+        .map_err(|e| format!("stderr drain task failed: {e:#}"))?
+}
+
+async fn drain_probe_stderr<R>(mut stderr: R) -> Result<String, String>
+where
+    R: AsyncRead + Unpin,
+{
+    // Four bytes per diagnostic character is enough to retain the complete
+    // UTF-8 tail while keeping memory fixed even when the guest floods stderr.
+    const TAIL_BYTES: usize = STDERR_EXCERPT_CHARS * 4;
+    const READ_BYTES: usize = 8 * 1024;
+
+    let mut tail = VecDeque::with_capacity(TAIL_BYTES);
+    let mut chunk = [0_u8; READ_BYTES];
+    loop {
+        let read = stderr
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("stderr read failed: {e:#}"))?;
+        if read == 0 {
+            break;
+        }
+        if read >= TAIL_BYTES {
+            tail.clear();
+            tail.extend(&chunk[read - TAIL_BYTES..read]);
+            continue;
+        }
+        let overflow = tail.len().saturating_add(read).saturating_sub(TAIL_BYTES);
+        tail.drain(..overflow);
+        tail.extend(&chunk[..read]);
     }
-    stderr_excerpt(&buf)
+    let bytes: Vec<u8> = tail.into_iter().collect();
+    Ok(stderr_excerpt(&bytes))
 }
 
 /// Tail excerpt of the probe's stderr, lossy-decoded and char-bounded.
@@ -810,6 +870,7 @@ fn stderr_excerpt(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt as _;
 
     #[tokio::test]
     async fn default_interval_is_one_hour() {
@@ -850,6 +911,81 @@ mod tests {
     fn stderr_excerpt_lossy_on_invalid_utf8() {
         let excerpt = stderr_excerpt(&[0xff, 0xfe, b'!']);
         assert!(excerpt.ends_with('!'));
+    }
+
+    #[tokio::test]
+    async fn probe_stderr_drain_prevents_full_pipe_deadlock_and_keeps_bounded_tail() {
+        const STDERR_BYTES: usize = 300 * 1024;
+        const STDERR_SENTINEL: &[u8] = b"stderr-tail-sentinel";
+        const INIT: &[u8] =
+            b"{\"type\":\"system\",\"subtype\":\"init\",\"mcp_servers\":[{\"name\":\"right\",\"status\":\"connected\"}]}\n";
+        const RATE_LIMIT: &[u8] =
+            b"{\"type\":\"result\",\"is_error\":true,\"api_error_status\":429}\n";
+
+        const TEST_PIPE_BYTES: usize = 64 * 1024;
+        let (stderr_writer, stderr_reader) = tokio::io::duplex(TEST_PIPE_BYTES);
+        let mut stderr_writer = stderr_writer;
+        let stderr_drain = spawn_probe_stderr_drain(stderr_reader);
+        let (output_tx, output_rx) = tokio::sync::oneshot::channel();
+        let producer = tokio::spawn(async move {
+            let write_result = async {
+                let chunk = [b'x'; 8 * 1024];
+                for _ in 0..(STDERR_BYTES / chunk.len()) {
+                    stderr_writer.write_all(&chunk).await?;
+                }
+                stderr_writer.write_all(STDERR_SENTINEL).await?;
+                Ok::<_, std::io::Error>(())
+            }
+            .await;
+            drop(stderr_writer);
+            output_tx
+                .send((write_result, INIT, RATE_LIMIT))
+                .expect("output receiver must remain alive");
+        });
+
+        let completed = tokio::time::timeout(Duration::from_secs(2), async {
+            let (write_result, init, rate_limit) = output_rx.await.expect("fixture output");
+            write_result?;
+            producer.await.expect("producer task");
+            let stderr_tail = await_probe_stderr(stderr_drain)
+                .await
+                .expect("stderr drain");
+            Ok::<_, std::io::Error>((
+                String::from_utf8_lossy(init).trim().to_owned(),
+                String::from_utf8_lossy(rate_limit).trim().to_owned(),
+                stderr_tail,
+            ))
+        })
+        .await
+        .expect("concurrent drain must prevent the full stderr pipe from deadlocking")
+        .expect("fixture I/O");
+
+        assert!(crate::cc::stream::parse_right_mcp_init_status(&completed.0).is_some());
+        assert!(probe_tail_is_authenticated_rate_limit(&[completed.1]));
+        assert!(completed.2.ends_with("stderr-tail-sentinel"));
+        assert!(completed.2.chars().count() <= STDERR_EXCERPT_CHARS);
+    }
+
+    struct FailingProbeReader;
+
+    impl tokio::io::AsyncRead for FailingProbeReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("injected read failure")))
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_stderr_drain_propagates_read_failure() {
+        let error = drain_probe_stderr(FailingProbeReader)
+            .await
+            .expect_err("stderr read errors must propagate");
+
+        assert!(error.contains("stderr read failed"), "{error}");
+        assert!(error.contains("injected read failure"), "{error}");
     }
 
     #[test]

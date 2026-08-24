@@ -7,7 +7,7 @@ use tempfile::NamedTempFile;
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 
-use crate::sandbox::{Sandbox, exec_argv, upload_into_dir};
+use crate::sandbox::{Sandbox, exec_argv, exec_argv_as_guest, upload_into_dir};
 use crate::sandbox_runtime::SandboxRuntimeHandle;
 
 /// Interval between sync cycles.
@@ -479,7 +479,7 @@ async fn ensure_sandbox_user_local_env(agent_dir: &Path, sbox: &Sandbox) -> miet
     };
     let env_content = shell_printf_b_arg(&env_file_content(&agent_env));
     let write_script = sandbox_env_setup_script(&env_content);
-    let (output, code) = exec_argv(sbox, &["bash", "-lc", &write_script]).await?;
+    let (output, code) = exec_argv_as_guest(sbox, &["bash", "-lc", &write_script]).await?;
     if code != 0 {
         return Err(miette::miette!(
             "sync: failed to write {SANDBOX_ENV_PATH} in {}: bash exited with {code}: {output}",
@@ -520,13 +520,17 @@ async fn ensure_sandbox_user_local_env(agent_dir: &Path, sbox: &Sandbox) -> miet
     Ok(())
 }
 fn sandbox_env_setup_script(env_content: &str) -> String {
-    let user = right_sandbox::GUEST_USER;
     format!(
-        "mkdir -p {SANDBOX_ENV_DIR} {SANDBOX_LOCAL_BIN} {SANDBOX_NPM_CACHE} && \
-         chown {user}:{user} {SANDBOX_LOCAL_PREFIX} {SANDBOX_LOCAL_BIN} {SANDBOX_NPM_CACHE} && \
+        "for path in {SANDBOX_ENV_DIR} {SANDBOX_LOCAL_PREFIX} {SANDBOX_LOCAL_BIN} {SANDBOX_NPM_CACHE}; do \
+           if [ -L \"$path\" ] || {{ [ -e \"$path\" ] && [ ! -d \"$path\" ]; }}; then \
+             printf 'managed path is not a real directory: %s\\n' \"$path\" >&2; exit 1; \
+           fi; \
+         done; \
+         mkdir -p {SANDBOX_ENV_DIR} {SANDBOX_LOCAL_BIN} {SANDBOX_NPM_CACHE} && \
+         set -C && \
+         rm -f {SANDBOX_ENV_PATH}.tmp && \
          printf '%b' {env_content} > {SANDBOX_ENV_PATH}.tmp && \
          chmod 0644 {SANDBOX_ENV_PATH}.tmp && \
-         chown {user}:{user} {SANDBOX_ENV_PATH}.tmp && \
          mv -f {SANDBOX_ENV_PATH}.tmp {SANDBOX_ENV_PATH}"
     )
 }
@@ -633,23 +637,61 @@ mod tests {
         assert!(!content.contains("~/bin"));
     }
     #[test]
-    fn sandbox_env_setup_creates_user_local_dirs_before_env_is_sourced() {
+    fn sandbox_env_setup_creates_user_local_dirs_without_network_or_root_mutation() {
         let script = sandbox_env_setup_script("env body");
 
         assert!(
             script.contains("mkdir -p /sandbox/.right /sandbox/.local/bin /sandbox/.npm"),
             "fresh sandboxes need the user-local directories before any shell sources env.sh: {script}"
         );
+        assert!(script.contains("[ -L \"$path\" ]"));
+        assert!(script.contains("[ ! -d \"$path\" ]"));
         assert!(
-            script.contains(
-                "chown sandbox:sandbox /sandbox/.local /sandbox/.local/bin /sandbox/.npm"
-            ),
-            "user-local directories must be owned by the guest user: {script}"
+            script.contains("set -C"),
+            "temp creation must reject symlinks: {script}"
         );
         assert!(
-            !script.contains("apt-get") && !script.contains("curl"),
-            "startup setup must work without public guest egress: {script}"
+            !script.contains("chown") && !script.contains("apt-get") && !script.contains("curl"),
+            "guest setup must neither mutate ownership nor require public egress: {script}"
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_env_setup_rejects_managed_directory_symlinks_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+
+        for managed in [".right", ".local"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let sandbox = temp.path().join("sandbox");
+            let sentinel = temp.path().join("sentinel");
+            std::fs::create_dir(&sandbox).expect("sandbox dir");
+            std::fs::create_dir(&sentinel).expect("sentinel dir");
+            std::fs::write(sentinel.join("canary"), "unchanged").expect("sentinel canary");
+            symlink(&sentinel, sandbox.join(managed)).expect("managed symlink");
+
+            let script = sandbox_env_setup_script("'managed env'")
+                .replace("/sandbox", sandbox.to_str().expect("UTF-8 temp path"));
+            let output = Command::new("bash")
+                .args(["-c", &script])
+                .output()
+                .expect("run setup script");
+
+            assert!(
+                !output.status.success(),
+                "{managed} symlink must fail closed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                std::fs::read_to_string(sentinel.join("canary")).expect("read canary"),
+                "unchanged"
+            );
+            assert_eq!(
+                std::fs::read_dir(&sentinel).expect("list sentinel").count(),
+                1,
+                "setup created content through {managed} symlink"
+            );
+        }
     }
 
     #[test]
