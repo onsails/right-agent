@@ -1,7 +1,7 @@
 use super::{
     SupervisorDeps, agent_sandbox_spec_for, degrade_decision, diagnose, resolve_named_provider,
-    right_managed_secret_env_vars, right_managed_secret_env_vars_with, secret_bindings,
-    secret_bindings_with,
+    retryable_sync_diagnosis, right_managed_secret_env_vars, right_managed_secret_env_vars_with,
+    secret_bindings, secret_bindings_with,
 };
 use right_agent::agent::types::AgentConfig;
 use right_providers::{Credential, NewProvider, ProviderKind, ProviderStore};
@@ -39,6 +39,20 @@ fn a_command_level_failure_is_inconclusive_not_a_backend_verdict() {
     });
 
     assert_eq!(diagnosis.cause, SandboxCause::Unreachable);
+}
+
+#[test]
+fn transient_claude_acquisition_retries_but_invalid_config_remains_hard() {
+    let transient = miette::Report::new(crate::claude_runtime::ClaudeRuntimeError::Retryable(
+        miette::miette!("network timeout"),
+    ));
+    assert!(retryable_sync_diagnosis(&transient).is_some());
+
+    let hard = miette::Report::new(crate::claude_runtime::ClaudeRuntimeError::Hard(
+        miette::miette!("unsupported architecture"),
+    ));
+    assert!(retryable_sync_diagnosis(&hard).is_none());
+    assert!(retryable_sync_diagnosis(&miette::miette!("malformed agent config")).is_none());
 }
 
 /// Restores the property the deleted `sandbox_supervisor_phase_tests.rs`

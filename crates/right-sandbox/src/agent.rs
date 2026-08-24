@@ -28,8 +28,8 @@ pub const DEFAULT_SANDBOX_IMAGE: &str = "node:22-slim";
 
 /// Unprivileged guest user the agent's `claude` runs as.
 ///
-/// Provisioning runs as root and then `chmod a-w`s `/sandbox/.platform`, which
-/// only means anything because the agent itself is not root.
+/// Provisioning makes the `.platform` entry root-owned and read-only, but its
+/// guest-owned `/sandbox` parent means this is not an authoritative root path.
 pub const GUEST_USER: &str = "sandbox";
 
 /// The agent's home inside the guest, and the working directory every exec

@@ -31,6 +31,17 @@
 - `logs/<agent>.log.<date>` — per-agent daily log rotation.
   `mcp-aggregator.log` for the shared aggregator.
 - `cache/whisper/ggml-<model>.bin` — STT models (downloaded at `right up`).
+- `cache/claude-code/` — mode-0700 host cache for pinned Claude Code artifacts.
+  A bounded exclusive lock serializes verification/download; final artifacts
+  are content-addressed and mode 0555. Corrupt regular entries are removed and
+  downloaded again, while symlink or non-regular cache entries fail closed.
+
+Inside each sandbox, the authoritative fallback runtime is outside the
+guest-owned `/sandbox` tree: root-owned `/opt/right/claude/` stores verified
+versions and `/opt/right/bin/claude` is the atomically replaced active symlink.
+Activation retains the current version and at most one prior target. The
+guest-owned `/sandbox/.local/bin/claude` intentionally precedes this fallback in
+PATH so the bot-managed upgrade command can override it.
 
 ## Logging
 

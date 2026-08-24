@@ -15,7 +15,7 @@ pub(crate) const SANDBOX_ENV_PATH: &str = "/sandbox/.right/env.sh";
 pub(crate) const SANDBOX_ENV_DIR: &str = "/sandbox/.right";
 pub(crate) const SANDBOX_LOCAL_PREFIX: &str = "/sandbox/.local";
 pub(crate) const SANDBOX_LOCAL_BIN: &str = "/sandbox/.local/bin";
-pub(crate) const SANDBOX_PLATFORM_BIN: &str = "/sandbox/.platform/bin";
+pub(crate) const SANDBOX_PLATFORM_BIN: &str = "/opt/right/bin";
 pub(crate) const SANDBOX_NPM_CACHE: &str = "/sandbox/.npm";
 pub(crate) const SANDBOX_BASHRC_PATH: &str = "/sandbox/.bashrc";
 pub(crate) const MANAGED_ENV_START_MARKER: &str = "# >>> RIGHT_AGENT managed env >>>";
@@ -113,8 +113,8 @@ pub(crate) const INLINE_FALLBACK_SCRIPT: &str = r#"if [ -f /sandbox/.right/env.s
 else
   mkdir -p /sandbox/.local/bin /sandbox/.npm
   case ":$PATH:" in
-    *:/sandbox/.platform/bin:*) ;;
-    *) export PATH="/sandbox/.platform/bin:$PATH" ;;
+    *:/opt/right/bin:*) ;;
+    *) export PATH="/opt/right/bin:$PATH" ;;
   esac
   case ":$PATH:" in
     *:/sandbox/.local/bin:*) ;;

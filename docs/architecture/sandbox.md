@@ -78,8 +78,8 @@ Bot startup (bring_up_sandbox, crates/bot/src/sandbox_supervisor.rs):
   │   │   symlinks)
   │   ├─ Write .claude.json and verify trust keys
   │   └─ Host-download and verify pinned Claude Code, upload it to a unique
-  │       /sandbox/.platform/claude/ target, then atomically activate
-  │       /sandbox/.platform/bin/claude
+  │       root-owned `/opt/right/claude/` target, then atomically activate
+  │       `/opt/right/bin/claude`; agent-owned `/sandbox/.platform` is irrelevant
   └─ reverse_sync_md — startup identity mirror (advisory: logged, not fatal)
 
 Create-time state:
@@ -137,14 +137,17 @@ during initial_sync):
   └─ TOOLS.md                  — agent-editable tool notes seeded for turn 1
   EXCLUDED: skills (deployed to /sandbox/.platform/), credentials, plugins
 
-Platform store (/sandbox/.platform/ inside the guest):
-  ├─ Content-addressed files: settings.json.<hash>, reply-schema.json.<hash>
-  ├─ Content-addressed skill dirs (one per `right_codegen::BUILTIN_SKILL_NAMES`)
-  ├─ Pinned Claude runtime under `/sandbox/.platform/claude/`, atomically
-  │   selected through `/sandbox/.platform/bin/claude`
+Platform store (`/sandbox/.platform/` inside the guest):
+  ├─ Content-addressed settings, schemas, and built-in skill directories
   ├─ Symlinked from agent-visible locations into `/sandbox/.platform/`
-  ├─ Root-owned and read-only to the unprivileged `sandbox` user
-  └─ Manifest GC preserves the separately managed `claude/` and `bin/` trees
+  └─ Reconciled and made read-only by manifest deployment; because `/sandbox`
+      is guest-owned, it is not an authoritative root-owned runtime location
+
+Claude runtime store (`/opt/right/` inside the guest):
+  ├─ Root-owned content-addressed binaries under `/opt/right/claude/`, mode 0555
+  ├─ Atomic active symlink `/opt/right/bin/claude`
+  ├─ Failed uploads and verification never replace the active symlink
+  └─ GC retains the active/current target plus at most one prior target
 ```
 
 Sandbox names come from `right_sandbox::resolve_sandbox_name`: the explicit
@@ -172,14 +175,12 @@ inventory/details. Overview rendering does not run these probes.
 ### Graceful degrade
 
 When the sandbox cannot be brought up, `bring_up_sandbox` (in
-`crates/bot/src/sandbox_supervisor.rs`) classifies the `SandboxError` into a
+`crates/bot/src/sandbox_supervisor.rs`) classifies availability failures into a
 cause-specific `SandboxDiagnosis` (summary + ordered fixes) and returns
-`Ok(Err(diagnosis))` instead of crashing. Recoverable availability failures —
-runtime install failure, no hypervisor, boot failure, a sandbox still
-starting, an unreachable guest agent — all take this path. Errors that say
-nothing about backend health (invalid spec, a guest command that failed) fall
-back to `Unreachable`. Genuine non-self-healing config errors still propagate
-as hard failures.
+`Ok(Err(diagnosis))` instead of crashing. Runtime installation, hypervisor,
+boot, reachability, and transient Claude acquisition/upload failures retry with
+supervisor backoff. Invalid specs, malformed agent configuration, unsupported
+host/guest architecture, and invalid pinned metadata remain hard failures.
 
 On a degraded start, `lib.rs` logs the diagnosis at ERROR, constructs the
 `SandboxRuntimeHandle` with health `Unavailable`, and continues booting
@@ -213,13 +214,12 @@ a `Sandbox` for the process lifetime.
 
 Right Agent treats `/sandbox/.local/bin` as the canonical user-installed
 executable directory. Startup sync creates `/sandbox/.local/bin` and
-`/sandbox/.npm`, assigns them to the guest user, atomically writes
-`/sandbox/.right/env.sh`, and ensures `/sandbox/.bashrc` sources it. The Claude
-invocation wrapper sources the same file with an inline fallback. Managed PATH
-order is `/sandbox/.local/bin` first and `/sandbox/.platform/bin` second: a
-user-local Claude installed by the unprivileged upgrade task wins, while a
-fresh stock image uses the host-staged platform runtime. This provisioning does
-not install git, Python, or other baseline tools.
+`/sandbox/.npm`, writes `/sandbox/.right/env.sh`, and ensures `.bashrc` sources
+it. The invocation wrapper uses the same inline fallback. PATH order is
+`/sandbox/.local/bin` first and root-owned `/opt/right/bin` second. This is an
+explicit trust boundary: a guest-owned binary installed by the upgrade task
+overrides the host-verified pinned fallback; removing that override restores the
+pinned runtime. No guest network download is needed for the fallback.
 
 Guest process stdin is buffered through `SandboxStdin`, whose explicit async
 `close` drains every queued chunk through the SDK and awaits the SDK EOF frame.

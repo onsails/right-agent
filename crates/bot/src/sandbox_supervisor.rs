@@ -65,6 +65,13 @@ fn diagnose(error: &SandboxError) -> SandboxDiagnosis {
         .diagnose()
 }
 
+fn retryable_sync_diagnosis(error: &miette::Report) -> Option<SandboxDiagnosis> {
+    error
+        .downcast_ref::<crate::claude_runtime::ClaudeRuntimeError>()
+        .filter(|runtime| runtime.is_retryable())
+        .map(|_| SandboxCause::Unreachable.diagnose())
+}
+
 /// Resolve one declared provider into a source-ref secret binding.
 ///
 /// The returned binding privately carries a redacted credential for
@@ -347,7 +354,13 @@ pub(crate) async fn bring_up_sandbox(
 
     // Sync config files before considering the sandbox Ready: the guest must
     // have its `.claude.json`, settings, and platform tree before any turn.
-    sync::initial_sync(ctx.agent_dir, &sandbox).await?;
+    if let Err(error) = sync::initial_sync(ctx.agent_dir, &sandbox).await {
+        if let Some(diagnosis) = retryable_sync_diagnosis(&error) {
+            tracing::warn!(agent = %ctx.agent, error = %format!("{error:#}"), "transient Claude runtime staging failure");
+            return Ok(Err(diagnosis));
+        }
+        return Err(error);
+    }
     if let Err(e) = sync::reverse_sync_md(ctx.agent_dir, &sandbox).await {
         tracing::warn!(
             agent = %ctx.agent,

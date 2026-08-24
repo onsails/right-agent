@@ -722,9 +722,9 @@ lives in the backend; the UI optimizes for user clarity.
   `host.microsandbox.internal` alias, which resolves to a host loopback
   address, so binding every interface would expose the aggregator to the
   local network for no benefit.
-- **Sandbox executable PATH**: `/sandbox/.local/bin` is the only supported
-  user install target and precedes the root-owned `/sandbox/.platform/bin`
-  fallback staged by the host. Both come from `/sandbox/.right/env.sh` before
+- **Sandbox executable PATH**: `/sandbox/.local/bin` is the supported guest
+  install target and intentionally precedes the root-owned `/opt/right/bin`
+  host-staged fallback. Both come from `/sandbox/.right/env.sh` before
   sandboxed `claude -p`; npm uses `NPM_CONFIG_PREFIX=/sandbox/.local` +
   `NPM_CONFIG_CACHE=/sandbox/.npm`. Do not document or generate `~/bin`.
 - **Every network change needs a recreate**: there is no policy hot-apply.

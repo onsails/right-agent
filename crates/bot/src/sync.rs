@@ -553,10 +553,10 @@ async fn ensure_sandbox_user(sbox: &Sandbox) -> miette::Result<()> {
     let user = right_sandbox::GUEST_USER;
     // Create the user if missing (Debian `useradd`, Alpine `adduser`), then —
     // whether it was just created or already existed — hand the carried home
-    // to it, excluding `.platform` which must stay root-owned. The chown has
-    // to be recursive and must run every time, not just on first boot: the
-    // migration archives a home as root and defers the handover to the moment
-    // the user exists, so a re-provision (or a migrated agent whose user was
+    // to it, excluding the manifest store entry. `.platform` is root-owned for
+    // deployment hygiene but is replaceable because `/sandbox` is guest-owned.
+    // The chown must run every time: migration archives a home as root and
+    // defers handover until the user exists, so a re-provision (or migrated agent whose user was
     // created after migration) would otherwise leave `.claude` root-owned and
     // `claude` unable to write its session state — the symptom is a turn that
     // never finishes.

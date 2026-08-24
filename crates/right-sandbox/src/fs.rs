@@ -2,10 +2,10 @@
 //!
 //! The microVM boundary replaces landlock: there are no host bind mounts, so
 //! every byte crosses via this API (large payloads chunk internally at the
-//! SDK's 3 MiB fs-chunk size). Provisioning writes the platform tree as root
-//! and then `chmod a-w`s it — the fs API runs as the sandbox's agentd (root),
-//! so the guest-side `sandbox` user cannot modify it; agent-owned content
-//! lives in the agent's subdirectory.
+//! SDK platform deployment writes `.platform` as root and removes write bits,
+//! which protects its contents from direct mutation by the guest user. Its
+//! guest-owned `/sandbox` parent still permits replacement of the entry, so
+//! security-authoritative runtime storage lives under root-owned `/opt`.
 
 use std::path::Path;
 
