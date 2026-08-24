@@ -87,10 +87,15 @@ Replaces the prior fork-probe classifier.
    at the fixed cooldown cadence until fixed. (Previously `consecutive_failures`
    incremented but `circuit_open_until` was never written.)
 
-   **Idle gate (live as of this feature):** The ticker feeds the real
-   `IdleTimestamp` (delivery idle clock) into `run_if_due`, so the
-   `min_idle_hours` gate now actually fires. (Previously the ticker passed
-   `None`, making the idle gate a no-op.)
+   **Idle gate (live as of this feature):** Each per-agent curator tick reads
+   `MAX(conversation_messages.created_at)` from that agent's persistent
+   `data.db`, rather than using the delivery `IdleTimestamp`. An empty
+   `conversation_messages` history is idle-enough; the newest timestamp is
+   parsed as RFC 3339, and a malformed timestamp fails closed (the gate does
+   not run). Because this source is persistent, restarting the agent does not
+   create activity. The SQL has no role filter, so every row in the archived
+   `conversation_messages` table counts, including `user`, `assistant`, and
+   any other stored role.
 
    **`curator_mode: apply | report_only` (config, CLI-exposed):** In
    `apply` mode (default) the curator runs the full consolidation pass, writes
@@ -177,7 +182,8 @@ Two independent gates run today.
 2. **Curator gate** (periodic, agent ticker, pure logic in
    `bot::learning_curator::should_run_now`): order is `enabled` → `!paused`
    → `circuit_open_until` (skip if in future) → `min_idle_hours` (skip if
-   any chat activity within window, checked against live `IdleTimestamp`) →
+   the persistent per-agent `conversation_messages` history has any row
+   within the window, using `MAX(created_at)` across all roles) →
    `min_cooldown_hours` (blocks ALL triggers below) → trigger priority
    **CostSpike > SkillChangeCount > TimeFallback**. First-ever runs seed
    `last_run_at` in `curator_state` and defer (Hermes pattern). State
