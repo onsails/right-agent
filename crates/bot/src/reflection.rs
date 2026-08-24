@@ -406,6 +406,7 @@ async fn run_notice_resume(
         sandbox,
     )
     .await
+    .map_err(|e| ReflectionError::Spawn(format!("build reflection command: {e:#}")))?
     .stdin_piped()
     .stdout(crate::cc::sandbox_process::Capture::Pipe)
     .stderr(crate::cc::sandbox_process::Capture::Null)

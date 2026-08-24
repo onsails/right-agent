@@ -1129,6 +1129,7 @@ async fn deliver_through_session(
     let mut child =
         crate::cc::invocation::build_claude_script_command(assembly_script, agent_dir, sandbox)
             .await
+            .map_err(|e| format!("build delivery command: {e:#}"))?
             .stdin_piped()
             .stdout(crate::cc::sandbox_process::Capture::Pipe)
             .stderr(crate::cc::sandbox_process::Capture::Pipe)

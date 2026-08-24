@@ -208,10 +208,18 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
         .clone();
     let _guard = lock.lock().await;
 
-    let command = crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, &sandbox)
-        .await
-        .stdout(crate::cc::sandbox_process::Capture::Pipe)
-        .stderr(crate::cc::sandbox_process::Capture::Pipe);
+    let command =
+        match crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, &sandbox).await {
+            Ok(command) => command
+                .stdout(crate::cc::sandbox_process::Capture::Pipe)
+                .stderr(crate::cc::sandbox_process::Capture::Pipe),
+            Err(e) => {
+                tracing::warn!(agent = %ctx.agent_name, "probe-writer command build failed: {e:#}");
+                drop(_guard);
+                active_invocation.cleanup().await;
+                return;
+            }
+        };
 
     let mut child = match command.spawn().await {
         Ok(c) => c,

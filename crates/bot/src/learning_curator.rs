@@ -586,10 +586,21 @@ pub(crate) async fn run_if_due(ctx: CuratorContext) {
     );
     let args = invocation.into_args();
 
-    let command = crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, &sandbox)
-        .await
-        .stdout(crate::cc::sandbox_process::Capture::Pipe)
-        .stderr(crate::cc::sandbox_process::Capture::Pipe);
+    let command =
+        match crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, &sandbox).await {
+            Ok(command) => command
+                .stdout(crate::cc::sandbox_process::Capture::Pipe)
+                .stderr(crate::cc::sandbox_process::Capture::Pipe),
+            Err(e) => {
+                tracing::warn!(agent = %ctx.agent_name, "curator command build failed: {e:#}");
+                mark_failed_run(&mut state, ctx.config, now);
+                if let Err(e) = save_state_db(&conn, &state).await {
+                    tracing::warn!(agent = %ctx.agent_name, "curator save state failed: {e:#}");
+                }
+                active_invocation.cleanup().await;
+                return;
+            }
+        };
 
     let mut usage_for_run: Option<right_agent::usage::UsageBreakdown> = None;
 
@@ -804,10 +815,17 @@ async fn run_report_only_pass(
     let invocation =
         build_report_only_invocation(ctx, &lifecycle_rows, active.mcp_config_path().to_owned());
     let args = invocation.into_args();
-    let command = crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, &sandbox)
-        .await
-        .stdout(crate::cc::sandbox_process::Capture::Pipe)
-        .stderr(crate::cc::sandbox_process::Capture::Pipe);
+    let command =
+        match crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, &sandbox).await {
+            Ok(command) => command
+                .stdout(crate::cc::sandbox_process::Capture::Pipe)
+                .stderr(crate::cc::sandbox_process::Capture::Pipe),
+            Err(e) => {
+                tracing::warn!(agent = %ctx.agent_name, "report-only command build failed: {e:#}");
+                active.cleanup().await;
+                return;
+            }
+        };
 
     let (actions_json, action_count, cost, cache_r, cache_c) = match command.spawn().await {
         Ok(child) => {

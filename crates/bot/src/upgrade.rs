@@ -20,15 +20,7 @@ const UPGRADE_TIMEOUT: Duration = Duration::from_secs(120);
 // agent's own /sandbox/.local/bin stays off PATH. Source the env script
 // explicitly, exactly as the turn and keepalive paths do.
 const CLAUDE_UPGRADE_SCRIPT: &str = r#"if [ -r /sandbox/.right/env.sh ]; then . /sandbox/.right/env.sh; fi
-output="$(claude upgrade 2>&1)"
-status=$?
-printf '%s\n' "$output"
-if [ "$status" -eq 1 ]; then
-  case "$output" in
-    *"Current version"*) exit 0 ;;
-  esac
-fi
-exit "$status"
+claude upgrade 2>&1
 "#;
 const CLAUDE_UPGRADE_CMD: [&str; 3] = ["bash", "-lc", CLAUDE_UPGRADE_SCRIPT];
 
@@ -97,25 +89,28 @@ async fn run_upgrade(sandbox: &Sandbox, agent_name: &str) {
 
     match exec_argv_with_timeout(sandbox, &CLAUDE_UPGRADE_CMD, UPGRADE_TIMEOUT).await {
         Ok((stdout, exit_code)) => {
-            let stdout = stdout.trim();
-            // `output=` carries only the last line: `claude upgrade` prints a
-            // multi-line progress report whose first line is always
-            // `Current version: …`, so logging the whole buffer made every
-            // run — upgraded or not — read as a bare version line (#199).
-            let last_line = stdout.lines().last().unwrap_or(stdout);
-            if exit_code != 0 {
-                tracing::error!(
-                    agent = %agent_name,
-                    exit_code,
-                    output = %last_line,
-                    "claude upgrade exited non-zero"
-                );
-            } else if stdout.contains("Successfully updated") {
-                tracing::info!(agent = %agent_name, output = %last_line, "claude upgraded");
-            } else if claude_upgrade_up_to_date(stdout) || stdout.contains("already") {
-                tracing::info!(agent = %agent_name, "claude is up to date");
-            } else {
-                tracing::info!(agent = %agent_name, output = %last_line, "claude upgrade completed");
+            let last_line = last_meaningful_line(&stdout);
+            match classify_claude_upgrade(exit_code, &stdout) {
+                ClaudeUpgradeResult::Updated => {
+                    tracing::info!(agent = %agent_name, output = %last_line, "claude upgraded");
+                }
+                ClaudeUpgradeResult::UpToDate => {
+                    tracing::info!(agent = %agent_name, output = %last_line, "claude is up to date");
+                }
+                ClaudeUpgradeResult::ConfigRepaired => {
+                    tracing::info!(agent = %agent_name, output = %last_line, "claude upgrade configuration repaired");
+                }
+                ClaudeUpgradeResult::Completed => {
+                    tracing::info!(agent = %agent_name, output = %last_line, "claude upgrade completed");
+                }
+                ClaudeUpgradeResult::Failed => {
+                    tracing::error!(
+                        agent = %agent_name,
+                        exit_code,
+                        output = %last_line,
+                        "claude upgrade exited non-zero"
+                    );
+                }
             }
         }
         Err(e) => {
@@ -124,18 +119,54 @@ async fn run_upgrade(sandbox: &Sandbox, agent_name: &str) {
     }
 }
 
-#[cfg(test)]
-fn claude_upgrade_success(exit: i32, stdout: &str) -> bool {
-    exit == 0 || (exit == 1 && claude_upgrade_up_to_date(stdout))
+const CLAUDE_UP_TO_DATE_LINE: &str = "Claude Code is up to date";
+const CLAUDE_CONFIG_REPAIRED_LINE: &str = "Installation method set to: native";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeUpgradeResult {
+    Updated,
+    UpToDate,
+    ConfigRepaired,
+    Completed,
+    Failed,
 }
 
-/// True only when the CLI reported the current version and made no update
-/// attempt. Every `claude upgrade` run prints `Current version: …` first —
-/// matching on that alone classifies a real update as "up to date" (#199).
-fn claude_upgrade_up_to_date(stdout: &str) -> bool {
-    stdout.contains("Current version")
-        && !stdout.contains("Updating to")
-        && !stdout.contains("Successfully updated")
+fn classify_claude_upgrade(exit_code: i32, stdout: &str) -> ClaudeUpgradeResult {
+    let last_line = last_meaningful_line(stdout);
+    if exit_code == 0 {
+        if stdout.contains("Successfully updated") {
+            ClaudeUpgradeResult::Updated
+        } else if last_line == CLAUDE_UP_TO_DATE_LINE {
+            ClaudeUpgradeResult::UpToDate
+        } else if last_line == CLAUDE_CONFIG_REPAIRED_LINE {
+            ClaudeUpgradeResult::ConfigRepaired
+        } else {
+            ClaudeUpgradeResult::Completed
+        }
+    } else if exit_code == 1
+        && (!stdout.contains("Updating to") || stdout.contains("Successfully updated"))
+        && last_line == CLAUDE_UP_TO_DATE_LINE
+    {
+        ClaudeUpgradeResult::UpToDate
+    } else if exit_code == 1
+        && (!stdout.contains("Updating to") || stdout.contains("Successfully updated"))
+        && last_line == CLAUDE_CONFIG_REPAIRED_LINE
+    {
+        ClaudeUpgradeResult::ConfigRepaired
+    } else {
+        ClaudeUpgradeResult::Failed
+    }
+}
+
+fn last_meaningful_line(output: &str) -> &str {
+    output
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let line = line.trim();
+            (!line.is_empty()).then_some(line)
+        })
+        .unwrap_or("")
 }
 
 #[cfg(test)]
@@ -196,43 +227,78 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn claude_upgrade_accepts_current_version_exit_one() {
+    #[test]
+    fn claude_upgrade_accepts_explicit_up_to_date_exit_one() {
         let stdout = "Current version: 2.1.143\n\nClaude Code is up to date\n";
-        assert!(super::claude_upgrade_success(1, stdout));
+        assert_eq!(
+            super::classify_claude_upgrade(1, stdout),
+            super::ClaudeUpgradeResult::UpToDate
+        );
     }
 
-    #[tokio::test]
-    async fn claude_upgrade_accepts_current_version_config_repair_exit_one() {
+    #[test]
+    fn claude_upgrade_accepts_exact_config_repair_exit_one() {
         let stdout = "Current version: 2.1.143\n\
             Checking for updates to latest version...\n\
             Warning: Running native installation but config install method is 'not set'\n\
             Updating configuration to track installation method...\n\
             Installation method set to: native\n";
-        assert!(super::claude_upgrade_success(1, stdout));
-    }
-
-    #[tokio::test]
-    async fn claude_upgrade_rejects_unrelated_exit_one() {
-        assert!(!super::claude_upgrade_success(1, "network failed"));
+        assert_eq!(
+            super::classify_claude_upgrade(1, stdout),
+            super::ClaudeUpgradeResult::ConfigRepaired
+        );
     }
 
     #[test]
-    fn up_to_date_requires_no_update_attempt() {
-        // A genuine up-to-date output.
-        assert!(super::claude_upgrade_up_to_date(
-            "Current version: 2.1.241\n\nClaude Code is up to date\n"
-        ));
-        // An output that both names the current version AND performs an
-        // update must never classify as up-to-date.
-        assert!(!super::claude_upgrade_up_to_date(
-            "Current version: 2.1.234\n\
-             Checking for updates to latest version...\n\
-             Updating to 2.1.241...\n\
-             Successfully updated from 2.1.234 to version 2.1.241\n"
-        ));
-        assert!(!super::claude_upgrade_up_to_date(
-            "Current version: 2.1.234\nUpdating to 2.1.241...\n"
-        ));
+    fn claude_upgrade_rejects_unrelated_exit_one() {
+        assert_eq!(
+            super::classify_claude_upgrade(1, "network failed"),
+            super::ClaudeUpgradeResult::Failed
+        );
+    }
+
+    #[test]
+    fn claude_upgrade_rejects_current_version_then_failed_update() {
+        let stdout = "Current version: 2.1.234\n\
+            Checking for updates to latest version...\n\
+            Updating to 2.1.241...\n\
+            network failed\n";
+        assert_eq!(
+            super::classify_claude_upgrade(1, stdout),
+            super::ClaudeUpgradeResult::Failed
+        );
+    }
+
+    #[test]
+    fn claude_upgrade_rejects_current_version_then_generic_failure() {
+        let stdout = "Current version: 2.1.234\nnetwork failed\n";
+        assert_eq!(
+            super::classify_claude_upgrade(1, stdout),
+            super::ClaudeUpgradeResult::Failed
+        );
+    }
+
+    #[test]
+    fn claude_upgrade_rejects_benign_terminal_after_incomplete_update() {
+        let stdout = "Current version: 2.1.234\n\
+            Updating to 2.1.241...\n\
+            Claude Code is up to date\n";
+        assert_eq!(
+            super::classify_claude_upgrade(1, stdout),
+            super::ClaudeUpgradeResult::Failed
+        );
+    }
+
+    #[test]
+    fn claude_upgrade_exit_zero_succeeds() {
+        assert_eq!(
+            super::classify_claude_upgrade(0, "unexpected terminal text"),
+            super::ClaudeUpgradeResult::Completed
+        );
+    }
+
+    #[test]
+    fn last_meaningful_line_ignores_trailing_blanks() {
+        assert_eq!(super::last_meaningful_line("first\nlast\n \n"), "last");
     }
 }

@@ -1883,6 +1883,7 @@ async fn invoke_bootstrap_question_model(
     let command =
         crate::cc::invocation::build_claude_script_command(script, &ctx.agent_db_dir, sandbox)
             .await
+            .context("build bootstrap question command")?
             .stdout(crate::cc::sandbox_process::Capture::Pipe)
             .stderr(crate::cc::sandbox_process::Capture::Pipe)
             .timeout(BOOTSTRAP_QUESTION_TIMEOUT);
@@ -4616,6 +4617,7 @@ async fn invoke_cc(
         sandbox,
     )
     .await
+    .map_err(|e| format!("build Claude command: {e:#}"))?
     .stdin_piped()
     .stdout(crate::cc::sandbox_process::Capture::Pipe)
     .stderr(crate::cc::sandbox_process::Capture::Pipe);

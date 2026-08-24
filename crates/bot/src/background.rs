@@ -262,10 +262,9 @@ async fn build_background_command(
         None,
         Some(&notice_token),
     );
-    Ok(
-        crate::cc::invocation::build_claude_script_command(assembly_script, agent_dir, sandbox)
-            .await,
-    )
+    crate::cc::invocation::build_claude_script_command(assembly_script, agent_dir, sandbox)
+        .await
+        .map_err(|e| format!("build background command: {e:#}"))
 }
 
 async fn read_background_stdout(

@@ -856,19 +856,29 @@ async fn execute_job(
         sandbox,
     )
     .await
-    .stdout(crate::cc::sandbox_process::Capture::Pipe)
-    .stderr(crate::cc::sandbox_process::Capture::Pipe)
-    .spawn()
-    .await
     {
+        Ok(command) => match command
+            .stdout(crate::cc::sandbox_process::Capture::Pipe)
+            .stderr(crate::cc::sandbox_process::Capture::Pipe)
+            .spawn()
+            .await
+        {
+            Ok(child) => child,
+            Err(e) => {
+                tracing::error!(job = %job_name, "spawn failed: {e:#}");
+                registered_cron.cleanup().await;
+                update_failed_run_record(&conn, &run_id, None).await;
+                std::fs::remove_file(&lock_path).ok();
+                return;
+            }
+        },
         Err(e) => {
-            tracing::error!(job = %job_name, "spawn failed: {e:#}");
+            tracing::error!(job = %job_name, "command build failed: {e:#}");
             registered_cron.cleanup().await;
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
         }
-        Ok(c) => c,
     };
 
     // Stream stdout; break on the terminal result event (do not wait for EOF —

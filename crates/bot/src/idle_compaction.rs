@@ -219,8 +219,16 @@ async fn run_compaction(ctx: IdleCompactionCtx, token: CancellationToken) {
             return;
         }
     };
-    let child = match crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, sandbox)
+    let command = match crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, sandbox)
         .await
+    {
+        Ok(command) => command,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: command build failed: {e:#}");
+            return;
+        }
+    };
+    let child = match command
         .stdout(crate::cc::sandbox_process::Capture::Pipe)
         .stderr(crate::cc::sandbox_process::Capture::Pipe)
         .spawn()

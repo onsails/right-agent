@@ -5,6 +5,7 @@
 //! in data.db and passed as `CLAUDE_CODE_OAUTH_TOKEN` env var to all
 //! subsequent `claude -p` invocations.
 
+use anyhow::Context as _;
 use std::path::Path;
 
 use tokio::sync::{mpsc, oneshot};
@@ -88,30 +89,16 @@ async fn save_token(agent_dir: &Path, token: &str) -> Result<(), String> {
 
 /// Read the auth token from DB, if any.
 ///
-/// `agent_dir` is the agent directory (data.db lives inside it).
-pub(crate) async fn load_auth_token(agent_dir: &Path) -> Option<String> {
-    let conn = match right_db::open_connection(agent_dir, false).await {
-        Ok(conn) => conn,
-        Err(e) => {
-            tracing::warn!(
-                agent_dir = %agent_dir.display(),
-                error = format!("{e:#}"),
-                "load_auth_token: DB open failed; CC invocation will run without CLAUDE_CODE_OAUTH_TOKEN"
-            );
-            return None;
-        }
-    };
-    match right_mcp::credentials::get_auth_token(&conn).await {
-        Ok(token) => token,
-        Err(e) => {
-            tracing::warn!(
-                agent_dir = %agent_dir.display(),
-                error = format!("{e:#}"),
-                "load_auth_token: auth_tokens query failed; CC invocation will run without CLAUDE_CODE_OAUTH_TOKEN"
-            );
-            None
-        }
-    }
+/// `agent_dir` is the agent directory (data.db lives inside it). Database
+/// failures propagate so callers never mistake an unavailable token store for
+/// an agent that has not authenticated (#196).
+pub(crate) async fn load_auth_token(agent_dir: &Path) -> anyhow::Result<Option<String>> {
+    let conn = right_db::open_connection(agent_dir, false)
+        .await
+        .with_context(|| format!("open auth token database at {}", agent_dir.display()))?;
+    right_mcp::credentials::get_auth_token(&conn)
+        .await
+        .context("query auth token")
 }
 
 /// Instruction message sent to user when auth is needed.
@@ -135,7 +122,20 @@ mod tests {
     async fn load_auth_token_returns_none_when_no_token() {
         let dir = tempdir().unwrap();
         init_db(dir.path()).await;
-        assert!(load_auth_token(dir.path()).await.is_none());
+        assert!(load_auth_token(dir.path()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn load_auth_token_propagates_database_open_failure() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("data.db")).unwrap();
+
+        let error = load_auth_token(dir.path())
+            .await
+            .expect_err("an unreadable token database must fail");
+        let chain = format!("{error:#}");
+        assert!(chain.contains("open auth token database"), "{chain}");
+        assert!(chain.contains("data.db"), "{chain}");
     }
 
     #[tokio::test]
@@ -147,7 +147,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            load_auth_token(dir.path()).await.as_deref(),
+            load_auth_token(dir.path()).await.unwrap().as_deref(),
             Some("my-token")
         );
     }
@@ -179,7 +179,7 @@ mod tests {
         finish_token_request(dir.path(), &token).await.unwrap();
 
         assert_eq!(
-            load_auth_token(dir.path()).await.as_deref(),
+            load_auth_token(dir.path()).await.unwrap().as_deref(),
             Some(token.as_str())
         );
     }
@@ -196,7 +196,7 @@ mod tests {
 
         assert_eq!(error, INVALID_TOKEN_MESSAGE);
         assert!(!error.contains(token));
-        assert!(load_auth_token(dir.path()).await.is_none());
+        assert!(load_auth_token(dir.path()).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -214,7 +214,7 @@ mod tests {
             .expect_err("malformed candidate must be rejected");
 
         assert_eq!(
-            load_auth_token(dir.path()).await.as_deref(),
+            load_auth_token(dir.path()).await.unwrap().as_deref(),
             Some("existing-token")
         );
     }

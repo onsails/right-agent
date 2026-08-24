@@ -554,7 +554,18 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
         debug_flag: None,
     };
     let args = invocation.into_args();
-    let command = build_claude_command(&args, &ctx.agent_dir, &sandbox).await;
+    let command = match build_claude_command(&args, &ctx.agent_dir, &sandbox).await {
+        Ok(command) => command,
+        Err(e) => {
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                "prefilter command build failed: {e:#}"
+            );
+            return PrefilterDecision::Skip {
+                reason: "command build failed".into(),
+            };
+        }
+    };
 
     let mut child = match command
         .stdout(crate::cc::sandbox_process::Capture::Pipe)
