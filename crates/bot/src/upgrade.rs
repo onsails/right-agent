@@ -1,8 +1,7 @@
 //! Background task that periodically upgrades Claude Code inside a sandbox.
 //!
-//! Runs `claude upgrade` in the guest every 8 hours. The upgraded binary is
-//! installed to `/sandbox/.local/bin/claude` and takes precedence over the
-//! image-baked `/usr/local/bin/claude` via PATH ordering (set up by `sync.rs`).
+//! Runs `claude upgrade` in the guest every 8 hours. The upgraded binary lands
+//! in `/sandbox/.local/bin` and precedes the host-staged platform fallback.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +18,8 @@ const UPGRADE_INTERVAL: Duration = Duration::from_secs(8 * 3600);
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(120);
 const CLAUDE_UPGRADE_SCRIPT: &str = "exec claude upgrade 2>&1";
 const BUN_INSTALL: &str = "/sandbox/.bun";
-const UPGRADE_PATH: &str = "/sandbox/.local/bin:/sandbox/.bun/bin:/usr/local/bin:/usr/bin:/bin";
+const UPGRADE_PATH: &str =
+    "/sandbox/.local/bin:/sandbox/.platform/bin:/sandbox/.bun/bin:/usr/local/bin:/usr/bin:/bin";
 
 // The shell text is platform-owned and sources no guest files. PATH lookup is
 // intentional: prefer the guest-owned upgraded binary, then fall back to the
@@ -215,7 +215,7 @@ mod tests {
                 ("BUN_INSTALL".to_owned(), "/sandbox/.bun".to_owned()),
                 (
                     "PATH".to_owned(),
-                    "/sandbox/.local/bin:/sandbox/.bun/bin:/usr/local/bin:/usr/bin:/bin".to_owned(),
+                    "/sandbox/.local/bin:/sandbox/.platform/bin:/sandbox/.bun/bin:/usr/local/bin:/usr/bin:/bin".to_owned(),
                 ),
             ]
         );

@@ -32,8 +32,8 @@ pub(crate) async fn initial_sync(agent_dir: &Path, sbox: &Sandbox) -> miette::Re
     // turn executes as `GUEST_USER`, and Claude Code refuses root. Provisioning
     // owns this (the stage-1 probes did it inline), but the stage-4 rewire
     // dropped the step, so a migrated agent booted with no `sandbox` user and
-    // every turn hung. Idempotent, and must land before deploy_manifest because
-    // the platform tree is handed to the agent.
+    // every turn hung. Idempotent, and must land before environment and
+    // platform deployment.
     ensure_sandbox_user(sbox).await?;
 
     // Re-assert the user-local environment on every bring-up. This provisions
@@ -41,6 +41,7 @@ pub(crate) async fn initial_sync(agent_dir: &Path, sbox: &Sandbox) -> miette::Re
     // public guest egress, so existing restrictive sandboxes upgrade in place.
     ensure_sandbox_user_local_env(agent_dir, sbox).await?;
     sync_cycle(agent_dir, sbox).await?;
+    crate::claude_runtime::stage_claude_runtime(agent_dir, sbox).await?;
     Ok(())
 }
 
@@ -666,6 +667,31 @@ mod tests {
             .expect("missing agent config should use managed env only");
 
         assert!(content.contains("RIGHT_AGENT_MANAGED_ENV=1"));
+    }
+
+    #[test]
+    fn initial_sync_stages_claude_after_manifest_deployment() {
+        let source = include_str!("sync.rs");
+        let function = source
+            .split("pub(crate) async fn initial_sync")
+            .nth(1)
+            .expect("initial_sync source")
+            .split("/// Run the periodic sync loop")
+            .next()
+            .expect("initial_sync body");
+        let user = function
+            .find("ensure_sandbox_user(sbox)")
+            .expect("user step");
+        let env = function
+            .find("ensure_sandbox_user_local_env(agent_dir, sbox)")
+            .expect("env step");
+        let manifest = function
+            .find("sync_cycle(agent_dir, sbox)")
+            .expect("manifest step");
+        let claude = function
+            .find("stage_claude_runtime(agent_dir, sbox)")
+            .expect("Claude staging step");
+        assert!(user < env && env < manifest && manifest < claude);
     }
 
     #[test]

@@ -70,6 +70,11 @@ fn platform_name_for_directory() {
 }
 
 #[test]
+fn platform_runtime_directories_are_reserved_from_manifest_gc() {
+    assert_eq!(RESERVED_PLATFORM_DIRS, ["claude", "bin"]);
+}
+
+#[test]
 fn build_manifest_from_files() {
     let dir = tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");

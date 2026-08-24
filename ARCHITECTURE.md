@@ -722,11 +722,11 @@ lives in the backend; the UI optimizes for user clarity.
   `host.microsandbox.internal` alias, which resolves to a host loopback
   address, so binding every interface would expose the aggregator to the
   local network for no benefit.
-- **Sandbox user-local executables**: `/sandbox/.local/bin` is the only
-  platform-supported install target (sourced via `/sandbox/.right/env.sh`
-  from `/sandbox/.bashrc` and before sandboxed `claude -p`). npm uses
-  `NPM_CONFIG_PREFIX=/sandbox/.local` + `NPM_CONFIG_CACHE=/sandbox/.npm`.
-  Do not document or generate `~/bin`.
+- **Sandbox executable PATH**: `/sandbox/.local/bin` is the only supported
+  user install target and precedes the root-owned `/sandbox/.platform/bin`
+  fallback staged by the host. Both come from `/sandbox/.right/env.sh` before
+  sandboxed `claude -p`; npm uses `NPM_CONFIG_PREFIX=/sandbox/.local` +
+  `NPM_CONFIG_CACHE=/sandbox/.npm`. Do not document or generate `~/bin`.
 - **Every network change needs a recreate**: there is no policy hot-apply.
   Egress is applied by the SDK at create, so an `agent.yaml`
   `network_policy` change takes effect only on a recreated sandbox.

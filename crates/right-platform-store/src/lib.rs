@@ -104,6 +104,8 @@ pub struct Manifest {
 
 /// Base path for platform store inside sandbox.
 pub const PLATFORM_DIR: &str = "/sandbox/.platform";
+/// Reserved platform subtrees managed outside the manifest deployment flow.
+pub const RESERVED_PLATFORM_DIRS: &[&str] = &["claude", "bin"];
 
 /// Scan agent directory, build manifest of platform-managed files.
 /// Excludes agent-owned files (IDENTITY.md, SOUL.md, USER.md, TOOLS.md).
@@ -362,6 +364,12 @@ pub async fn gc_platform(sbox: &SandboxHandle, active_targets: &[String]) -> mie
     for line in stdout.lines() {
         let path = line.trim();
         if path.is_empty() {
+            continue;
+        }
+        if RESERVED_PLATFORM_DIRS.iter().any(|reserved| {
+            path == format!("{PLATFORM_DIR}/{reserved}")
+                || path.starts_with(&format!("{PLATFORM_DIR}/{reserved}/"))
+        }) {
             continue;
         }
         if active_set.contains(path) {

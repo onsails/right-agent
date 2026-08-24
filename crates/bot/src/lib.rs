@@ -3,6 +3,7 @@
 pub(crate) mod async_delivery;
 pub(crate) mod background;
 pub(crate) mod cc;
+mod claude_runtime;
 mod config_watcher;
 pub(crate) mod cron;
 pub(crate) mod idle_compaction;

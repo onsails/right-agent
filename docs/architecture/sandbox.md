@@ -76,9 +76,10 @@ Bot startup (bring_up_sandbox, crates/bot/src/sandbox_supervisor.rs):
   │   ├─ Write the managed env and patch `.bashrc`
   │   ├─ Deploy platform files to /sandbox/.platform/ (content-addressed +
   │   │   symlinks)
-  │   ├─ Remove obsolete legacy built-in skill links from
-  │   │   /sandbox/.claude/skills/
-  │   └─ Write .claude.json, verify trust keys, fix if CC overwrote them
+  │   ├─ Write .claude.json and verify trust keys
+  │   └─ Host-download and verify pinned Claude Code, upload it to a unique
+  │       /sandbox/.platform/claude/ target, then atomically activate
+  │       /sandbox/.platform/bin/claude
   └─ reverse_sync_md — startup identity mirror (advisory: logged, not fatal)
 
 Create-time state:
@@ -104,9 +105,10 @@ Sandbox network:
   ├─ Egress is a typed value applied at create: Permissive, or Restrictive
   │   with a domain-suffix allow list (anthropic.com, claude.com, claude.ai,
   │   storage.googleapis.com). Suffixes, not globs.
-  ├─ Startup does not download guest packages or installers. Existing
-  │   restrictive sandboxes retain their create-time policy, so adding package
-  │   hosts later would not make guest-network provisioning upgrade-safe.
+  ├─ Startup does not download guest packages or installers. Claude Code is
+  │   downloaded by the host, verified before guest mutation, and uploaded
+  │   through the SDK fs control plane, so existing restrictive sandboxes
+  │   adopt it on restart without recreation or public guest egress.
   ├─ The host destination group is always open on top of the allow list —
   │   that is how the guest reaches the MCP aggregator on the host.
   └─ Guest → host loopback services resolve through
@@ -138,10 +140,11 @@ during initial_sync):
 Platform store (/sandbox/.platform/ inside the guest):
   ├─ Content-addressed files: settings.json.<hash>, reply-schema.json.<hash>
   ├─ Content-addressed skill dirs (one per `right_codegen::BUILTIN_SKILL_NAMES`)
-  ├─ Symlinked from /sandbox/.claude/ → /sandbox/.platform/
-  ├─ Read-only (chmod a-w after deploy) — which only means anything because
-  │   the agent runs as the unprivileged `sandbox` user, not root
-  └─ GC removes stale entries after each sync cycle
+  ├─ Pinned Claude runtime under `/sandbox/.platform/claude/`, atomically
+  │   selected through `/sandbox/.platform/bin/claude`
+  ├─ Symlinked from agent-visible locations into `/sandbox/.platform/`
+  ├─ Root-owned and read-only to the unprivileged `sandbox` user
+  └─ Manifest GC preserves the separately managed `claude/` and `bin/` trees
 ```
 
 Sandbox names come from `right_sandbox::resolve_sandbox_name`: the explicit
@@ -212,9 +215,11 @@ Right Agent treats `/sandbox/.local/bin` as the canonical user-installed
 executable directory. Startup sync creates `/sandbox/.local/bin` and
 `/sandbox/.npm`, assigns them to the guest user, atomically writes
 `/sandbox/.right/env.sh`, and ensures `/sandbox/.bashrc` sources it. The Claude
-invocation wrapper sources the same file with an inline fallback. This makes
-manually installed CLIs and `npm install -g` bins available both to `claude -p`
-turns and to interactive guest shells.
+invocation wrapper sources the same file with an inline fallback. Managed PATH
+order is `/sandbox/.local/bin` first and `/sandbox/.platform/bin` second: a
+user-local Claude installed by the unprivileged upgrade task wins, while a
+fresh stock image uses the host-staged platform runtime. This provisioning does
+not install git, Python, or other baseline tools.
 
 Guest process stdin is buffered through `SandboxStdin`, whose explicit async
 `close` drains every queued chunk through the SDK and awaits the SDK EOF frame.
