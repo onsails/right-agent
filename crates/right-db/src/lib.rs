@@ -71,10 +71,10 @@ impl<T> OptionalExtension<T> for Result<T, DbError> {
 /// # WAL desync recovery
 ///
 /// On a Turso multiprocess-WAL desync (open fails `is_wal_corruption`), the
-/// connection escalates: first reset the `-tshm`/`-shm` sidecars and retry;
-/// on a repeat desync drop the un-checkpointed `-wal` too (its frames are
-/// unrecoverable when the authority cannot rebuild); if the desync survives
-/// even the WAL drop, propagate the error instead of looping. See
+/// connection resets only the `-tshm`/`-shm` coordination sidecars under the
+/// bootstrap lock and retries once. If the retry also reports WAL corruption,
+/// the error propagates for offline/manual recovery. The live `-wal` is never
+/// unlinked because other processes may still hold open connections. See
 /// tursodatabase/turso#769.
 pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
     let db_path = agent_path.join("data.db");
@@ -100,27 +100,17 @@ pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connect
                         path = %db_path.display(),
                         removed = "-tshm,-shm",
                         error = format!("{error:#}"),
-                        "WAL desync detected; resetting -tshm/-shm sidecars and retrying \
+                        "WAL desync detected; resetting coordination sidecars and retrying \
                          (tursodatabase/turso#769)",
                     );
-                    recover_wal_sidecars(agent_path, false).await?;
-                }
-                DesyncAction::ResetWalAndSidecars => {
-                    tracing::warn!(
-                        path = %db_path.display(),
-                        removed = "-tshm,-shm,-wal",
-                        error = format!("{error:#}"),
-                        "WAL desync persists after sidecar reset; dropping the \
-                         un-checkpointed WAL and retrying (tursodatabase/turso#769)",
-                    );
-                    recover_wal_sidecars(agent_path, true).await?;
+                    recover_wal_sidecars(agent_path).await?;
                 }
                 DesyncAction::Fail => {
                     tracing::error!(
                         path = %db_path.display(),
                         error = format!("{error:#}"),
-                        "WAL desync persists after WAL drop; the database needs manual \
-                         recovery — refusing to loop (tursodatabase/turso#769)",
+                        "WAL desync persists after coordination sidecar reset; offline/manual \
+                         recovery is required (tursodatabase/turso#769)",
                     );
                     return Err(error);
                 }
@@ -130,51 +120,37 @@ pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connect
     }
 }
 
-/// Escalation state for repeated WAL desyncs within one `open_connection`.
+/// Tracks whether this `open_connection` already retried a WAL desync.
 #[derive(Default)]
 struct DesyncRecovery {
-    attempts: u8,
+    sidecars_reset: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DesyncAction {
-    /// First desync: reset `-tshm`/`-shm`, keep the WAL (salvage its frames).
+    /// First desync: reset only `-tshm`/`-shm`, preserving database contents.
     ResetSidecars,
-    /// Repeat desync: the WAL's frames are unrecoverable — drop `-wal` too.
-    ResetWalAndSidecars,
-    /// Desync survives the WAL drop: main-database corruption or an upstream
-    /// bug — propagate instead of looping.
+    /// A repeat desync requires offline/manual recovery.
     Fail,
 }
 
 impl DesyncRecovery {
     fn on_desync(&mut self) -> DesyncAction {
-        self.attempts += 1;
-        match self.attempts {
-            1 => DesyncAction::ResetSidecars,
-            2 => DesyncAction::ResetWalAndSidecars,
-            _ => DesyncAction::Fail,
+        if self.sidecars_reset {
+            DesyncAction::Fail
+        } else {
+            self.sidecars_reset = true;
+            DesyncAction::ResetSidecars
         }
-    }
-
-    #[cfg(test)]
-    fn on_success(&mut self) {
-        self.attempts = 0;
     }
 }
 
-/// Delete the Turso WAL-coordination sidecars (`-tshm` authority snapshot,
-/// `-shm` wal-index) so the next open cold-rebuilds. `drop_wal` also removes
-/// the un-checkpointed `-wal`: on a repeat desync the authority cannot
-/// rebuild from it, so its frames are unrecoverable and keeping the file only
-/// guarantees the next open hits the same short read. See
+/// Delete only Turso's WAL-coordination sidecars (`-tshm` authority snapshot
+/// and `-shm` wal-index) so the next open cold-rebuilds them. The main database
+/// and live `-wal` are persistent data and must remain untouched. See
 /// tursodatabase/turso#769.
-fn remove_wal_sidecars_with_escalation(agent_path: &Path, drop_wal: bool) -> Result<(), DbError> {
-    let mut suffixes = vec!["-tshm", "-shm"];
-    if drop_wal {
-        suffixes.push("-wal");
-    }
-    for suffix in suffixes {
+fn remove_wal_sidecars(agent_path: &Path) -> Result<(), DbError> {
+    for suffix in ["-tshm", "-shm"] {
         let sidecar = agent_path.join(format!("data.db{suffix}"));
         match std::fs::remove_file(&sidecar) {
             Ok(()) => {}
@@ -192,8 +168,9 @@ fn remove_wal_sidecars_with_escalation(agent_path: &Path, drop_wal: bool) -> Res
 
 /// Recover from a WAL-sidecar desync (turso#769). Serializes across the bot and
 /// aggregator processes via the per-agent bootstrap lock, re-checks whether a
-/// sibling already healed the database, and otherwise resets the sidecars.
-async fn recover_wal_sidecars(agent_path: &Path, drop_wal: bool) -> Result<(), DbError> {
+/// sibling already healed the database, and otherwise resets the coordination
+/// sidecars without touching the live WAL.
+async fn recover_wal_sidecars(agent_path: &Path) -> Result<(), DbError> {
     let _lock = bootstrap_lock::acquire(agent_path).await?;
     let db_path = agent_path.join("data.db");
     // Re-check under the lock with the SAME semantics as the production open
@@ -206,7 +183,7 @@ async fn recover_wal_sidecars(agent_path: &Path, drop_wal: bool) -> Result<(), D
         Err(error) if error.is_wal_corruption() => {}
         Err(error) => return Err(error),
     }
-    remove_wal_sidecars_with_escalation(agent_path, drop_wal)
+    remove_wal_sidecars(agent_path)
 }
 
 async fn open_connection_once(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
@@ -356,69 +333,53 @@ mod tests {
         open_connection(dir.path(), true).await.unwrap();
     }
 
-    #[tokio::test]
-    async fn remove_wal_sidecars_drops_authority_keeps_wal() {
+    #[test]
+    fn remove_wal_sidecars_preserves_database_and_wal_on_every_reset() {
+        const DB_SENTINEL: &[u8] = b"main database sentinel";
+        const WAL_SENTINEL: &[u8] = b"live WAL sentinel";
+
         let dir = tempfile::tempdir().unwrap();
-        for name in ["data.db", "data.db-wal", "data.db-shm", "data.db-tshm"] {
-            std::fs::write(dir.path().join(name), b"x").unwrap();
+        std::fs::write(dir.path().join("data.db"), DB_SENTINEL).unwrap();
+        std::fs::write(dir.path().join("data.db-wal"), WAL_SENTINEL).unwrap();
+        for name in ["data.db-shm", "data.db-tshm"] {
+            std::fs::write(dir.path().join(name), b"coordination sidecar").unwrap();
         }
 
-        super::remove_wal_sidecars_with_escalation(dir.path(), false).unwrap();
-
-        assert!(dir.path().join("data.db").exists(), "main db must remain");
-        assert!(dir.path().join("data.db-wal").exists(), "-wal must remain");
-        assert!(
-            !dir.path().join("data.db-shm").exists(),
-            "-shm must be removed"
+        super::remove_wal_sidecars(dir.path()).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("data.db")).unwrap(),
+            DB_SENTINEL,
+            "main database bytes must remain"
         );
-        assert!(
-            !dir.path().join("data.db-tshm").exists(),
-            "-tshm must be removed"
+        assert_eq!(
+            std::fs::read(dir.path().join("data.db-wal")).unwrap(),
+            WAL_SENTINEL,
+            "WAL bytes must remain after the first reset"
         );
+        assert!(!dir.path().join("data.db-shm").exists());
+        assert!(!dir.path().join("data.db-tshm").exists());
 
-        // Idempotent: re-running with sidecars already gone is fine.
-        super::remove_wal_sidecars_with_escalation(dir.path(), false).unwrap();
-    }
-
-    #[tokio::test]
-    async fn remove_wal_sidecars_with_escalation_removes_wal_on_repeat_desync() {
-        let dir = tempfile::tempdir().unwrap();
-        for name in ["data.db", "data.db-wal", "data.db-shm", "data.db-tshm"] {
-            std::fs::write(dir.path().join(name), b"x").unwrap();
-        }
-
-        super::remove_wal_sidecars_with_escalation(dir.path(), false).unwrap();
-        assert!(
-            dir.path().join("data.db-wal").exists(),
-            "first desync keeps -wal"
+        // A repeated reset is idempotent and must never escalate to deleting
+        // either persistent database file.
+        super::remove_wal_sidecars(dir.path()).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("data.db")).unwrap(),
+            DB_SENTINEL,
+            "main database bytes must remain after every reset"
         );
-
-        for name in ["data.db-wal", "data.db-shm", "data.db-tshm"] {
-            std::fs::write(dir.path().join(name), b"x").unwrap();
-        }
-        super::remove_wal_sidecars_with_escalation(dir.path(), true).unwrap();
-        assert!(
-            !dir.path().join("data.db-wal").exists(),
-            "repeat desync drops -wal"
+        assert_eq!(
+            std::fs::read(dir.path().join("data.db-wal")).unwrap(),
+            WAL_SENTINEL,
+            "WAL bytes must remain after every reset"
         );
-        assert!(dir.path().join("data.db").exists(), "main db must remain");
     }
 
     #[test]
-    fn persistent_desync_escalates_to_wal_reset_then_fails() {
+    fn repeated_desync_fails_without_wal_reset() {
         let mut state = super::DesyncRecovery::default();
         assert_eq!(state.on_desync(), super::DesyncAction::ResetSidecars);
-        assert_eq!(state.on_desync(), super::DesyncAction::ResetWalAndSidecars);
         assert_eq!(state.on_desync(), super::DesyncAction::Fail);
         assert_eq!(state.on_desync(), super::DesyncAction::Fail);
-    }
-
-    #[test]
-    fn successful_open_resets_desync_escalation() {
-        let mut state = super::DesyncRecovery::default();
-        assert_eq!(state.on_desync(), super::DesyncAction::ResetSidecars);
-        state.on_success();
-        assert_eq!(state.on_desync(), super::DesyncAction::ResetSidecars);
     }
 
     #[test]
