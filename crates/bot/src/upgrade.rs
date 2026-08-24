@@ -8,21 +8,37 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use crate::sandbox::{Sandbox, exec_argv_with_timeout};
+use right_sandbox::{ExecRequest, GUEST_HOME, GUEST_USER};
+
+use crate::sandbox::Sandbox;
 
 /// Default interval between upgrade checks (8 hours).
 const UPGRADE_INTERVAL: Duration = Duration::from_secs(8 * 3600);
 
 /// Timeout for the in-guest `claude upgrade` (2 minutes).
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(120);
-// `bash -lc` reads the *invoking user's* login profile, and guest execs run as
-// root, whose HOME is not /sandbox — so /sandbox/.bashrc never runs and the
-// agent's own /sandbox/.local/bin stays off PATH. Source the env script
-// explicitly, exactly as the turn and keepalive paths do.
-const CLAUDE_UPGRADE_SCRIPT: &str = r#"if [ -r /sandbox/.right/env.sh ]; then . /sandbox/.right/env.sh; fi
-claude upgrade 2>&1
-"#;
-const CLAUDE_UPGRADE_CMD: [&str; 3] = ["bash", "-lc", CLAUDE_UPGRADE_SCRIPT];
+const CLAUDE_UPGRADE_SCRIPT: &str = "exec claude upgrade 2>&1";
+const BUN_INSTALL: &str = "/sandbox/.bun";
+const UPGRADE_PATH: &str = "/sandbox/.local/bin:/sandbox/.bun/bin:/usr/local/bin:/usr/bin:/bin";
+
+// The shell text is platform-owned and sources no guest files. PATH lookup is
+// intentional: prefer the guest-owned upgraded binary, then fall back to the
+// image-baked binary, while the explicit user keeps either execution unprivileged.
+fn claude_upgrade_request() -> ExecRequest {
+    ExecRequest {
+        cmd: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), CLAUDE_UPGRADE_SCRIPT.to_owned()],
+        cwd: Some(GUEST_HOME.to_owned()),
+        user: Some(GUEST_USER.to_owned()),
+        env: vec![
+            ("HOME".to_owned(), GUEST_HOME.to_owned()),
+            ("BUN_INSTALL".to_owned(), BUN_INSTALL.to_owned()),
+            ("PATH".to_owned(), UPGRADE_PATH.to_owned()),
+        ],
+        timeout: Some(UPGRADE_TIMEOUT),
+        ..ExecRequest::default()
+    }
+}
 
 /// Run a single upgrade attempt at startup (blocking).
 /// Called before cron/telegram tasks exist — no lock needed.
@@ -87,10 +103,18 @@ async fn run_upgrade_loop(
 async fn run_upgrade(sandbox: &Sandbox, agent_name: &str) {
     tracing::info!(agent = %agent_name, "checking for claude upgrade");
 
-    match exec_argv_with_timeout(sandbox, &CLAUDE_UPGRADE_CMD, UPGRADE_TIMEOUT).await {
-        Ok((stdout, exit_code)) => {
-            let last_line = last_meaningful_line(&stdout);
-            match classify_claude_upgrade(exit_code, &stdout) {
+    match sandbox.exec(&claude_upgrade_request()).await {
+        Ok(outcome) => {
+            let mut output = String::from_utf8_lossy(&outcome.stdout).into_owned();
+            if !outcome.stderr.is_empty() {
+                if !output.is_empty() && !output.ends_with('\n') {
+                    output.push('\n');
+                }
+                output.push_str(&String::from_utf8_lossy(&outcome.stderr));
+            }
+            let exit_code = outcome.code;
+            let last_line = last_meaningful_line(&output);
+            match classify_claude_upgrade(exit_code, &output) {
                 ClaudeUpgradeResult::Updated => {
                     tracing::info!(agent = %agent_name, output = %last_line, "claude upgraded");
                 }
@@ -174,6 +198,41 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::RwLock;
+    #[test]
+    fn claude_upgrade_request_is_unprivileged_and_ignores_guest_startup_files() {
+        let request = super::claude_upgrade_request();
+
+        assert_eq!(request.user.as_deref(), Some(right_sandbox::GUEST_USER));
+        assert_eq!(request.cmd, "/bin/sh");
+        assert_eq!(request.args, ["-c", "exec claude upgrade 2>&1"]);
+        assert_eq!(request.cwd.as_deref(), Some(right_sandbox::GUEST_HOME));
+        assert_eq!(request.timeout, Some(super::UPGRADE_TIMEOUT));
+        assert_eq!(request.stdin, right_sandbox::Stdin::Null);
+        assert_eq!(
+            request.env,
+            [
+                ("HOME".to_owned(), "/sandbox".to_owned()),
+                ("BUN_INSTALL".to_owned(), "/sandbox/.bun".to_owned()),
+                (
+                    "PATH".to_owned(),
+                    "/sandbox/.local/bin:/sandbox/.bun/bin:/usr/local/bin:/usr/bin:/bin".to_owned(),
+                ),
+            ]
+        );
+        assert!(
+            request
+                .args
+                .iter()
+                .all(|arg| !arg.contains("env.sh") && !arg.contains(".bashrc")),
+            "upgrade must not source or execute guest-controlled startup files"
+        );
+        let source = include_str!("upgrade.rs");
+        let root_helper = ["exec_argv", "_with_timeout"].concat();
+        assert!(
+            !source.contains(&root_helper),
+            "upgrade must not use the root exec helper"
+        );
+    }
 
     #[tokio::test]
     async fn upgrade_skips_when_sessions_active() {
