@@ -460,27 +460,7 @@ fn bashrc_read_script(path: &str) -> String {
 /// bins in that directory. The managed env file is sourced by `.bashrc` for
 /// user SSH shells and provides the shared contract for non-login Claude setup.
 async fn ensure_sandbox_user_local_env(agent_dir: &Path, sbox: &Sandbox) -> miette::Result<()> {
-    // Read `agent.yaml::env` so the generated env.sh includes per-agent
-    // operator-declared exports alongside the managed PATH/NPM block.
-    // Treat a missing/unparseable agent.yaml as "no extra env" — the
-    // managed block is still useful on its own, and sync should not
-    // fail closed for what is, semantically, optional config. A parse
-    // failure is still logged: silently dropping the operator's env
-    // (e.g. ANTHROPIC_BASE_URL) would route the agent elsewhere with no
-    // trace of why.
-    let agent_env = match right_agent::agent::discovery::parse_agent_config(agent_dir) {
-        Ok(cfg) => cfg.map(|c| c.env).unwrap_or_default(),
-        Err(e) => {
-            tracing::warn!(
-                agent_dir = %agent_dir.display(),
-                error = format!("{e:#}"),
-                "sync: failed to parse agent.yaml for env injection; \
-                 proceeding with managed env only"
-            );
-            Default::default()
-        }
-    };
-    let env_content = shell_printf_b_arg(&env_file_content(&agent_env));
+    let env_content = shell_printf_b_arg(&load_sandbox_env_content(agent_dir)?);
     let write_script = sandbox_env_setup_script(&env_content);
     let (output, code) = exec_argv_as_guest(sbox, &["bash", "-lc", &write_script]).await?;
     if code != 0 {
@@ -516,6 +496,19 @@ async fn ensure_sandbox_user_local_env(agent_dir: &Path, sbox: &Sandbox) -> miet
 
     tracing::info!("sync: ensured sandbox user-local CLI/npm environment");
     Ok(())
+}
+
+fn load_sandbox_env_content(agent_dir: &Path) -> miette::Result<String> {
+    let agent_env = right_agent::agent::discovery::parse_agent_config(agent_dir)
+        .map_err(|e| {
+            miette::miette!(
+                "sync: failed to load agent config for sandbox env from {}: {e:#}",
+                agent_dir.display()
+            )
+        })?
+        .map(|config| config.env)
+        .unwrap_or_default();
+    Ok(env_file_content(&agent_env))
 }
 fn sandbox_env_setup_script(env_content: &str) -> String {
     format!(
@@ -649,6 +642,32 @@ mod tests {
         assert!(!content.contains("/sandbox/bin"));
         assert!(!content.contains("~/bin"));
     }
+
+    #[test]
+    fn sandbox_env_content_rejects_malformed_agent_config() {
+        let agent_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(agent_dir.path().join("agent.yaml"), "env: [unterminated")
+            .expect("write malformed agent config");
+
+        let error = load_sandbox_env_content(agent_dir.path())
+            .expect_err("malformed agent config must stop env preparation");
+        let message = format!("{error:#}");
+
+        assert!(message.contains("failed to load agent config for sandbox env"));
+        assert!(message.contains("Failed to parse agent.yaml"));
+        assert!(!message.contains("RIGHT_AGENT_MANAGED_ENV=1"));
+    }
+
+    #[test]
+    fn sandbox_env_content_allows_intentionally_missing_agent_config() {
+        let agent_dir = tempfile::tempdir().expect("tempdir");
+
+        let content = load_sandbox_env_content(agent_dir.path())
+            .expect("missing agent config should use managed env only");
+
+        assert!(content.contains("RIGHT_AGENT_MANAGED_ENV=1"));
+    }
+
     #[test]
     fn sandbox_env_setup_creates_user_local_dirs_without_network_or_root_mutation() {
         let script = sandbox_env_setup_script("env body");
