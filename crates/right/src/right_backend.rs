@@ -1,13 +1,13 @@
 //! Standalone dispatch layer for Right Agent's built-in MCP tools.
 //!
-//! [`RightBackend`] extracts the tool logic from [`HttpMemoryServer`] into a
+//! [`RightBackend`] extracts the tool logic from the stdio memory server into a
 //! struct that accepts `(agent_name, agent_dir, tool_name, args, context)` and
 //! dispatches manually — no rmcp macro-generated parameter parsing required.
 //! The Aggregator uses this to expose right-agent tools alongside proxied external
 //! MCP servers.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -42,11 +42,287 @@ use crate::learning::{
     LearningMessagePhase, SkillLearningFinishParams, SkillLearningStartParams,
     SkillPackageExpectation,
 };
-use crate::memory_server::{
-    CronCreateParams, CronDeleteParams, CronLinkSkillParams, CronListParams, CronListRunsParams,
-    CronShowRunParams, CronTriggerParams, CronUnlinkSkillParams, CronUpdateParams, McpListParams,
-    cron_run_to_json,
-};
+
+// --- MCP tool parameter types (shared with the aggregator's ToolDispatcher) ---
+
+/// Deserialize an `Option<f64>` that also accepts string representations.
+/// LLMs sometimes send numbers as strings (e.g. `"2.0"` instead of `2.0`).
+fn deserialize_lenient_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(f64),
+        Str(String),
+        Null,
+    }
+
+    match NumOrStr::deserialize(deserializer)? {
+        NumOrStr::Num(n) => Ok(Some(n)),
+        NumOrStr::Str(s) if s.is_empty() => Ok(None),
+        NumOrStr::Str(s) => s
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| de::Error::custom(format!("invalid number: {s}"))),
+        NumOrStr::Null => Ok(None),
+    }
+}
+
+/// Distinguish between "field absent" (`None`) and "explicit null" (`Some(None)`)
+/// for nullable optional integers. Required so `cron_update` can clear a field.
+///
+/// When the field is present in JSON:
+///   - `null`    → `Some(None)`  (clear the column)
+///   - `7`       → `Some(Some(7))` (set to 7)
+///
+/// When the field is absent from JSON, serde's `default` kicks in → `None`.
+fn deserialize_double_option_i64<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i64>::deserialize(deserializer).map(Some)
+}
+
+/// Distinguish "field absent" (`None`) from "explicit null" (`Some(None)`) for
+/// the nullable `model` on `cron_update`, so the agent can clear it back to
+/// inherit-global. Mirrors `deserialize_double_option_i64`.
+fn deserialize_double_option_cron_model<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<CronModel>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<CronModel>::deserialize(deserializer).map(Some)
+}
+
+/// Per-cron model tier chosen by the creating session. Mapped to the bare CC
+/// alias and passed straight to `--model`. Kept local to this module per the
+/// project's "no central registries" convention (`feedback_no_central_registries`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CronModel {
+    Haiku,
+    Sonnet,
+    Opus,
+}
+
+impl CronModel {
+    pub fn as_alias(self) -> &'static str {
+        match self {
+            Self::Haiku => "haiku",
+            Self::Sonnet => "sonnet",
+            Self::Opus => "opus",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronListRunsParams {
+    #[schemars(description = "Filter by job name. Omit to return all jobs.")]
+    pub job_name: Option<String>,
+    #[schemars(description = "Maximum number of runs to return. Default: 20.")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronShowRunParams {
+    #[schemars(description = "Run ID (UUID) to retrieve.")]
+    pub run_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronCreateParams {
+    #[schemars(description = "Job name (lowercase alphanumeric and hyphens, e.g. 'health-check')")]
+    pub job_name: String,
+    #[schemars(
+        description = "5-field cron expression in UTC (e.g. '17 9 * * 1-5'). Required if run_at is not set. Mutually exclusive with run_at. \
+                       NEVER silently pick a schedule that fires at minute :00 or :30 (peak minutes where automated jobs cluster and spike API rate limits) — this includes literals like '0' or '30' AND step expressions like '*/30', '*/15', '*/10', '*/5'. \
+                       If the user asks for a round interval (e.g. 'every 30 minutes', 'every hour at :00'), offset the minute field instead (e.g. '17,47 * * * *' for half-hourly, '43 * * * *' for hourly) and tell the user. \
+                       Only use a :00 or :30 minute when the user EXPLICITLY insists on that exact round time."
+    )]
+    pub schedule: Option<String>,
+    #[schemars(description = "Task prompt that Claude executes when the cron fires")]
+    pub prompt: String,
+    #[schemars(
+        description = "Whether the job fires repeatedly (true, default) or once then auto-deletes (false). Ignored if run_at is set."
+    )]
+    pub recurring: Option<bool>,
+    #[schemars(
+        description = "ISO8601 UTC datetime to fire once (e.g. '2026-04-15T15:30:00Z'). Mutually exclusive with schedule. Job auto-deletes after firing."
+    )]
+    pub run_at: Option<String>,
+    #[schemars(description = "Lock TTL duration (e.g. '30m', '1h'). Default: 30m")]
+    pub lock_ttl: Option<String>,
+    #[schemars(description = "Maximum dollar spend per invocation. Default: 2.0")]
+    #[serde(default, deserialize_with = "deserialize_lenient_f64")]
+    pub max_budget_usd: Option<f64>,
+    #[schemars(
+        description = "Telegram chat id to deliver this cron's results to. Required. For DMs use the user_id; for groups use the negative chat id. Must be present in the agent's allowlist (allowlist.yaml). Read this from the `chat.id` field in the incoming message YAML unless the user explicitly asks for a different chat."
+    )]
+    pub target_chat_id: i64,
+    #[schemars(
+        description = "Optional supergroup topic (message_thread_id). Set only when the cron should reply to a specific topic; leave unset for ordinary chat delivery."
+    )]
+    pub target_thread_id: Option<i64>,
+    #[schemars(
+        description = "Model tier for this cron, chosen by complexity: 'haiku' (trivial request-and-format), 'sonnet' (mechanical multi-step — the usual choice), 'opus' (complex reasoning/research). Omit to inherit the agent's current /model. See the right-cron skill for the full heuristic."
+    )]
+    pub model: Option<CronModel>,
+    #[schemars(
+        description = "Optional rightx-* skill names to link to this cron at creation. The cron deterministically pulls these at fire time. The skills must already exist."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_names: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronUpdateParams {
+    #[schemars(description = "Job name to update")]
+    pub job_name: String,
+    #[schemars(
+        description = "New 5-field cron expression. Clears run_at if set. Same peak-minute rule as cron_create.schedule: \
+                       NEVER silently pick a schedule that fires at minute :00 or :30 (including '*/30', '*/15', '*/10', '*/5'). \
+                       Use an offset like ':17' or ':43' unless the user explicitly insisted on the round minute."
+    )]
+    pub schedule: Option<String>,
+    #[schemars(
+        description = "New ISO8601 UTC datetime. Clears schedule and forces recurring=false."
+    )]
+    pub run_at: Option<String>,
+    #[schemars(description = "New task prompt")]
+    pub prompt: Option<String>,
+    #[schemars(description = "Set recurring (true) or one-shot (false)")]
+    pub recurring: Option<bool>,
+    #[schemars(description = "New lock TTL duration (e.g. '30m', '1h')")]
+    pub lock_ttl: Option<String>,
+    #[schemars(description = "New maximum dollar spend per invocation")]
+    #[serde(default, deserialize_with = "deserialize_lenient_f64")]
+    pub max_budget_usd: Option<f64>,
+    #[schemars(description = "New target_chat_id. Must be in the agent's allowlist.")]
+    pub target_chat_id: Option<i64>,
+    #[schemars(
+        description = "New target_thread_id. Pass `null` to clear (cron will deliver to the chat without a topic). Omit the field entirely to leave unchanged."
+    )]
+    #[serde(default, deserialize_with = "deserialize_double_option_i64")]
+    pub target_thread_id: Option<Option<i64>>,
+    #[schemars(
+        description = "New model tier ('haiku'|'sonnet'|'opus'). Pass null to clear back to inheriting the agent's /model. Omit to leave unchanged."
+    )]
+    #[serde(default, deserialize_with = "deserialize_double_option_cron_model")]
+    pub model: Option<Option<CronModel>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronDeleteParams {
+    #[schemars(description = "Job name to delete")]
+    pub job_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronLinkSkillParams {
+    #[schemars(description = "The cron job_name to link skills to.")]
+    pub job_name: String,
+    #[schemars(description = "rightx-* skill names to link. Each must already exist.")]
+    pub skill_names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronUnlinkSkillParams {
+    #[schemars(description = "The cron job_name to unlink skills from.")]
+    pub job_name: String,
+    #[schemars(description = "rightx-* skill names to unlink.")]
+    pub skill_names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronListParams {}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOnDto {
+    Success,
+    Failure,
+    Always,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Deserialize, JsonSchema)]
+pub struct CronThenParams {
+    #[schemars(
+        description = "Instruction for the follow-up turn. It resumes (forks) THIS run's session, so it can reference what the run just did."
+    )]
+    pub instruction: String,
+    #[schemars(description = "When the follow-up fires relative to this run's outcome. REQUIRED.")]
+    pub run_on: RunOnDto,
+    #[serde(default)]
+    #[schemars(
+        description = "Add emphasis instructing the follow-up to report. The follow-up always delivers a message; idle-gate skip is not yet implemented. Default false."
+    )]
+    pub notify: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Override the follow-up's delivery chat. Defaults to the chat this trigger was issued from."
+    )]
+    pub target_chat_id: Option<i64>,
+    #[serde(default)]
+    pub target_thread_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronTriggerParams {
+    #[schemars(description = "Job name to trigger for immediate execution")]
+    pub job_name: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Force a verification report: override a silent decision and skip the idle gate so the user receives the result promptly. Default false."
+    )]
+    pub notify: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Extra instruction prepended to THIS run only; does not change the stored prompt."
+    )]
+    pub extra_instruction: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Runtime-guaranteed follow-up that resumes this run's session after it finishes."
+    )]
+    pub then: Option<CronThenParams>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct McpListParams {}
+
+/// Convert an async cron run row to JSON value.
+pub(crate) fn cron_run_to_json(
+    id: &str,
+    job_name: &str,
+    started_at: &str,
+    finished_at: Option<&str>,
+    exit_code: Option<i64>,
+    status: &str,
+    log_path: Option<&str>,
+    run_note: Option<&str>,
+    delivery_json: Option<&str>,
+    delivered_at: Option<&str>,
+    delivery_status: Option<&str>,
+) -> serde_json::Value {
+    right_agent::async_runs::cron_run_to_json(&right_agent::async_runs::CronRunJsonRow {
+        id: id.to_owned(),
+        job_name: job_name.to_owned(),
+        started_at: started_at.to_owned(),
+        finished_at: finished_at.map(str::to_owned),
+        exit_code,
+        status: status.to_owned(),
+        log_path: log_path.map(str::to_owned),
+        run_note: run_note.map(str::to_owned),
+        delivery_json: delivery_json.map(str::to_owned),
+        delivered_at: delivered_at.map(str::to_owned),
+        delivery_status: delivery_status.map(str::to_owned),
+    })
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -144,9 +420,9 @@ pub(crate) struct ProviderCapabilitiesParams {}
 pub struct RightBackend {
     agents_dir: PathBuf,
     /// Right's provider credential store, when the caller wired one. `None`
-    /// only in constructions that never serve `provider_capabilities` (tests,
-    /// and the stdio path that stubs the tool out) — the tool reports the
-    /// store as unavailable rather than answering with an empty inventory.
+    /// only in constructions that never serve `provider_capabilities` (tests)
+    /// — the tool reports the store as unavailable rather than answering with
+    /// an empty inventory.
     providers: Option<std::sync::Arc<right_providers::ProviderStore>>,
     skill_probe: crate::learning::SkillPackageProbe,
     progress: crate::progress::ProgressRegistry,
@@ -435,12 +711,11 @@ impl RightBackend {
     pub(crate) async fn get_conn(
         &self,
         agent_name: &str,
-    ) -> Result<Arc<tokio::sync::Mutex<right_db::Connection>>, anyhow::Error> {
+    ) -> Result<right_db::Connection, anyhow::Error> {
         let db_dir = self.agents_dir.join(agent_name);
-        let conn = right_db::open_connection(&db_dir, false)
+        right_db::open_connection(&db_dir, false)
             .await
-            .with_context(|| format!("failed to open memory DB for {agent_name}"))?;
-        Ok(Arc::new(tokio::sync::Mutex::new(conn)))
+            .with_context(|| format!("failed to open memory DB for {agent_name}"))
     }
 
     fn invocation_kind_to_created_by(
@@ -486,8 +761,7 @@ impl RightBackend {
         if let Err(msg) = validate_target_against_allowlist(agent_dir, params.target_chat_id) {
             return Ok(tool_error("chat_id_not_in_allowlist", msg, None));
         }
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         if let Some(skills) = params.skill_names.as_deref()
             && !skills.is_empty()
             && let Err(e) = right_agent::cron_skill_link::ensure_skills_live(&conn, skills).await
@@ -536,8 +810,7 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronLinkSkillParams =
             serde_json::from_value(args.clone()).context("invalid cron_link_skill params")?;
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         match right_agent::cron_skill_link::link_agent(&conn, &params.job_name, &params.skill_names)
             .await
         {
@@ -553,8 +826,7 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronUnlinkSkillParams =
             serde_json::from_value(args.clone()).context("invalid cron_unlink_skill params")?;
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         match right_agent::cron_skill_link::unlink_agent(
             &conn,
             &params.job_name,
@@ -580,8 +852,7 @@ impl RightBackend {
         {
             return Ok(tool_error("chat_id_not_in_allowlist", msg, None));
         }
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         let result = right_agent::cron_spec::update_spec_partial(
             &conn,
             &params.job_name,
@@ -610,8 +881,7 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronDeleteParams =
             serde_json::from_value(args.clone()).context("invalid cron_delete params")?;
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         let msg = right_agent::cron_spec::delete_spec(&conn, &params.job_name, agent_dir)
             .await
             .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
@@ -619,8 +889,7 @@ impl RightBackend {
     }
 
     async fn call_cron_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         let output = right_agent::cron_spec::list_specs(&conn)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -634,9 +903,8 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronListRunsParams =
             serde_json::from_value(args.clone()).context("invalid cron_list_runs params")?;
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
         let limit = params.limit.unwrap_or(20);
+        let conn = self.get_conn(agent_name).await?;
         let mut stmt = conn.prepare(
             "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
                     run_note, delivery_json, delivered_at, delivery_status
@@ -675,8 +943,7 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronShowRunParams =
             serde_json::from_value(args.clone()).context("invalid cron_show_run params")?;
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         let result = conn
             .query_row(
                 "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
@@ -743,8 +1010,7 @@ impl RightBackend {
             None => None,
         };
 
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         let msg = right_agent::cron_spec::trigger_spec(
             &conn,
             &params.job_name,
@@ -764,8 +1030,7 @@ impl RightBackend {
     // ------------------------------------------------------------------
 
     async fn call_mcp_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         let servers = right_mcp::credentials::db_list_servers(&conn).await?;
         let items: Vec<serde_json::Value> = servers
             .iter()
@@ -1150,8 +1415,7 @@ impl RightBackend {
         }
 
         {
-            let conn_arc = self.get_conn(agent_name).await?;
-            let conn = conn_arc.lock().await;
+            let conn = self.get_conn(agent_name).await?;
             right_agent::learned_skills::insert_learning_event(
                 &conn,
                 &right_agent::learned_skills::LearningEvent {
@@ -1245,8 +1509,7 @@ impl RightBackend {
         }
 
         {
-            let conn_arc = self.get_conn(agent_name).await?;
-            let conn = conn_arc.lock().await;
+            let conn = self.get_conn(agent_name).await?;
             right_agent::learned_skills::insert_learning_event(
                 &conn,
                 &right_agent::learned_skills::LearningEvent {
@@ -1317,8 +1580,7 @@ impl RightBackend {
 
         if let Some(created_by) = created_by {
             let now_utc = chrono::Utc::now();
-            let conn_arc = self.get_conn(agent_name).await?;
-            let conn = conn_arc.lock().await;
+            let conn = self.get_conn(agent_name).await?;
             let outcome = match params.status.as_str() {
                 "created" => {
                     right_lifecycle::mark_created(&conn, &params.skill_name, created_by, now_utc)
@@ -1394,8 +1656,7 @@ impl RightBackend {
             Err(_) => return Ok(conversation_scope_unavailable()),
         };
 
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         let limit = params.limit.unwrap_or(CONVERSATION_SEARCH_DEFAULT_LIMIT);
         let results = match mode {
             ConversationSearchMode::Thread => {
@@ -1505,8 +1766,7 @@ impl RightBackend {
             ));
         }
 
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         let limit = params
             .limit
             .unwrap_or(CHANNEL_READ_DEFAULT_LIMIT)
@@ -1567,8 +1827,7 @@ impl RightBackend {
             Err(_) => return Ok(conversation_scope_unavailable()),
         };
 
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         let rows = right_db::conversation::fetch_by_ids(
             &conn,
             "telegram",
@@ -1634,8 +1893,7 @@ impl RightBackend {
             Some(trimmed)
         };
 
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         right_db::thread_focus::set_agent(&conn, scope.chat_id, scope.thread_id, value)
             .await
             .map_err(|e| anyhow::anyhow!("thread_focus set failed: {e:#}"))?;
@@ -1732,8 +1990,7 @@ impl RightBackend {
         // permanent duplicate topic (there is no delete tool to undo it). Log
         // loudly and still return the result; the cache self-heals on the next op.
         if let Err(e) = async {
-            let conn_arc = self.get_conn(agent_name).await?;
-            let conn = conn_arc.lock().await;
+            let conn = self.get_conn(agent_name).await?;
             right_db::forum_topics::upsert_created(
                 &conn,
                 target.chat_id,
@@ -1813,8 +2070,7 @@ impl RightBackend {
         // call_forum_topic_create). A write failure must not report failure for
         // an op the user can already see — log loudly and continue.
         if let Err(e) = async {
-            let conn_arc = self.get_conn(agent_name).await?;
-            let conn = conn_arc.lock().await;
+            let conn = self.get_conn(agent_name).await?;
             right_db::forum_topics::update_edited(
                 &conn,
                 target.chat_id,
@@ -1925,8 +2181,7 @@ impl RightBackend {
         // call_forum_topic_create). A write failure must not report failure for
         // an op the user can already see — log loudly and continue.
         if let Err(e) = async {
-            let conn_arc = self.get_conn(agent_name).await?;
-            let conn = conn_arc.lock().await;
+            let conn = self.get_conn(agent_name).await?;
             right_db::forum_topics::set_state(
                 &conn,
                 target.chat_id,
@@ -1967,8 +2222,7 @@ impl RightBackend {
             Ok(s) => s,
             Err(_) => return Ok(forum_scope_unavailable()),
         };
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let conn = self.get_conn(agent_name).await?;
         let rows = right_db::forum_topics::list(&conn, scope.chat_id)
             .await
             .map_err(|e| anyhow::anyhow!("forum list failed: {e:#}"))?;

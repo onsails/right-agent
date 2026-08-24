@@ -267,7 +267,7 @@ line; they are disposable runtime state, not persisted across restarts.
 
 ## MCP Aggregator
 
-The Aggregator replaces HttpMemoryServer as the MCP endpoint. One shared process
+The Aggregator is the MCP endpoint. One shared process
 serves all agents on TCP :8100/mcp with per-agent Bearer token authentication.
 
 Sandboxed agents reach the host-side aggregator through

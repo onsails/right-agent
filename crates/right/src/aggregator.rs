@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use crate::right_backend::RightBackend;
 
 // ---------------------------------------------------------------------------
-// Auth types & middleware (moved from memory_server_http.rs)
+// Auth types & middleware
 // ---------------------------------------------------------------------------
 
 /// Token -> agent mapping for multi-agent HTTP mode.
@@ -740,8 +740,8 @@ fn build_streamable_config(
 
 /// Run the MCP Aggregator over HTTP with per-agent Bearer authentication.
 ///
-/// Replaces `run_memory_server_http` — same auth middleware, but dispatches
-/// through the prefix-based `ToolDispatcher` instead of `HttpMemoryServer`.
+/// Serves the `right` MCP endpoint with per-agent Bearer authentication and
+/// dispatches through the prefix-based `ToolDispatcher`.
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_aggregator_http(

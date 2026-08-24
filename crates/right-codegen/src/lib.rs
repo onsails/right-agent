@@ -18,7 +18,7 @@ pub use agent_def::{
     REPLY_SCHEMA_JSON, generate_system_prompt,
 };
 pub use claude_json::{create_credential_symlink, generate_agent_claude_json};
-pub use mcp_config::{generate_mcp_config, generate_mcp_config_http};
+pub use mcp_config::generate_mcp_config_http;
 pub use mcp_instructions::generate_mcp_instructions_md;
 pub use pipeline::run_single_agent_codegen;
 pub use pipeline::{CodegenOutcome, run_agent_codegen};

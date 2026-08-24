@@ -7,7 +7,6 @@ pub(crate) mod aggregator;
 pub(crate) mod internal_api;
 pub(crate) mod internal_api_providers;
 pub(crate) mod learning;
-mod memory_server;
 pub(crate) mod migrate_sandbox;
 pub(crate) mod progress;
 mod restore;
@@ -808,8 +807,6 @@ pub enum Commands {
         #[command(subcommand)]
         command: MemoryCommands,
     },
-    /// Run MCP memory server (stdio transport, launched by Claude Code)
-    MemoryServer,
     /// Run MCP Aggregator HTTP server (multi-agent, Bearer token auth)
     McpServer {
         /// Port to listen on
@@ -955,18 +952,11 @@ async fn main() -> miette::Result<()> {
     // DarkGrey (or no styling at all on Mono/Ascii themes).
     right_ui::install_prompt_render_config();
 
-    // memory-server manages its own tracing (stderr-only for MCP compatibility).
-    // Dispatch BEFORE the default tracing_subscriber init which writes to stdout.
-    if matches!(cli.command, Commands::MemoryServer) {
-        return memory_server::run_memory_server().await;
-    }
-
     let filter = if cli.verbose {
         "right=debug,right_agent=debug,right_bot=debug"
     } else {
         "right=info,right_agent=info,right_bot=info"
     };
-
     // Set up tracing with console + per-process file log.
     // Bot writes console to stderr (stdout reserved for JSON), aggregator to stdout (colored).
     use tracing_subscriber::layer::SubscriberExt;
@@ -1428,8 +1418,6 @@ async fn main() -> miette::Result<()> {
         Commands::Mcp { command } => match command {
             McpCommands::Status { agent } => cmd_mcp_status(&home, agent.as_deref()).await,
         },
-        // Unreachable: MemoryServer is dispatched before reaching here.
-        Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
         Commands::McpServer {
             port,
             ref token_map,

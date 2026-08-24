@@ -452,13 +452,12 @@ async fn handle_mcp_add(
             Arc::clone(&registry.proxies),
         )
     };
-    let conn_arc = match right.get_conn(&req.agent).await {
+    let conn = match right.get_conn(&req.agent).await {
         Ok(c) => c,
         Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
     };
 
     {
-        let conn = conn_arc.lock().await;
         let existed_before = match credentials::db_server_exists(&conn, &req.name).await {
             Ok(exists) => exists,
             Err(e) => return internal_error(format!("db_server_exists: {e:#}")).into_response(),
@@ -573,10 +572,9 @@ async fn handle_mcp_add(
                 .into_response()
         }
         Err(e) => {
-            // Remove from SQLite on connection failure (reuse conn_arc from initial lookup)
+            // Remove from SQLite on connection failure (reuse conn from initial lookup)
             {
-                let conn = conn_arc.lock().await;
-                // Best-effort rollback — ignore ServerNotFound
+                let conn = &conn;
                 match credentials::db_remove_server(&conn, &req.name).await {
                     Ok(()) | Err(CredentialError::ServerNotFound(_)) => {}
                     Err(db_err) => {
@@ -616,7 +614,7 @@ async fn handle_mcp_remove(
         };
         (Arc::clone(&registry.proxies), registry.right.clone())
     };
-    let conn_arc = match right.get_conn(&req.agent).await {
+    let conn = match right.get_conn(&req.agent).await {
         Ok(c) => c,
         Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
     };
@@ -631,7 +629,6 @@ async fn handle_mcp_remove(
     // outlive the in-memory map (e.g. after an aggregator restart where the
     // proxy failed to reconnect), and leaving them orphans the dashboard.
     let removed_from_db = {
-        let conn = conn_arc.lock().await;
         match credentials::db_remove_server(&conn, &req.name).await {
             Ok(()) => true,
             Err(CredentialError::ServerNotFound(_)) => false,
@@ -672,7 +669,7 @@ async fn handle_mcp_set_headers(
         };
         (registry.right.clone(), Arc::clone(&registry.proxies))
     };
-    let conn_arc = match right.get_conn(&req.agent).await {
+    let conn = match right.get_conn(&req.agent).await {
         Ok(c) => c,
         Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
     };
@@ -703,7 +700,7 @@ async fn handle_mcp_set_headers(
 
     // Persist next — a credential write does not depend on upstream reachability.
     {
-        let conn = conn_arc.lock().await;
+        let conn = &conn;
         if let Err(e) = credentials::db_set_http_headers(&conn, &req.name, &header_secrets).await {
             return match e {
                 CredentialError::ServerNotFound(_) => {
@@ -856,11 +853,10 @@ async fn handle_set_token(
             };
             registry.right.clone()
         };
-        let conn_arc = match right.get_conn(&req.agent).await {
+        let conn = match right.get_conn(&req.agent).await {
             Ok(c) => c,
             Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
         };
-        let conn = conn_arc.lock().await;
         if let Err(e) = right_mcp::credentials::db_set_oauth_state(
             &conn,
             &req.server,
@@ -977,7 +973,7 @@ async fn handle_mcp_list(
     });
 
     // SQLite preserves "oauth" as auth_type; AuthMethod enum has no OAuth variant.
-    let conn_arc = match right.get_conn(&req.agent).await {
+    let conn = match right.get_conn(&req.agent).await {
         Ok(c) => c,
         Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
     };
@@ -985,7 +981,6 @@ async fn handle_mcp_list(
         std::collections::HashMap<String, Option<String>>,
         std::collections::HashMap<String, Vec<String>>,
     ) = {
-        let conn = conn_arc.lock().await;
         let server_entries = match credentials::db_list_servers(&conn).await {
             Ok(s) => s,
             Err(e) => return internal_error(format!("db_list_servers: {e:#}")).into_response(),
@@ -1050,20 +1045,19 @@ async fn handle_mcp_instructions(
         };
         registry.right.clone()
     };
-    let conn_arc = match right.get_conn(&req.agent).await {
+    let conn = match right.get_conn(&req.agent).await {
         Ok(c) => c,
         Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
     };
 
     let servers = {
-        let conn = conn_arc.lock().await;
         match credentials::db_list_servers(&conn).await {
             Ok(s) => s,
             Err(e) => return internal_error(format!("db_list_servers: {e:#}")).into_response(),
         }
     };
-
     let content = right_codegen::generate_mcp_instructions_md(&servers);
+
     Json(McpInstructionsResponse {
         instructions: content,
     })
@@ -1988,7 +1982,7 @@ mod tests {
         // Pre-insert a DB row with no matching in-memory proxy. This simulates
         // an orphan left behind when the aggregator restarted but the proxy
         // failed to reconnect.
-        let conn_arc = {
+        let conn = {
             let registry = dispatcher
                 .agents
                 .get("test-agent")
@@ -2000,7 +1994,6 @@ mod tests {
                 .expect("test db connection")
         };
         {
-            let conn = conn_arc.lock().await;
             credentials::db_add_server(&conn, "orphan", "https://example.com/mcp")
                 .await
                 .expect("seed orphan row");
@@ -2024,7 +2017,6 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "body={body}");
         assert_eq!(body["removed"], true);
 
-        let conn = conn_arc.lock().await;
         assert!(
             !credentials::db_server_exists(&conn, "orphan")
                 .await
@@ -2084,7 +2076,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
 
-        let (agent_dir, proxies, conn_arc) = {
+        let (agent_dir, proxies, conn) = {
             let registry = dispatcher
                 .agents
                 .get("test-agent")
@@ -2100,7 +2092,6 @@ mod tests {
             )
         };
         {
-            let conn = conn_arc.lock().await;
             conn.execute(
                 "INSERT INTO mcp_servers (name, url, auth_type) VALUES ('composio', 'https://mcp.example.com/mcp', 'oauth')",
                 [],
@@ -2154,7 +2145,7 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let mcp_url = start_failing_mcp_server(Arc::clone(&attempts)).await;
 
-        let (agent_dir, proxies, conn_arc) = {
+        let (agent_dir, proxies, conn) = {
             let registry = dispatcher
                 .agents
                 .get("test-agent")
@@ -2170,7 +2161,6 @@ mod tests {
             )
         };
         {
-            let conn = conn_arc.lock().await;
             conn.execute(
                 "INSERT INTO mcp_servers (name, url, auth_type) VALUES ('composio', ?1, 'oauth')",
                 [&mcp_url],
@@ -2227,7 +2217,6 @@ mod tests {
             "fresh token should still be stored for the refresh scheduler after readiness failure",
         );
         let persisted_resource: Option<String> = {
-            let conn = conn_arc.lock().await;
             conn.query_row(
                 "SELECT oauth_resource FROM mcp_servers WHERE name = 'composio'",
                 [],
@@ -2496,7 +2485,7 @@ mod tests {
 
         // Seed a DB row + an unreachable proxy backend directly: /mcp-add would
         // itself fail to connect to a dead upstream, so we bypass it.
-        let conn_arc = {
+        let conn = {
             let registry = dispatcher
                 .agents
                 .get("test-agent")
@@ -2509,7 +2498,6 @@ mod tests {
         };
         let dead_url = "http://127.0.0.1:1/mcp".to_string();
         {
-            let conn = conn_arc.lock().await;
             credentials::db_add_server(&conn, "obsidian", &dead_url)
                 .await
                 .unwrap();
@@ -2577,7 +2565,7 @@ mod tests {
         let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
 
         let dead_url = "http://127.0.0.1:1/mcp".to_string();
-        let conn_arc = {
+        let conn = {
             let registry = dispatcher
                 .agents
                 .get("test-agent")
@@ -2589,7 +2577,6 @@ mod tests {
                 .expect("test db connection")
         };
         {
-            let conn = conn_arc.lock().await;
             credentials::db_add_server(&conn, "obsidian", &dead_url)
                 .await
                 .unwrap();

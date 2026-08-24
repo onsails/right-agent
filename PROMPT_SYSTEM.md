@@ -602,8 +602,7 @@ optional `notify=true` to force a verification report, `extra_instruction` for a
 one-off note to that run, and a `then` follow-up that resumes the run's session;
 `mcp__right__cron_list_runs` and `mcp__right__cron_show_run` for inspection),
 MCP visibility
-(`mcp__right__rightmeta__mcp_list` via the HTTP aggregator, and
-`mcp__right__mcp_list` only in direct stdio mode; add/remove/auth stay in the
+(`mcp__right__rightmeta__mcp_list` via the HTTP aggregator; add/remove/auth stay in the
 Telegram dashboard MCP view), foreground progress (`mcp__right__send_progress`),
 foreground standalone message delivery (`mcp__right__send_message`),
 provider capabilities (`mcp__right__provider_capabilities` — env var names only,
@@ -615,8 +614,7 @@ learned-skill metadata/progress/receipt tools
 `mcp__right__skill_learning_finish`). Bootstrap answer recording, verification,
 and finalization are worker-owned and are not exposed as MCP tools.
 
-Update `with_instructions()` in both `memory_server.rs` and `aggregator.rs`
-whenever tools change.
+Update `with_instructions()` in `aggregator.rs` whenever tools change.
 
 ### Error Convention
 
