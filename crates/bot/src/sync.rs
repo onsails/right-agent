@@ -439,7 +439,10 @@ fn bashrc_read_script(path: &str) -> String {
     let path_arg = shell_arg(path);
     let message = shell_arg(&format!("not a regular file: {path}"));
     format!(
-        "if [ -f {path_arg} ]; then \
+        "if [ -L {path_arg} ]; then \
+           printf '%s\\n' {message} >&2; \
+           exit 1; \
+         elif [ -f {path_arg} ]; then \
            cat {path_arg}; \
          elif [ -e {path_arg} ]; then \
            printf '%s\\n' {message} >&2; \
@@ -487,11 +490,10 @@ async fn ensure_sandbox_user_local_env(agent_dir: &Path, sbox: &Sandbox) -> miet
         ));
     }
 
-    // One-exec read: missing and dangling-symlink paths are treated as an
-    // empty `.bashrc`; existing non-regular paths are rejected before the
-    // atomic writer can accidentally move the temp file into a directory.
+    // Read as the guest user and reject every symlink. The home persists and
+    // is agent-controlled between boots, so root must never follow these paths.
     let read_script = bashrc_read_script(SANDBOX_BASHRC_PATH);
-    let (existing, code) = exec_argv(sbox, &["bash", "-lc", &read_script]).await?;
+    let (existing, code) = exec_argv_as_guest(sbox, &["bash", "-lc", &read_script]).await?;
     if code != 0 {
         return Err(miette::miette!(
             "sync: failed to read {SANDBOX_BASHRC_PATH} in {}: bash exited with {code} (output: {existing})",
@@ -501,12 +503,8 @@ async fn ensure_sandbox_user_local_env(agent_dir: &Path, sbox: &Sandbox) -> miet
     let desired = ensure_bashrc_sources_managed_env(&existing);
     if desired != existing {
         let bashrc_content = shell_printf_b_arg(&desired);
-        let script = format!(
-            "printf '%b' {bashrc_content} > {SANDBOX_BASHRC_PATH}.right-tmp && \
-             chmod 0644 {SANDBOX_BASHRC_PATH}.right-tmp && \
-             mv -f {SANDBOX_BASHRC_PATH}.right-tmp {SANDBOX_BASHRC_PATH}"
-        );
-        let (output, code) = exec_argv(sbox, &["bash", "-lc", &script]).await?;
+        let script = bashrc_write_script(&bashrc_content);
+        let (output, code) = exec_argv_as_guest(sbox, &["bash", "-lc", &script]).await?;
         if code != 0 {
             return Err(miette::miette!(
                 "sync: failed to update /sandbox/.bashrc in {}: bash exited with {code}: {output}",
@@ -532,6 +530,21 @@ fn sandbox_env_setup_script(env_content: &str) -> String {
          printf '%b' {env_content} > {SANDBOX_ENV_PATH}.tmp && \
          chmod 0644 {SANDBOX_ENV_PATH}.tmp && \
          mv -f {SANDBOX_ENV_PATH}.tmp {SANDBOX_ENV_PATH}"
+    )
+}
+
+fn bashrc_write_script(content: &str) -> String {
+    format!(
+        "if [ -L {SANDBOX_BASHRC_PATH} ] || \
+            {{ [ -e {SANDBOX_BASHRC_PATH} ] && [ ! -f {SANDBOX_BASHRC_PATH} ]; }} || \
+            [ -L {SANDBOX_BASHRC_PATH}.right-tmp ]; then \
+           printf '%s\\n' 'managed bashrc path is not a regular file' >&2; exit 1; \
+         fi; \
+         rm -f {SANDBOX_BASHRC_PATH}.right-tmp && \
+         set -C && \
+         printf '%b' {content} > {SANDBOX_BASHRC_PATH}.right-tmp && \
+         chmod 0644 {SANDBOX_BASHRC_PATH}.right-tmp && \
+         mv -f {SANDBOX_BASHRC_PATH}.right-tmp {SANDBOX_BASHRC_PATH}"
     )
 }
 
@@ -922,11 +935,12 @@ percent % and backslash \\ and carriage\r and tab\t done\n";
 
     #[cfg(unix)]
     #[test]
-    fn bashrc_read_script_treats_dangling_symlink_as_missing() {
+    fn bashrc_read_script_rejects_symlink_without_reading_target() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("sentinel");
         let bashrc_path = tmp.path().join(".bashrc");
-        std::os::unix::fs::symlink(tmp.path().join("missing-target"), &bashrc_path)
-            .expect("create dangling symlink");
+        std::fs::write(&target, "secret sentinel").expect("write sentinel");
+        std::os::unix::fs::symlink(&target, &bashrc_path).expect("create symlink");
 
         let output = std::process::Command::new("bash")
             .arg("-lc")
@@ -936,11 +950,42 @@ percent % and backslash \\ and carriage\r and tab\t done\n";
             .output()
             .expect("bash should run read script");
 
-        assert!(
-            output.status.success(),
-            "dangling symlink should be treated as missing, stderr={}",
-            String::from_utf8_lossy(&output.stderr)
+        assert!(!output.status.success(), "bashrc symlink must fail closed");
+        assert!(output.stdout.is_empty(), "target content must not be read");
+        assert_eq!(
+            std::fs::read_to_string(target).expect("read target"),
+            "secret sentinel"
         );
-        assert!(output.stdout.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bashrc_write_script_rejects_target_and_temp_symlinks_without_touching_sentinel() {
+        for suffix in ["", ".right-tmp"] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let sentinel = tmp.path().join("sentinel");
+            let bashrc = tmp.path().join(".bashrc");
+            std::fs::write(&sentinel, "unchanged").expect("write sentinel");
+            std::os::unix::fs::symlink(&sentinel, format!("{}{}", bashrc.display(), suffix))
+                .expect("create managed symlink");
+
+            let script = bashrc_write_script("'managed bashrc'").replace(
+                SANDBOX_BASHRC_PATH,
+                bashrc.to_str().expect("utf-8 temp path"),
+            );
+            let output = std::process::Command::new("bash")
+                .args(["-c", &script])
+                .output()
+                .expect("run bashrc write script");
+
+            assert!(
+                !output.status.success(),
+                "{suffix:?} symlink must fail closed"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&sentinel).expect("read sentinel"),
+                "unchanged"
+            );
+        }
     }
 }
