@@ -4,14 +4,27 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-/// Convert the delivery idle timestamp (unix seconds, from `IdleTimestamp`)
-/// into the chat-activity instant the curator idle gate consumes. 0/negative
-/// means "uninitialized" → `None` (gate treats absence as "idle enough").
-pub(crate) fn idle_secs_to_activity(secs: i64) -> Option<DateTime<Utc>> {
-    if secs <= 0 {
-        None
-    } else {
-        DateTime::from_timestamp(secs, 0)
+/// Return the newest archived conversation message timestamp. An empty
+/// conversation is idle enough for the curator gate.
+async fn latest_chat_activity(
+    conn: &right_db::Connection,
+) -> Result<Option<DateTime<Utc>>, right_db::DbError> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT MAX(created_at) FROM conversation_messages",
+            (),
+            |r| r.get(0),
+        )
+        .await?;
+    match latest {
+        None => Ok(None),
+        Some(timestamp) => DateTime::parse_from_rfc3339(&timestamp)
+            .map(|timestamp| Some(timestamp.with_timezone(&Utc)))
+            .map_err(|error| {
+                right_db::DbError::InvalidParameter(format!(
+                    "invalid conversation message timestamp {timestamp:?}: {error}"
+                ))
+            }),
     }
 }
 
@@ -346,10 +359,7 @@ fn mark_failed_run(state: &mut CuratorState, config: CuratorConfig, now: DateTim
 
 /// Gate, snapshot, transitions, and LLM fork. Best-effort: every failure path
 /// logs a warn and continues. Updates state after a Run-gated invocation.
-pub(crate) async fn run_if_due(
-    ctx: CuratorContext,
-    latest_user_activity_at: Option<DateTime<Utc>>,
-) {
+pub(crate) async fn run_if_due(ctx: CuratorContext) {
     let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
         Ok(c) => c,
         Err(e) => {
@@ -379,6 +389,13 @@ pub(crate) async fn run_if_due(
     // Cheap pre-gate: short-circuit before computing cost-spike SQL or
     // reading lifecycle rows. On a busy ticker (60s per agent), these are
     // wasted I/O when the chat is active or we're inside cooldown.
+    let latest_user_activity_at = match latest_chat_activity(&conn).await {
+        Ok(activity) => activity,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator latest chat activity read failed: {e:#}");
+            return;
+        }
+    };
     if let Some(skip) = cheap_skip(ctx.config, &state, now, latest_user_activity_at) {
         tracing::debug!(agent = %ctx.agent_name, "curator gate: {:?}", skip);
         return;
@@ -1151,8 +1168,8 @@ mod tests {
 
     fn context(agent_dir: PathBuf) -> CuratorContext {
         CuratorContext {
+            agent_db_dir: agent_dir.clone(),
             agent_dir,
-            agent_db_dir: PathBuf::from("/tmp/db"),
             agent_name: "agent-1".into(),
             sandbox: None,
             internal_client: Arc::new(right_mcp::internal_client::InternalClient::new(
@@ -1459,16 +1476,70 @@ mod tests {
         assert_eq!(got, now + Duration::hours(24));
     }
 
-    #[test]
-    fn idle_secs_zero_or_negative_is_none() {
-        assert_eq!(idle_secs_to_activity(0), None);
-        assert_eq!(idle_secs_to_activity(-5), None);
-    }
+    #[tokio::test]
+    async fn idle_gate_uses_archived_message_activity_across_restart() {
+        // Regression for #135: startup seeds the delivery idle timestamp to
+        // now, but the curator must derive its gate from persistent archived
+        // messages. A recent archived message blocks an otherwise-due curator
+        // pass; an old archived message allows its lifecycle transition.
+        let dir = tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        let last_run_at = (Utc::now() - Duration::days(8)).to_rfc3339();
+        save_state_db(
+            &conn,
+            &CuratorState {
+                last_run_at: Some(last_run_at),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(latest_chat_activity(&conn).await.unwrap(), None);
+        conn.execute(
+            "INSERT INTO skill_lifecycle (skill_name, state, created_by, created_at, last_used_at) \
+             VALUES ('rightx-stale', 'active', 'foreground', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_messages (chat_id, role, content, created_at) \
+             VALUES (1, 'user', 'recent', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        run_if_due(context(dir.path().to_path_buf())).await;
+        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
+        let state_after_recent: String = conn
+            .query_row(
+                "SELECT state FROM skill_lifecycle WHERE skill_name = 'rightx-stale'",
+                (),
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(state_after_recent, "active");
 
-    #[test]
-    fn idle_secs_positive_converts_to_utc() {
-        let got = idle_secs_to_activity(1_700_000_000).unwrap();
-        assert_eq!(got, DateTime::from_timestamp(1_700_000_000, 0).unwrap());
+        conn.execute(
+            "UPDATE conversation_messages SET created_at = '2020-01-01T00:00:00Z'",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        run_if_due(context(dir.path().to_path_buf())).await;
+        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
+        let state_after_old: String = conn
+            .query_row(
+                "SELECT state FROM skill_lifecycle WHERE skill_name = 'rightx-stale'",
+                (),
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(state_after_old, "archived");
     }
 
     #[test]
@@ -1478,10 +1549,24 @@ mod tests {
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\"}}\n",
             "{\"type\":\"result\",\"total_cost_usd\":0.123,\"num_turns\":2,\"session_id\":\"s1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":7,\"cache_creation_input_tokens\":3}}\n",
         );
+
         let b = curator_usage_from_stdout(stdout).expect("usage parsed from result line");
         assert!((b.total_cost_usd - 0.123).abs() < 1e-9);
         assert_eq!(b.cache_read_tokens, 7);
         assert_eq!(b.cache_creation_tokens, 3);
+    }
+    #[tokio::test]
+    async fn malformed_archived_activity_timestamp_fails_closed() {
+        let conn = open_test_conn().await;
+        conn.execute(
+            "INSERT INTO conversation_messages (chat_id, role, content, created_at) \
+             VALUES (1, 'user', 'bad timestamp', 'not-a-timestamp')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        assert!(latest_chat_activity(&conn).await.is_err());
     }
 
     #[test]
