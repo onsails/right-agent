@@ -72,6 +72,8 @@ Bot startup (bring_up_sandbox, crates/bot/src/sandbox_supervisor.rs):
   ├─ fs_mkdir /sandbox/inbox and /sandbox/outbox — recreated every bring-up
   │   because a recreated sandbox starts from the stock image
   ├─ initial_sync (blocking — before the Telegram bot starts)
+  │   ├─ Create the guest user and its user-local CLI/npm directories
+  │   ├─ Write the managed env and patch `.bashrc`
   │   ├─ Deploy platform files to /sandbox/.platform/ (content-addressed +
   │   │   symlinks)
   │   ├─ Remove obsolete legacy built-in skill links from
@@ -102,6 +104,9 @@ Sandbox network:
   ├─ Egress is a typed value applied at create: Permissive, or Restrictive
   │   with a domain-suffix allow list (anthropic.com, claude.com, claude.ai,
   │   storage.googleapis.com). Suffixes, not globs.
+  ├─ Startup does not download guest packages or installers. Existing
+  │   restrictive sandboxes retain their create-time policy, so adding package
+  │   hosts later would not make guest-network provisioning upgrade-safe.
   ├─ The host destination group is always open on top of the allow list —
   │   that is how the guest reaches the MCP aggregator on the host.
   └─ Guest → host loopback services resolve through
@@ -204,11 +209,12 @@ a `Sandbox` for the process lifetime.
 ### User-Local CLI Environment
 
 Right Agent treats `/sandbox/.local/bin` as the canonical user-installed
-executable directory. Startup sync writes `/sandbox/.right/env.sh`, ensures
-`/sandbox/.bashrc` sources it, and the Claude invocation wrapper sources the
-same file with an inline fallback. This makes manually installed CLIs and
-`npm install -g` bins available both to `claude -p` turns and to interactive
-guest shells.
+executable directory. Startup sync creates `/sandbox/.local/bin` and
+`/sandbox/.npm`, assigns them to the guest user, atomically writes
+`/sandbox/.right/env.sh`, and ensures `/sandbox/.bashrc` sources it. The Claude
+invocation wrapper sources the same file with an inline fallback. This makes
+manually installed CLIs and `npm install -g` bins available both to `claude -p`
+turns and to interactive guest shells.
 
 Guest process stdin is buffered through `SandboxStdin`, whose explicit async
 `close` drains every queued chunk through the SDK and awaits the SDK EOF frame.
