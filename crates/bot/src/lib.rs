@@ -924,7 +924,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Startup upgrade: runs before cron/telegram — no lock contention.
     // (`upgrade_lock` is built above, before `setup_telegram`.)
     if let Some(sandbox) = sandbox.as_ref() {
-        upgrade::run_startup_upgrade(sandbox, &args.agent).await;
+        upgrade::run_startup_upgrade(sandbox, &args.agent).await?;
     }
 
     // CRON-01: spawn cron task alongside the Telegram webhook handler.

@@ -1,8 +1,9 @@
-//! Background task that periodically upgrades Claude Code inside a sandbox.
+//! Startup and periodic upgrades of the guest-owned Claude Code installation.
 //!
-//! Runs `claude upgrade` in the guest every 8 hours. The upgraded binary lands
-//! in `/sandbox/.local/bin` and precedes the host-staged platform fallback.
+//! The pinned root-owned runtime staged during `initial_sync` is the fallback,
+//! while `/sandbox/.local/bin/claude` keeps precedence for agent-owned updates.
 
+use miette::IntoDiagnostic;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -19,11 +20,11 @@ const UPGRADE_TIMEOUT: Duration = Duration::from_secs(120);
 const CLAUDE_UPGRADE_SCRIPT: &str = "exec claude upgrade 2>&1";
 const BUN_INSTALL: &str = "/sandbox/.bun";
 const UPGRADE_PATH: &str =
-    "/sandbox/.local/bin:/sandbox/.platform/bin:/sandbox/.bun/bin:/usr/local/bin:/usr/bin:/bin";
+    "/sandbox/.local/bin:/opt/right/bin:/sandbox/.bun/bin:/usr/local/bin:/usr/bin:/bin";
 
 // The shell text is platform-owned and sources no guest files. PATH lookup is
 // intentional: prefer the guest-owned upgraded binary, then fall back to the
-// image-baked binary, while the explicit user keeps either execution unprivileged.
+// root-owned pinned runtime, while the explicit user keeps execution unprivileged.
 fn claude_upgrade_request() -> ExecRequest {
     ExecRequest {
         cmd: "/bin/sh".to_owned(),
@@ -40,10 +41,17 @@ fn claude_upgrade_request() -> ExecRequest {
     }
 }
 
-/// Run a single upgrade attempt at startup (blocking).
+/// Run a single upgrade attempt as a startup readiness gate.
+///
+/// `initial_sync` first stages a pinned root-owned fallback. This attempt is
+/// nevertheless hard at startup because the guest-owned `.local` binary has
+/// precedence: a failed invocation means the effective Claude executable was
+/// not proven usable. Periodic attempts remain advisory and retry on later ticks.
 /// Called before cron/telegram tasks exist — no lock needed.
-pub(crate) async fn run_startup_upgrade(sandbox: &Sandbox, agent_name: &str) {
-    run_upgrade(sandbox, agent_name).await;
+pub(crate) async fn run_startup_upgrade(sandbox: &Sandbox, agent_name: &str) -> miette::Result<()> {
+    run_upgrade(sandbox, agent_name)
+        .await
+        .map_err(|error| error.wrap_err("startup Claude upgrade failed"))
 }
 
 /// Spawn a background task that periodically runs `claude upgrade` in the sandbox.
@@ -95,52 +103,69 @@ async fn run_upgrade_loop(
             tracing::info!(agent = %agent_name, "skipping upgrade — sandbox unavailable");
             continue;
         };
-        run_upgrade(&sandbox, agent_name).await;
+        handle_periodic_upgrade_result(agent_name, run_upgrade(&sandbox, agent_name).await);
         // _guard dropped here — CC sessions unblock
     }
 }
-
-async fn run_upgrade(sandbox: &Sandbox, agent_name: &str) {
-    tracing::info!(agent = %agent_name, "checking for claude upgrade");
-
-    match sandbox.exec(&claude_upgrade_request()).await {
-        Ok(outcome) => {
-            let mut output = String::from_utf8_lossy(&outcome.stdout).into_owned();
-            if !outcome.stderr.is_empty() {
-                if !output.is_empty() && !output.ends_with('\n') {
-                    output.push('\n');
-                }
-                output.push_str(&String::from_utf8_lossy(&outcome.stderr));
-            }
-            let exit_code = outcome.code;
-            let last_line = last_meaningful_line(&output);
-            match classify_claude_upgrade(exit_code, &output) {
-                ClaudeUpgradeResult::Updated => {
-                    tracing::info!(agent = %agent_name, output = %last_line, "claude upgraded");
-                }
-                ClaudeUpgradeResult::UpToDate => {
-                    tracing::info!(agent = %agent_name, output = %last_line, "claude is up to date");
-                }
-                ClaudeUpgradeResult::ConfigRepaired => {
-                    tracing::info!(agent = %agent_name, output = %last_line, "claude upgrade configuration repaired");
-                }
-                ClaudeUpgradeResult::Completed => {
-                    tracing::info!(agent = %agent_name, output = %last_line, "claude upgrade completed");
-                }
-                ClaudeUpgradeResult::Failed => {
-                    tracing::error!(
-                        agent = %agent_name,
-                        exit_code,
-                        output = %last_line,
-                        "claude upgrade exited non-zero"
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!(agent = %agent_name, "claude upgrade failed: {e:#}");
+fn handle_periodic_upgrade_result(agent_name: &str, result: miette::Result<()>) {
+    match result {
+        Ok(()) => {}
+        Err(error) => {
+            // Startup treats this same error as fatal. The periodic task is
+            // the retry mechanism, so one failed tick must not end it.
+            tracing::error!(
+                agent = %agent_name,
+                "periodic claude upgrade failed; retrying next interval: {error:#}"
+            );
         }
     }
+}
+
+async fn run_upgrade(sandbox: &Sandbox, agent_name: &str) -> miette::Result<()> {
+    tracing::info!(agent = %agent_name, "checking for claude upgrade");
+
+    let attempt = sandbox
+        .exec(&claude_upgrade_request())
+        .await
+        .into_diagnostic()
+        .map_err(|error| error.wrap_err("execute claude upgrade in sandbox"));
+    finish_upgrade_attempt(agent_name, attempt)
+}
+
+fn finish_upgrade_attempt(
+    agent_name: &str,
+    attempt: miette::Result<right_sandbox::ExecOutcome>,
+) -> miette::Result<()> {
+    let outcome = attempt?;
+    let mut output = String::from_utf8_lossy(&outcome.stdout).into_owned();
+    if !outcome.stderr.is_empty() {
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(&String::from_utf8_lossy(&outcome.stderr));
+    }
+    let exit_code = outcome.code;
+    let last_line = last_meaningful_line(&output);
+    match classify_claude_upgrade(exit_code, &output) {
+        ClaudeUpgradeResult::Updated => {
+            tracing::info!(agent = %agent_name, output = %last_line, "claude upgraded");
+        }
+        ClaudeUpgradeResult::UpToDate => {
+            tracing::info!(agent = %agent_name, output = %last_line, "claude is up to date");
+        }
+        ClaudeUpgradeResult::ConfigRepaired => {
+            tracing::info!(agent = %agent_name, output = %last_line, "claude upgrade configuration repaired");
+        }
+        ClaudeUpgradeResult::Completed => {
+            tracing::info!(agent = %agent_name, output = %last_line, "claude upgrade completed");
+        }
+        ClaudeUpgradeResult::Failed => {
+            return Err(miette::miette!(
+                "claude upgrade exited with code {exit_code}: {last_line}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 const CLAUDE_UP_TO_DATE_LINE: &str = "Claude Code is up to date";
@@ -215,7 +240,7 @@ mod tests {
                 ("BUN_INSTALL".to_owned(), "/sandbox/.bun".to_owned()),
                 (
                     "PATH".to_owned(),
-                    "/sandbox/.local/bin:/sandbox/.platform/bin:/sandbox/.bun/bin:/usr/local/bin:/usr/bin:/bin".to_owned(),
+                    "/sandbox/.local/bin:/opt/right/bin:/sandbox/.bun/bin:/usr/local/bin:/usr/bin:/bin".to_owned(),
                 ),
             ]
         );
@@ -231,6 +256,45 @@ mod tests {
         assert!(
             !source.contains(&root_helper),
             "upgrade must not use the root exec helper"
+        );
+    }
+
+    #[test]
+    fn startup_upgrade_propagates_nonzero_exit() {
+        let error = super::finish_upgrade_attempt(
+            "test-agent",
+            Ok(right_sandbox::ExecOutcome {
+                code: 2,
+                stdout: b"Current version: 2.1.234\n".to_vec(),
+                stderr: b"transport unavailable\n".to_vec(),
+            }),
+        )
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("claude upgrade exited with code 2"));
+        assert!(message.contains("transport unavailable"));
+    }
+
+    #[test]
+    fn startup_upgrade_propagates_transport_error_chain() {
+        let error = super::finish_upgrade_attempt(
+            "test-agent",
+            Err(miette::miette!("sandbox transport disconnected")),
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("sandbox transport disconnected"),
+            "transport cause must remain visible: {error:#}"
+        );
+    }
+
+    #[test]
+    fn periodic_upgrade_error_is_consumed_for_retry() {
+        super::handle_periodic_upgrade_result(
+            "test-agent",
+            Err(miette::miette!("temporary transport failure")),
         );
     }
 
