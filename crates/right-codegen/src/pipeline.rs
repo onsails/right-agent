@@ -45,11 +45,12 @@ fn ensure_agent_secret(
     Ok(new_secret)
 }
 
-/// Run codegen for a single agent.
+/// Run pure file generation for a single agent.
 ///
-/// Generates all per-agent artifacts: settings, agent definitions, schemas,
-/// .claude.json, mcp.json, TOOLS.md, skills, data.db.
-/// Called by the bot at startup. Also used by `right init` and `right agent init`.
+/// Generates per-agent settings, definitions, schemas, MCP configuration, and
+/// skills. Database creation and migrations belong to guarded offline
+/// initialization/restore paths or Aggregator owner startup. Bot startup may
+/// call this only after the Aggregator owner is ready.
 ///
 /// Returns the agent secret (existing or newly generated).
 pub async fn run_single_agent_codegen(
@@ -148,12 +149,6 @@ pub async fn run_single_agent_codegen(
 
     // Write settings.local.json only if absent (CC may write runtime state here).
     write_agent_owned(&claude_dir.join("settings.local.json"), "{}")?;
-
-    // Initialize per-agent memory database.
-    right_db::open_db(&agent.path, false).await.map_err(|e| {
-        miette::miette!("failed to open memory database for '{}': {e:#}", agent.name)
-    })?;
-    tracing::debug!(agent = %agent.name, "data.db initialized");
 
     // Ensure agent has a persistent secret for token derivation.
     let existing_secret = agent.config.as_ref().and_then(|c| c.secret.as_deref());
@@ -462,6 +457,126 @@ pub(crate) mod tests {
             !agent_dir.join("policy.yaml").exists(),
             "OpenShell policy files are retired; codegen must not write one"
         );
+    }
+
+    const OWNER_AGENT_DIR_ENV: &str = "RIGHT_CODEGEN_TEST_OWNER_AGENT_DIR";
+    const OWNER_READY_ENV: &str = "RIGHT_CODEGEN_TEST_OWNER_READY";
+    const OWNER_RELEASE_ENV: &str = "RIGHT_CODEGEN_TEST_OWNER_RELEASE";
+    const OWNER_USABLE_ENV: &str = "RIGHT_CODEGEN_TEST_OWNER_USABLE";
+    const OWNER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    const OWNER_WAIT_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
+    struct ChildGuard(Option<std::process::Child>);
+
+    impl ChildGuard {
+        fn spawn(command: &mut std::process::Command) -> Self {
+            Self(Some(command.spawn().unwrap()))
+        }
+
+        fn try_wait(&mut self) -> Option<std::process::ExitStatus> {
+            self.0.as_mut().unwrap().try_wait().unwrap()
+        }
+
+        fn wait(mut self) -> std::process::ExitStatus {
+            self.0.take().unwrap().wait().unwrap()
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let Some(child) = self.0.as_mut() else {
+                return;
+            };
+            if child.try_wait().unwrap().is_none() {
+                child.kill().unwrap();
+                child.wait().unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn database_owner_child() {
+        let Some(agent_dir) = std::env::var_os(OWNER_AGENT_DIR_ENV) else {
+            return;
+        };
+        let ready = std::path::PathBuf::from(std::env::var_os(OWNER_READY_ENV).unwrap());
+        let release = std::path::PathBuf::from(std::env::var_os(OWNER_RELEASE_ENV).unwrap());
+        let usable = std::path::PathBuf::from(std::env::var_os(OWNER_USABLE_ENV).unwrap());
+
+        let owner = right_db::open_connection(Path::new(&agent_dir), true)
+            .await
+            .unwrap();
+        std::fs::write(&ready, []).unwrap();
+        let deadline = tokio::time::Instant::now() + OWNER_WAIT_TIMEOUT;
+        while !release.exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting to release database owner"
+            );
+            tokio::time::sleep(OWNER_WAIT_DELAY).await;
+        }
+
+        let value: i64 = owner
+            .query_one("SELECT 1", [], |row| row.get(0))
+            .await
+            .unwrap();
+        assert_eq!(value, 1);
+        std::fs::write(usable, []).unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_single_agent_codegen_succeeds_with_live_database_owner() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+        let agent_dir = home.join("agents").join("test");
+        std::fs::create_dir_all(agent_dir.join(".claude")).unwrap();
+        std::fs::write(agent_dir.join("IDENTITY.md"), "# Test").unwrap();
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            "restart: never\nnetwork_policy: permissive\n",
+        )
+        .unwrap();
+
+        let ready = home.join("owner-ready");
+        let release = home.join("owner-release");
+        let usable = home.join("owner-usable");
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("pipeline::tests::database_owner_child")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(OWNER_AGENT_DIR_ENV, &agent_dir)
+            .env(OWNER_READY_ENV, &ready)
+            .env(OWNER_RELEASE_ENV, &release)
+            .env(OWNER_USABLE_ENV, &usable);
+        let mut owner = ChildGuard::spawn(&mut command);
+        let deadline = tokio::time::Instant::now() + OWNER_WAIT_TIMEOUT;
+        while !ready.exists() {
+            assert!(
+                owner.try_wait().is_none(),
+                "database owner child exited before publishing readiness"
+            );
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for database owner"
+            );
+            tokio::time::sleep(OWNER_WAIT_DELAY).await;
+        }
+
+        let agent = agent_fixture(&agent_dir);
+        let self_exe = std::path::PathBuf::from("/usr/bin/right");
+        let codegen_result = run_single_agent_codegen(home, &agent, &self_exe, false).await;
+
+        std::fs::write(&release, []).unwrap();
+        let owner_status = owner.wait();
+        assert!(owner_status.success(), "database owner child failed");
+        assert!(
+            usable.exists(),
+            "the retained database owner became unusable"
+        );
+        codegen_result.unwrap();
+        assert!(agent_dir.join(".claude/settings.json").exists());
+        assert!(agent_dir.join("mcp.json").exists());
     }
 
     // The `run_single_agent_codegen_*_policy` and `*_custom_policy_file_path`
