@@ -1,7 +1,10 @@
 # WAL desync self-healing + per-op aggregator connections
 
 **Date:** 2026-06-14
-**Status:** Design — pending implementation plan
+**Status:** Superseded — the single-owner standard-local cutover removes
+experimental multiprocess WAL, per-operation live opens, and automatic sidecar
+reset. This document remains historical incident/design evidence; recovery now
+uses the explicit offline `right agent db-repair` path.
 **Crates touched:** `right-db`, `right` (aggregator / `right_backend`)
 
 ## Problem

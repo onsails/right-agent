@@ -50,6 +50,13 @@ pub enum DbError {
         version: u32,
         message: String,
     },
+
+    /// Offline legacy-WAL repair failed. `message` carries the step, the
+    /// source error text, and — for mid-swap failures — the rollback outcome.
+    /// The live set is either untouched or fully restored; never partially
+    /// swapped.
+    #[error("WAL repair {path}: {message}")]
+    Repair { path: PathBuf, message: String },
 }
 
 impl DbError {
@@ -81,27 +88,10 @@ impl DbError {
             _ => None,
         }
     }
-
-    /// True if the error is a recoverable WAL-sidecar desync. Turso's
-    /// experimental multiprocess WAL (tursodatabase/turso#769) can leave a stale
-    /// `-tshm` authority that claims frames the `-wal` no longer holds, so every
-    /// open fails with "short read on WAL frame". Recoverable by resetting the
-    /// `-tshm`/`-shm` sidecars. Deliberately narrow: never matches main-database
-    /// corruption, which is NOT sidecar-recoverable.
-    pub fn is_wal_corruption(&self) -> bool {
-        match self {
-            Self::Database(error) => is_turso_wal_corruption(error),
-            Self::Open { source, .. } => is_turso_wal_corruption(source),
-            Self::Migration { source, .. } => source.is_wal_corruption(),
-            _ => false,
-        }
-    }
 }
 
-// The `Turso` prefix is intentional: these are Turso-driver-specific transient
-// conditions, and each maps to a stable `turso_*` string id in `as_str()` used
-// for telemetry/logging. Keeping the variant names aligned with those ids is
-// worth the redundant prefix.
+// Turso's typed busy variants and precise cross-process file-lock message are
+// the only retryable lock-contention categories exposed to callers.
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DbTransientKind {
@@ -110,33 +100,8 @@ pub(crate) enum DbTransientKind {
     TursoFileLock,
 }
 
-impl DbTransientKind {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::TursoBusy => "turso_busy",
-            Self::TursoBusySnapshot => "turso_busy_snapshot",
-            Self::TursoFileLock => "turso_file_lock",
-        }
-    }
-}
-
 fn is_turso_constraint(error: &turso::Error) -> bool {
     matches!(error, turso::Error::Constraint(_))
-}
-
-// WORKAROUND (tracked in onsails/right-agent#127): we detect the WAL-sidecar
-// desync by substring-matching Turso's stringly-typed `Error::Error` message
-// because the driver exposes no typed variant for it. This is brittle to Turso
-// message changes. When tursodatabase/turso#769 is fixed upstream — either a
-// typed short-read/corruption error, or the authority-rebuild no longer leaving
-// a stale `-tshm` against an empty `-wal` — revisit: prefer matching the typed
-// error here, and the sidecar-reset recovery in `lib.rs` may become unnecessary.
-fn is_turso_wal_corruption(error: &turso::Error) -> bool {
-    matches!(
-        error,
-        turso::Error::Error(message)
-            if message.contains("short read on WAL") || message.contains("WAL short read")
-    )
 }
 
 fn turso_transient_kind(error: &turso::Error) -> Option<DbTransientKind> {
@@ -204,55 +169,6 @@ mod tests {
         assert!(
             !DbError::NotFound.is_transient(),
             "NotFound is not transient",
-        );
-    }
-
-    #[test]
-    fn is_wal_corruption_matches_short_read_only() {
-        let msg =
-            "I/O error: short read on WAL frame at offset 2566792: expected 4096 bytes, got 0";
-        assert!(
-            DbError::Database(turso::Error::Error(msg.into())).is_wal_corruption(),
-            "bare turso short-read must be WAL corruption",
-        );
-        assert!(
-            (DbError::Open {
-                path: "data.db".into(),
-                source: turso::Error::Error(msg.into()),
-            })
-            .is_wal_corruption(),
-            "Open(short-read) must be WAL corruption",
-        );
-        let wal_short = "I/O error: WAL short read at offset 4096, page 1, frame_id=1: expected 4096 bytes, got 0";
-        assert!(
-            DbError::Database(turso::Error::Error(wal_short.into())).is_wal_corruption(),
-            "the 'WAL short read' variant must also be WAL corruption",
-        );
-        assert!(
-            (DbError::Migration {
-                path: "data.db".into(),
-                version: 1,
-                source: Box::new(DbError::Database(turso::Error::Error(msg.into()))),
-            })
-            .is_wal_corruption(),
-            "Migration-wrapped short-read must be WAL corruption",
-        );
-        // Negatives: transient, constraint, not-found, and main-db corruption.
-        assert!(!DbError::Database(turso::Error::Busy("locked".into())).is_wal_corruption());
-        assert!(!DbError::Database(turso::Error::Constraint("unique".into())).is_wal_corruption());
-        assert!(!DbError::NotFound.is_wal_corruption());
-        assert!(
-            !DbError::Database(turso::Error::Error("database header magic mismatch".into()))
-                .is_wal_corruption(),
-            "main-database corruption is NOT sidecar-recoverable",
-        );
-        assert!(
-            !DbError::SidecarRemove {
-                path: "data.db-tshm".into(),
-                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-            }
-            .is_wal_corruption(),
-            "sidecar-removal failure must not re-trigger recovery",
         );
     }
 

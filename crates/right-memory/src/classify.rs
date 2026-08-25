@@ -30,9 +30,10 @@ impl MemoryError {
             MemoryError::HindsightConnect(_) => ErrorKind::Transient,
             MemoryError::HindsightParse(_) => ErrorKind::Malformed,
             MemoryError::HindsightOther(_) => ErrorKind::Transient,
-            MemoryError::Db(_) | MemoryError::InjectionDetected | MemoryError::NotFound(_) => {
-                ErrorKind::Transient
-            }
+            MemoryError::Db(_)
+            | MemoryError::LeaseConflict(_)
+            | MemoryError::InjectionDetected
+            | MemoryError::NotFound(_) => ErrorKind::Transient,
         }
     }
 }

@@ -7,7 +7,7 @@ use tempfile::NamedTempFile;
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 
-use crate::sandbox::{Sandbox, exec_argv, upload_into_dir};
+use crate::sandbox::{Sandbox, exec_argv, exec_argv_as_guest, upload_into_dir};
 use crate::sandbox_runtime::SandboxRuntimeHandle;
 
 /// Interval between sync cycles.
@@ -32,11 +32,16 @@ pub(crate) async fn initial_sync(agent_dir: &Path, sbox: &Sandbox) -> miette::Re
     // turn executes as `GUEST_USER`, and Claude Code refuses root. Provisioning
     // owns this (the stage-1 probes did it inline), but the stage-4 rewire
     // dropped the step, so a migrated agent booted with no `sandbox` user and
-    // every turn hung. Idempotent, and must land before deploy_manifest because
-    // the platform tree is handed to the agent.
+    // every turn hung. Idempotent, and must land before environment and
+    // platform deployment.
     ensure_sandbox_user(sbox).await?;
 
+    // Re-assert the user-local environment on every bring-up. This provisions
+    // its directories through the guest control plane only; it never requires
+    // public guest egress, so existing restrictive sandboxes upgrade in place.
+    ensure_sandbox_user_local_env(agent_dir, sbox).await?;
     sync_cycle(agent_dir, sbox).await?;
+    crate::claude_runtime::stage_claude_runtime(agent_dir, sbox).await?;
     Ok(())
 }
 
@@ -338,7 +343,8 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &Sandbox) -> miette::Resu
 
 use crate::cc::sandbox_env::{
     MANAGED_ENV_END_MARKER, MANAGED_ENV_START_MARKER, SANDBOX_BASHRC_PATH, SANDBOX_ENV_DIR,
-    SANDBOX_ENV_PATH, bashrc_source_block, env_file_content,
+    SANDBOX_ENV_PATH, SANDBOX_LOCAL_BIN, SANDBOX_LOCAL_PREFIX, SANDBOX_NPM_CACHE,
+    bashrc_source_block, env_file_content,
 };
 
 fn ensure_bashrc_sources_managed_env(existing: &str) -> String {
@@ -434,7 +440,10 @@ fn bashrc_read_script(path: &str) -> String {
     let path_arg = shell_arg(path);
     let message = shell_arg(&format!("not a regular file: {path}"));
     format!(
-        "if [ -f {path_arg} ]; then \
+        "if [ -L {path_arg} ]; then \
+           printf '%s\\n' {message} >&2; \
+           exit 1; \
+         elif [ -f {path_arg} ]; then \
            cat {path_arg}; \
          elif [ -e {path_arg} ]; then \
            printf '%s\\n' {message} >&2; \
@@ -452,34 +461,9 @@ fn bashrc_read_script(path: &str) -> String {
 /// bins in that directory. The managed env file is sourced by `.bashrc` for
 /// user SSH shells and provides the shared contract for non-login Claude setup.
 async fn ensure_sandbox_user_local_env(agent_dir: &Path, sbox: &Sandbox) -> miette::Result<()> {
-    // Read `agent.yaml::env` so the generated env.sh includes per-agent
-    // operator-declared exports alongside the managed PATH/NPM block.
-    // Treat a missing/unparseable agent.yaml as "no extra env" — the
-    // managed block is still useful on its own, and sync should not
-    // fail closed for what is, semantically, optional config. A parse
-    // failure is still logged: silently dropping the operator's env
-    // (e.g. ANTHROPIC_BASE_URL) would route the agent elsewhere with no
-    // trace of why.
-    let agent_env = match right_agent::agent::discovery::parse_agent_config(agent_dir) {
-        Ok(cfg) => cfg.map(|c| c.env).unwrap_or_default(),
-        Err(e) => {
-            tracing::warn!(
-                agent_dir = %agent_dir.display(),
-                error = format!("{e:#}"),
-                "sync: failed to parse agent.yaml for env injection; \
-                 proceeding with managed env only"
-            );
-            Default::default()
-        }
-    };
-    let env_content = shell_printf_b_arg(&env_file_content(&agent_env));
-    let write_script = format!(
-        "mkdir -p {SANDBOX_ENV_DIR} && \
-         printf '%b' {env_content} > {SANDBOX_ENV_PATH}.tmp && \
-         chmod 0644 {SANDBOX_ENV_PATH}.tmp && \
-         mv -f {SANDBOX_ENV_PATH}.tmp {SANDBOX_ENV_PATH}"
-    );
-    let (output, code) = exec_argv(sbox, &["bash", "-lc", &write_script]).await?;
+    let env_content = shell_printf_b_arg(&load_sandbox_env_content(agent_dir)?);
+    let write_script = sandbox_env_setup_script(&env_content);
+    let (output, code) = exec_argv_as_guest(sbox, &["bash", "-lc", &write_script]).await?;
     if code != 0 {
         return Err(miette::miette!(
             "sync: failed to write {SANDBOX_ENV_PATH} in {}: bash exited with {code}: {output}",
@@ -487,11 +471,10 @@ async fn ensure_sandbox_user_local_env(agent_dir: &Path, sbox: &Sandbox) -> miet
         ));
     }
 
-    // One-exec read: missing and dangling-symlink paths are treated as an
-    // empty `.bashrc`; existing non-regular paths are rejected before the
-    // atomic writer can accidentally move the temp file into a directory.
+    // Read as the guest user and reject every symlink. The home persists and
+    // is agent-controlled between boots, so root must never follow these paths.
     let read_script = bashrc_read_script(SANDBOX_BASHRC_PATH);
-    let (existing, code) = exec_argv(sbox, &["bash", "-lc", &read_script]).await?;
+    let (existing, code) = exec_argv_as_guest(sbox, &["bash", "-lc", &read_script]).await?;
     if code != 0 {
         return Err(miette::miette!(
             "sync: failed to read {SANDBOX_BASHRC_PATH} in {}: bash exited with {code} (output: {existing})",
@@ -501,12 +484,8 @@ async fn ensure_sandbox_user_local_env(agent_dir: &Path, sbox: &Sandbox) -> miet
     let desired = ensure_bashrc_sources_managed_env(&existing);
     if desired != existing {
         let bashrc_content = shell_printf_b_arg(&desired);
-        let script = format!(
-            "printf '%b' {bashrc_content} > {SANDBOX_BASHRC_PATH}.right-tmp && \
-             chmod 0644 {SANDBOX_BASHRC_PATH}.right-tmp && \
-             mv -f {SANDBOX_BASHRC_PATH}.right-tmp {SANDBOX_BASHRC_PATH}"
-        );
-        let (output, code) = exec_argv(sbox, &["bash", "-lc", &script]).await?;
+        let script = bashrc_write_script(&bashrc_content);
+        let (output, code) = exec_argv_as_guest(sbox, &["bash", "-lc", &script]).await?;
         if code != 0 {
             return Err(miette::miette!(
                 "sync: failed to update /sandbox/.bashrc in {}: bash exited with {code}: {output}",
@@ -520,6 +499,49 @@ async fn ensure_sandbox_user_local_env(agent_dir: &Path, sbox: &Sandbox) -> miet
     Ok(())
 }
 
+fn load_sandbox_env_content(agent_dir: &Path) -> miette::Result<String> {
+    let agent_env = right_agent::agent::discovery::parse_agent_config(agent_dir)
+        .map_err(|e| {
+            miette::miette!(
+                "sync: failed to load agent config for sandbox env from {}: {e:#}",
+                agent_dir.display()
+            )
+        })?
+        .map(|config| config.env)
+        .unwrap_or_default();
+    Ok(env_file_content(&agent_env))
+}
+fn sandbox_env_setup_script(env_content: &str) -> String {
+    format!(
+        "for path in {SANDBOX_ENV_DIR} {SANDBOX_LOCAL_PREFIX} {SANDBOX_LOCAL_BIN} {SANDBOX_NPM_CACHE}; do \
+           if [ -L \"$path\" ] || {{ [ -e \"$path\" ] && [ ! -d \"$path\" ]; }}; then \
+             printf 'managed path is not a real directory: %s\\n' \"$path\" >&2; exit 1; \
+           fi; \
+         done; \
+         mkdir -p {SANDBOX_ENV_DIR} {SANDBOX_LOCAL_BIN} {SANDBOX_NPM_CACHE} && \
+         set -C && \
+         rm -f {SANDBOX_ENV_PATH}.tmp && \
+         printf '%b' {env_content} > {SANDBOX_ENV_PATH}.tmp && \
+         chmod 0644 {SANDBOX_ENV_PATH}.tmp && \
+         mv -f {SANDBOX_ENV_PATH}.tmp {SANDBOX_ENV_PATH}"
+    )
+}
+
+fn bashrc_write_script(content: &str) -> String {
+    format!(
+        "if [ -L {SANDBOX_BASHRC_PATH} ] || \
+            {{ [ -e {SANDBOX_BASHRC_PATH} ] && [ ! -f {SANDBOX_BASHRC_PATH} ]; }} || \
+            [ -L {SANDBOX_BASHRC_PATH}.right-tmp ]; then \
+           printf '%s\\n' 'managed bashrc path is not a regular file' >&2; exit 1; \
+         fi; \
+         rm -f {SANDBOX_BASHRC_PATH}.right-tmp && \
+         set -C && \
+         printf '%b' {content} > {SANDBOX_BASHRC_PATH}.right-tmp && \
+         chmod 0644 {SANDBOX_BASHRC_PATH}.right-tmp && \
+         mv -f {SANDBOX_BASHRC_PATH}.right-tmp {SANDBOX_BASHRC_PATH}"
+    )
+}
+
 /// Create the unprivileged guest user if it does not exist.
 ///
 /// Idempotent: a sandbox that already has the user is a no-op. The script
@@ -531,10 +553,10 @@ async fn ensure_sandbox_user(sbox: &Sandbox) -> miette::Result<()> {
     let user = right_sandbox::GUEST_USER;
     // Create the user if missing (Debian `useradd`, Alpine `adduser`), then —
     // whether it was just created or already existed — hand the carried home
-    // to it, excluding `.platform` which must stay root-owned. The chown has
-    // to be recursive and must run every time, not just on first boot: the
-    // migration archives a home as root and defers the handover to the moment
-    // the user exists, so a re-provision (or a migrated agent whose user was
+    // to it, excluding the manifest store entry. `.platform` is root-owned for
+    // deployment hygiene but is replaceable because `/sandbox` is guest-owned.
+    // The chown must run every time: migration archives a home as root and
+    // defers handover until the user exists, so a re-provision (or migrated agent whose user was
     // created after migration) would otherwise leave `.claude` root-owned and
     // `claude` unable to write its session state — the symptom is a turn that
     // never finishes.
@@ -620,6 +642,114 @@ mod tests {
         assert!(content.contains("export NPM_CONFIG_CACHE=\"/sandbox/.npm\""));
         assert!(!content.contains("/sandbox/bin"));
         assert!(!content.contains("~/bin"));
+    }
+
+    #[test]
+    fn sandbox_env_content_rejects_malformed_agent_config() {
+        let agent_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(agent_dir.path().join("agent.yaml"), "env: [unterminated")
+            .expect("write malformed agent config");
+
+        let error = load_sandbox_env_content(agent_dir.path())
+            .expect_err("malformed agent config must stop env preparation");
+        let message = format!("{error:#}");
+
+        assert!(message.contains("failed to load agent config for sandbox env"));
+        assert!(message.contains("Failed to parse agent.yaml"));
+        assert!(!message.contains("RIGHT_AGENT_MANAGED_ENV=1"));
+    }
+
+    #[test]
+    fn sandbox_env_content_allows_intentionally_missing_agent_config() {
+        let agent_dir = tempfile::tempdir().expect("tempdir");
+
+        let content = load_sandbox_env_content(agent_dir.path())
+            .expect("missing agent config should use managed env only");
+
+        assert!(content.contains("RIGHT_AGENT_MANAGED_ENV=1"));
+    }
+
+    #[test]
+    fn initial_sync_stages_claude_after_manifest_deployment() {
+        let source = include_str!("sync.rs");
+        let function = source
+            .split("pub(crate) async fn initial_sync")
+            .nth(1)
+            .expect("initial_sync source")
+            .split("/// Run the periodic sync loop")
+            .next()
+            .expect("initial_sync body");
+        let user = function
+            .find("ensure_sandbox_user(sbox)")
+            .expect("user step");
+        let env = function
+            .find("ensure_sandbox_user_local_env(agent_dir, sbox)")
+            .expect("env step");
+        let manifest = function
+            .find("sync_cycle(agent_dir, sbox)")
+            .expect("manifest step");
+        let claude = function
+            .find("stage_claude_runtime(agent_dir, sbox)")
+            .expect("Claude staging step");
+        assert!(user < env && env < manifest && manifest < claude);
+    }
+
+    #[test]
+    fn sandbox_env_setup_creates_user_local_dirs_without_network_or_root_mutation() {
+        let script = sandbox_env_setup_script("env body");
+
+        assert!(
+            script.contains("mkdir -p /sandbox/.right /sandbox/.local/bin /sandbox/.npm"),
+            "fresh sandboxes need the user-local directories before any shell sources env.sh: {script}"
+        );
+        assert!(script.contains("[ -L \"$path\" ]"));
+        assert!(script.contains("[ ! -d \"$path\" ]"));
+        assert!(
+            script.contains("set -C"),
+            "temp creation must reject symlinks: {script}"
+        );
+        assert!(
+            !script.contains("chown") && !script.contains("apt-get") && !script.contains("curl"),
+            "guest setup must neither mutate ownership nor require public egress: {script}"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_env_setup_rejects_managed_directory_symlinks_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+
+        for managed in [".right", ".local"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let sandbox = temp.path().join("sandbox");
+            let sentinel = temp.path().join("sentinel");
+            std::fs::create_dir(&sandbox).expect("sandbox dir");
+            std::fs::create_dir(&sentinel).expect("sentinel dir");
+            std::fs::write(sentinel.join("canary"), "unchanged").expect("sentinel canary");
+            symlink(&sentinel, sandbox.join(managed)).expect("managed symlink");
+
+            let script = sandbox_env_setup_script("'managed env'")
+                .replace("/sandbox", sandbox.to_str().expect("UTF-8 temp path"));
+            let output = Command::new("bash")
+                .args(["-c", &script])
+                .output()
+                .expect("run setup script");
+
+            assert!(
+                !output.status.success(),
+                "{managed} symlink must fail closed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                std::fs::read_to_string(sentinel.join("canary")).expect("read canary"),
+                "unchanged"
+            );
+            assert_eq!(
+                std::fs::read_dir(&sentinel).expect("list sentinel").count(),
+                1,
+                "setup created content through {managed} symlink"
+            );
+        }
     }
 
     #[test]
@@ -850,11 +980,12 @@ percent % and backslash \\ and carriage\r and tab\t done\n";
 
     #[cfg(unix)]
     #[test]
-    fn bashrc_read_script_treats_dangling_symlink_as_missing() {
+    fn bashrc_read_script_rejects_symlink_without_reading_target() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("sentinel");
         let bashrc_path = tmp.path().join(".bashrc");
-        std::os::unix::fs::symlink(tmp.path().join("missing-target"), &bashrc_path)
-            .expect("create dangling symlink");
+        std::fs::write(&target, "secret sentinel").expect("write sentinel");
+        std::os::unix::fs::symlink(&target, &bashrc_path).expect("create symlink");
 
         let output = std::process::Command::new("bash")
             .arg("-lc")
@@ -864,11 +995,42 @@ percent % and backslash \\ and carriage\r and tab\t done\n";
             .output()
             .expect("bash should run read script");
 
-        assert!(
-            output.status.success(),
-            "dangling symlink should be treated as missing, stderr={}",
-            String::from_utf8_lossy(&output.stderr)
+        assert!(!output.status.success(), "bashrc symlink must fail closed");
+        assert!(output.stdout.is_empty(), "target content must not be read");
+        assert_eq!(
+            std::fs::read_to_string(target).expect("read target"),
+            "secret sentinel"
         );
-        assert!(output.stdout.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bashrc_write_script_rejects_target_and_temp_symlinks_without_touching_sentinel() {
+        for suffix in ["", ".right-tmp"] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let sentinel = tmp.path().join("sentinel");
+            let bashrc = tmp.path().join(".bashrc");
+            std::fs::write(&sentinel, "unchanged").expect("write sentinel");
+            std::os::unix::fs::symlink(&sentinel, format!("{}{}", bashrc.display(), suffix))
+                .expect("create managed symlink");
+
+            let script = bashrc_write_script("'managed bashrc'").replace(
+                SANDBOX_BASHRC_PATH,
+                bashrc.to_str().expect("utf-8 temp path"),
+            );
+            let output = std::process::Command::new("bash")
+                .args(["-c", &script])
+                .output()
+                .expect("run bashrc write script");
+
+            assert!(
+                !output.status.success(),
+                "{suffix:?} symlink must fail closed"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&sentinel).expect("read sentinel"),
+                "unchanged"
+            );
+        }
     }
 }

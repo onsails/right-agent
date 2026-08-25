@@ -87,6 +87,12 @@ pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
 /// authoritative sandbox identity deletion succeeds. Caller is responsible
 /// for stopping the bot before and restarting it after.
 pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport> {
+    let home = plan
+        .agent_dir
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| miette::miette!("invalid agent directory {}", plan.agent_dir.display()))?;
+    let _quiescence_guard = crate::runtime::require_runtime_quiesced(home).await?;
     std::fs::create_dir_all(&plan.backup_dir).map_err(|e| {
         miette::miette!(
             "failed to create backup dir {}: {e:#}",
@@ -105,8 +111,9 @@ pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport
     delete_identity_from_host(&plan.agent_dir)?;
 
     write_bootstrap_md(&plan.agent_dir)?;
-    let sessions_deactivated = deactivate_active_sessions(&plan.agent_dir).await?;
-    clear_bootstrap_answers(&plan.agent_dir).await?;
+    let sessions_deactivated =
+        deactivate_active_sessions(&plan.agent_dir, &_quiescence_guard).await?;
+    clear_bootstrap_answers(&plan.agent_dir, &_quiescence_guard).await?;
     clear_bootstrap_finalization_intent(&plan.agent_dir)?;
 
     Ok(RebootstrapReport {
@@ -262,7 +269,10 @@ pub fn clear_bootstrap_finalization_intent(agent_dir: &Path) -> miette::Result<(
 /// an opaque "no such table: sessions" error. That state is unreachable in
 /// production, so we accept the opacity rather than migrate defensively
 /// here.
-async fn deactivate_active_sessions(agent_dir: &Path) -> miette::Result<usize> {
+async fn deactivate_active_sessions(
+    agent_dir: &Path,
+    _guard: &crate::runtime::RuntimeExclusionGuard,
+) -> miette::Result<usize> {
     if !agent_dir.join("data.db").exists() {
         tracing::debug!("rebootstrap: data.db absent, skipping session deactivation");
         return Ok(0);
@@ -277,7 +287,10 @@ async fn deactivate_active_sessions(agent_dir: &Path) -> miette::Result<usize> {
     Ok(n)
 }
 
-async fn clear_bootstrap_answers(agent_dir: &Path) -> miette::Result<usize> {
+async fn clear_bootstrap_answers(
+    agent_dir: &Path,
+    _guard: &crate::runtime::RuntimeExclusionGuard,
+) -> miette::Result<usize> {
     if !agent_dir.join("data.db").exists() {
         tracing::debug!("rebootstrap: data.db absent, skipping bootstrap answer cleanup");
         return Ok(0);
@@ -580,7 +593,12 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let n = deactivate_active_sessions(dir.path()).await.unwrap();
+        let guard = crate::runtime::require_runtime_quiesced(dir.path())
+            .await
+            .unwrap();
+        let n = deactivate_active_sessions(dir.path(), &guard)
+            .await
+            .unwrap();
         assert_eq!(n, 2);
 
         let conn = right_db::open_connection(dir.path(), true).await.unwrap();
@@ -604,7 +622,12 @@ mod tests {
     async fn deactivate_active_sessions_skips_when_db_missing() {
         let dir = tempfile::tempdir().unwrap();
         // No data.db
-        let n = deactivate_active_sessions(dir.path()).await.unwrap();
+        let guard = crate::runtime::require_runtime_quiesced(dir.path())
+            .await
+            .unwrap();
+        let n = deactivate_active_sessions(dir.path(), &guard)
+            .await
+            .unwrap();
         assert_eq!(n, 0);
     }
 
@@ -612,7 +635,12 @@ mod tests {
     async fn deactivate_active_sessions_no_active_returns_zero() {
         let dir = tempfile::tempdir().unwrap();
         let _ = right_db::open_connection(dir.path(), true).await.unwrap();
-        let n = deactivate_active_sessions(dir.path()).await.unwrap();
+        let guard = crate::runtime::require_runtime_quiesced(dir.path())
+            .await
+            .unwrap();
+        let n = deactivate_active_sessions(dir.path(), &guard)
+            .await
+            .unwrap();
         assert_eq!(n, 0);
     }
 
@@ -623,7 +651,13 @@ mod tests {
         record_user_name_answer(&conn, 1, 0, 9, 10).await;
         drop(conn);
 
-        assert_eq!(clear_bootstrap_answers(dir.path()).await.unwrap(), 1);
+        let guard = crate::runtime::require_runtime_quiesced(dir.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            clear_bootstrap_answers(dir.path(), &guard).await.unwrap(),
+            1
+        );
         let conn = right_db::open_connection(dir.path(), false).await.unwrap();
         assert_eq!(
             right_db::bootstrap_answers::missing_stages(&conn, 1, 0)

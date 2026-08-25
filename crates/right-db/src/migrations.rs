@@ -39,8 +39,9 @@ const V46_NOTICE_TOKEN: &str = include_str!("sql/v46_notice_token.sql");
 const V47_CRON_SKILL_LINKS: &str = include_str!("sql/v47_cron_skill_links.sql");
 const V48_CURATOR_RUNS: &str = include_str!("sql/v48_curator_runs.sql");
 const V49_BOOTSTRAP_ANSWERS: &str = include_str!("sql/v49_bootstrap_answers.sql");
+const V51_INTERNAL_IPC_REQUESTS: &str = include_str!("sql/v51_internal_ipc_requests.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 49;
+pub const LATEST_SCHEMA_VERSION: u32 = 51;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -857,6 +858,51 @@ fn v45_cron_trigger_transient(
     })
 }
 
+/// v50: Add lease columns to `pending_retains` for the single-owner drain.
+///
+/// `claim_token` (TEXT) and `claim_expires_at` (TEXT, RFC3339) implement the
+/// lease-based claim/ack/nack protocol: the drainer claims a batch under a
+/// unique token, and ack/nack transitions are guarded by that token so a
+/// crashed drainer's stale token can never delete or requeue rows claimed by
+/// its successor. NULL for existing rows (unclaimed), preserving prior
+/// behavior. Idempotent — checks `pragma_table_info` before each ALTER.
+/// Guards on table existence via `sqlite_master` like v45.
+fn v50_pending_retains_lease(
+    conn: &dyn MigrationConnection,
+) -> BoxFuture<'_, Result<(), crate::DbError>> {
+    Box::pin(async move {
+        let pending_retains_exists = conn
+            .query_i64(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pending_retains'",
+                MigrationParams::Empty,
+            )
+            .await?;
+        if pending_retains_exists == 0 {
+            return Ok(());
+        }
+        for (column, ddl) in [
+            (
+                "claim_token",
+                "ALTER TABLE pending_retains ADD COLUMN claim_token TEXT",
+            ),
+            (
+                "claim_expires_at",
+                "ALTER TABLE pending_retains ADD COLUMN claim_expires_at TEXT",
+            ),
+        ] {
+            if !column_exists(conn, "pending_retains", column).await? {
+                conn.execute_batch(ddl).await?;
+            }
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_pending_retains_claim \
+             ON pending_retains(claim_expires_at)",
+        )
+        .await?;
+        Ok(())
+    })
+}
+
 pub static MIGRATIONS: Migrations = Migrations {
     migrations: &[
         Migration {
@@ -1104,6 +1150,16 @@ pub static MIGRATIONS: Migrations = Migrations {
             sql: V49_BOOTSTRAP_ANSWERS,
             hook: None,
         },
+        Migration {
+            version: 50,
+            sql: "",
+            hook: Some(v50_pending_retains_lease),
+        },
+        Migration {
+            version: 51,
+            sql: V51_INTERNAL_IPC_REQUESTS,
+            hook: None,
+        },
     ],
 };
 
@@ -1260,14 +1316,13 @@ mod tests {
 
     #[tokio::test]
     async fn cold_boot_concurrent_migrators_do_not_double_apply_v23() {
-        // Two cold-boot callers (bot + aggregator) racing to migrate the same
-        // per-agent data.db. Before the in-tx user_version recheck, the loser
-        // of the BEGIN IMMEDIATE race would re-run v23, whose hook does
-        // `INSERT INTO async_runs ... FROM cron_runs` then `DROP TABLE
-        // cron_runs`. On the second run cron_runs is already gone; the hook
-        // crashes with "no such table: cron_runs", the tx rolls back, and
-        // open_connection(_, true) returns Err. Process-compose then restarts
-        // both processes and the agent never starts.
+        // Two callers inside one explicit offline bootstrap session may still
+        // race the same migration API. Before the in-transaction user_version
+        // recheck, the loser of BEGIN IMMEDIATE would re-run v23, whose hook
+        // copies `cron_runs` into `async_runs` then drops `cron_runs`. The
+        // second hook would fail after the table was removed. Production live
+        // startup has one Aggregator owner; this test retains migration-runner
+        // correctness independently of that topology.
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().to_path_buf();
 

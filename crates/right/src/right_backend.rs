@@ -1,13 +1,13 @@
 //! Standalone dispatch layer for Right Agent's built-in MCP tools.
 //!
-//! [`RightBackend`] extracts the tool logic from [`HttpMemoryServer`] into a
+//! [`RightBackend`] extracts the tool logic from the stdio memory server into a
 //! struct that accepts `(agent_name, agent_dir, tool_name, args, context)` and
 //! dispatches manually — no rmcp macro-generated parameter parsing required.
 //! The Aggregator uses this to expose right-agent tools alongside proxied external
 //! MCP servers.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -42,11 +42,263 @@ use crate::learning::{
     LearningMessagePhase, SkillLearningFinishParams, SkillLearningStartParams,
     SkillPackageExpectation,
 };
-use crate::memory_server::{
-    CronCreateParams, CronDeleteParams, CronLinkSkillParams, CronListParams, CronListRunsParams,
-    CronShowRunParams, CronTriggerParams, CronUnlinkSkillParams, CronUpdateParams, McpListParams,
-    cron_run_to_json,
-};
+
+// --- MCP tool parameter types (shared with the aggregator's ToolDispatcher) ---
+
+/// Deserialize an `Option<f64>` that also accepts string representations.
+/// LLMs sometimes send numbers as strings (e.g. `"2.0"` instead of `2.0`).
+fn deserialize_lenient_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(f64),
+        Str(String),
+        Null,
+    }
+
+    match NumOrStr::deserialize(deserializer)? {
+        NumOrStr::Num(n) => Ok(Some(n)),
+        NumOrStr::Str(s) if s.is_empty() => Ok(None),
+        NumOrStr::Str(s) => s
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| de::Error::custom(format!("invalid number: {s}"))),
+        NumOrStr::Null => Ok(None),
+    }
+}
+
+/// Distinguish between "field absent" (`None`) and "explicit null" (`Some(None)`)
+/// for nullable optional integers. Required so `cron_update` can clear a field.
+///
+/// When the field is present in JSON:
+///   - `null`    → `Some(None)`  (clear the column)
+///   - `7`       → `Some(Some(7))` (set to 7)
+///
+/// When the field is absent from JSON, serde's `default` kicks in → `None`.
+fn deserialize_double_option_i64<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i64>::deserialize(deserializer).map(Some)
+}
+
+/// Distinguish "field absent" (`None`) from "explicit null" (`Some(None)`) for
+/// the nullable `model` on `cron_update`, so the agent can clear it back to
+/// inherit-global. Mirrors `deserialize_double_option_i64`.
+fn deserialize_double_option_cron_model<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<CronModel>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<CronModel>::deserialize(deserializer).map(Some)
+}
+
+/// Per-cron model tier chosen by the creating session. Mapped to the bare CC
+/// alias and passed straight to `--model`. Kept local to this module per the
+/// project's "no central registries" convention (`feedback_no_central_registries`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CronModel {
+    Haiku,
+    Sonnet,
+    Opus,
+}
+
+impl CronModel {
+    pub fn as_alias(self) -> &'static str {
+        match self {
+            Self::Haiku => "haiku",
+            Self::Sonnet => "sonnet",
+            Self::Opus => "opus",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronListRunsParams {
+    #[schemars(description = "Filter by job name. Omit to return all jobs.")]
+    pub job_name: Option<String>,
+    #[schemars(description = "Maximum number of runs to return. Default: 20.")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronShowRunParams {
+    #[schemars(description = "Run ID (UUID) to retrieve.")]
+    pub run_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronCreateParams {
+    #[schemars(description = "Job name (lowercase alphanumeric and hyphens, e.g. 'health-check')")]
+    pub job_name: String,
+    #[schemars(
+        description = "5-field cron expression in UTC (e.g. '17 9 * * 1-5'). Required if run_at is not set. Mutually exclusive with run_at. \
+                       NEVER silently pick a schedule that fires at minute :00 or :30 (peak minutes where automated jobs cluster and spike API rate limits) — this includes literals like '0' or '30' AND step expressions like '*/30', '*/15', '*/10', '*/5'. \
+                       If the user asks for a round interval (e.g. 'every 30 minutes', 'every hour at :00'), offset the minute field instead (e.g. '17,47 * * * *' for half-hourly, '43 * * * *' for hourly) and tell the user. \
+                       Only use a :00 or :30 minute when the user EXPLICITLY insists on that exact round time."
+    )]
+    pub schedule: Option<String>,
+    #[schemars(description = "Task prompt that Claude executes when the cron fires")]
+    pub prompt: String,
+    #[schemars(
+        description = "Whether the job fires repeatedly (true, default) or once then auto-deletes (false). Ignored if run_at is set."
+    )]
+    pub recurring: Option<bool>,
+    #[schemars(
+        description = "ISO8601 UTC datetime to fire once (e.g. '2026-04-15T15:30:00Z'). Mutually exclusive with schedule. Job auto-deletes after firing."
+    )]
+    pub run_at: Option<String>,
+    #[schemars(description = "Lock TTL duration (e.g. '30m', '1h'). Default: 30m")]
+    pub lock_ttl: Option<String>,
+    #[schemars(description = "Maximum dollar spend per invocation. Default: 2.0")]
+    #[serde(default, deserialize_with = "deserialize_lenient_f64")]
+    pub max_budget_usd: Option<f64>,
+    #[schemars(
+        description = "Telegram chat id to deliver this cron's results to. Required. For DMs use the user_id; for groups use the negative chat id. Must be present in the agent's allowlist (allowlist.yaml). Read this from the `chat.id` field in the incoming message YAML unless the user explicitly asks for a different chat."
+    )]
+    pub target_chat_id: i64,
+    #[schemars(
+        description = "Optional supergroup topic (message_thread_id). Set only when the cron should reply to a specific topic; leave unset for ordinary chat delivery."
+    )]
+    pub target_thread_id: Option<i64>,
+    #[schemars(
+        description = "Model tier for this cron, chosen by complexity: 'haiku' (trivial request-and-format), 'sonnet' (mechanical multi-step — the usual choice), 'opus' (complex reasoning/research). Omit to inherit the agent's current /model. See the right-cron skill for the full heuristic."
+    )]
+    pub model: Option<CronModel>,
+    #[schemars(
+        description = "Optional rightx-* skill names to link to this cron at creation. The cron deterministically pulls these at fire time. The skills must already exist."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_names: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronUpdateParams {
+    #[schemars(description = "Job name to update")]
+    pub job_name: String,
+    #[schemars(
+        description = "New 5-field cron expression. Clears run_at if set. Same peak-minute rule as cron_create.schedule: \
+                       NEVER silently pick a schedule that fires at minute :00 or :30 (including '*/30', '*/15', '*/10', '*/5'). \
+                       Use an offset like ':17' or ':43' unless the user explicitly insisted on the round minute."
+    )]
+    pub schedule: Option<String>,
+    #[schemars(
+        description = "New ISO8601 UTC datetime. Clears schedule and forces recurring=false."
+    )]
+    pub run_at: Option<String>,
+    #[schemars(description = "New task prompt")]
+    pub prompt: Option<String>,
+    #[schemars(description = "Set recurring (true) or one-shot (false)")]
+    pub recurring: Option<bool>,
+    #[schemars(description = "New lock TTL duration (e.g. '30m', '1h')")]
+    pub lock_ttl: Option<String>,
+    #[schemars(description = "New maximum dollar spend per invocation")]
+    #[serde(default, deserialize_with = "deserialize_lenient_f64")]
+    pub max_budget_usd: Option<f64>,
+    #[schemars(description = "New target_chat_id. Must be in the agent's allowlist.")]
+    pub target_chat_id: Option<i64>,
+    #[schemars(
+        description = "New target_thread_id. Pass `null` to clear (cron will deliver to the chat without a topic). Omit the field entirely to leave unchanged."
+    )]
+    #[serde(default, deserialize_with = "deserialize_double_option_i64")]
+    pub target_thread_id: Option<Option<i64>>,
+    #[schemars(
+        description = "New model tier ('haiku'|'sonnet'|'opus'). Pass null to clear back to inheriting the agent's /model. Omit to leave unchanged."
+    )]
+    #[serde(default, deserialize_with = "deserialize_double_option_cron_model")]
+    pub model: Option<Option<CronModel>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronDeleteParams {
+    #[schemars(description = "Job name to delete")]
+    pub job_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronLinkSkillParams {
+    #[schemars(description = "The cron job_name to link skills to.")]
+    pub job_name: String,
+    #[schemars(description = "rightx-* skill names to link. Each must already exist.")]
+    pub skill_names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronUnlinkSkillParams {
+    #[schemars(description = "The cron job_name to unlink skills from.")]
+    pub job_name: String,
+    #[schemars(description = "rightx-* skill names to unlink.")]
+    pub skill_names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronListParams {}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOnDto {
+    Success,
+    Failure,
+    Always,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Deserialize, JsonSchema)]
+pub struct CronThenParams {
+    #[schemars(
+        description = "Instruction for the follow-up turn. It resumes (forks) THIS run's session, so it can reference what the run just did."
+    )]
+    pub instruction: String,
+    #[schemars(description = "When the follow-up fires relative to this run's outcome. REQUIRED.")]
+    pub run_on: RunOnDto,
+    #[serde(default)]
+    #[schemars(
+        description = "Add emphasis instructing the follow-up to report. The follow-up always delivers a message; idle-gate skip is not yet implemented. Default false."
+    )]
+    pub notify: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Override the follow-up's delivery chat. Defaults to the chat this trigger was issued from."
+    )]
+    pub target_chat_id: Option<i64>,
+    #[serde(default)]
+    pub target_thread_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronTriggerParams {
+    #[schemars(description = "Job name to trigger for immediate execution")]
+    pub job_name: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Force a verification report: override a silent decision and skip the idle gate so the user receives the result promptly. Default false."
+    )]
+    pub notify: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Extra instruction prepended to THIS run only; does not change the stored prompt."
+    )]
+    pub extra_instruction: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Runtime-guaranteed follow-up that resumes this run's session after it finishes."
+    )]
+    pub then: Option<CronThenParams>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct McpListParams {}
+
+/// Convert an async cron run row to JSON value.
+pub(crate) fn cron_run_to_json(row: right_agent::async_runs::CronRunJsonRow) -> serde_json::Value {
+    right_agent::async_runs::cron_run_to_json(&row)
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -142,11 +394,13 @@ pub(crate) struct ProviderCapabilitiesParams {}
 
 #[derive(Clone)]
 pub struct RightBackend {
+    #[cfg(test)]
     agents_dir: PathBuf,
+    db_owner: Option<std::sync::Arc<crate::db_owner::AgentDbOwner>>,
     /// Right's provider credential store, when the caller wired one. `None`
-    /// only in constructions that never serve `provider_capabilities` (tests,
-    /// and the stdio path that stubs the tool out) — the tool reports the
-    /// store as unavailable rather than answering with an empty inventory.
+    /// only in constructions that never serve `provider_capabilities` (tests)
+    /// — the tool reports the store as unavailable rather than answering with
+    /// an empty inventory.
     providers: Option<std::sync::Arc<right_providers::ProviderStore>>,
     skill_probe: crate::learning::SkillPackageProbe,
     progress: crate::progress::ProgressRegistry,
@@ -154,15 +408,39 @@ pub struct RightBackend {
 
 impl RightBackend {
     pub fn new(
-        agents_dir: PathBuf,
+        _agents_dir: PathBuf,
         providers: Option<std::sync::Arc<right_providers::ProviderStore>>,
     ) -> Self {
         Self {
-            agents_dir,
+            #[cfg(test)]
+            agents_dir: _agents_dir,
+            db_owner: None,
             providers,
             skill_probe: crate::learning::SkillPackageProbe::Sandbox,
             progress: crate::progress::ProgressRegistry::default(),
         }
+    }
+
+    pub(crate) fn with_db_owner(
+        mut self,
+        owner: std::sync::Arc<crate::db_owner::AgentDbOwner>,
+    ) -> Self {
+        self.db_owner = Some(owner);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mcp_persistence(
+        &self,
+    ) -> Result<std::sync::Arc<dyn right_mcp::persistence::McpPersistence>, anyhow::Error> {
+        let owner = self
+            .db_owner
+            .as_ref()
+            .cloned()
+            .context("database owner is not configured")?;
+        Ok(std::sync::Arc::new(
+            crate::mcp_persistence::OwnerMcpPersistence::new(owner),
+        ))
     }
 
     /// Test-only: answer skill-package probes with `exists` instead of asking
@@ -417,30 +695,33 @@ impl RightBackend {
     }
 
     // ------------------------------------------------------------------
-    // Connection helpers
+    // Aggregator-owned database helper
     // ------------------------------------------------------------------
 
-    /// Open the agent's `data.db` for a single operation. The caller drops the
-    /// returned connection when its tool call ends.
-    ///
-    /// The aggregator must NOT hold a long-lived `data.db` handle. Turso's
-    /// experimental multiprocess WAL (tursodatabase/turso#769, not production
-    /// ready) can desync the WAL coordination sidecars (`-tshm`/`-shm`) under
-    /// concurrent cross-process access; self-healing recovery in `right_db::open_connection`
-    /// repairs that by deleting the `-tshm`/`-shm` sidecars. A cached connection
-    /// here would keep writing to the unlinked inodes while the bot rebuilds
-    /// fresh ones — split brain. Opening per operation (like the bot) keeps the
-    /// concurrency window small and lets recovery delete sidecars safely.
-    /// Do NOT reintroduce a connection cache.
-    pub(crate) async fn get_conn(
-        &self,
-        agent_name: &str,
-    ) -> Result<Arc<tokio::sync::Mutex<right_db::Connection>>, anyhow::Error> {
-        let db_dir = self.agents_dir.join(agent_name);
-        let conn = right_db::open_connection(&db_dir, false)
-            .await
-            .with_context(|| format!("failed to open memory DB for {agent_name}"))?;
-        Ok(Arc::new(tokio::sync::Mutex::new(conn)))
+    async fn with_db<T, F>(&self, agent_name: &str, operation: F) -> anyhow::Result<T>
+    where
+        T: Send,
+        F: for<'a> FnOnce(&'a right_db::Connection) -> crate::db_owner::LocalDbFuture<'a, T> + Send,
+    {
+        let owner = match self.db_owner.as_ref().cloned() {
+            Some(owner) => owner,
+            #[cfg(test)]
+            None => {
+                let owner = std::sync::Arc::new(crate::db_owner::AgentDbOwner::starting(
+                    agent_name,
+                    self.agents_dir.join(agent_name),
+                ));
+                owner.open_and_migrate().await?;
+                owner
+            }
+            #[cfg(not(test))]
+            None => anyhow::bail!("database owner is not configured"),
+        };
+        anyhow::ensure!(
+            owner.agent() == agent_name,
+            "database owner identity mismatch"
+        );
+        owner.local_operation(operation).await
     }
 
     fn invocation_kind_to_created_by(
@@ -486,39 +767,37 @@ impl RightBackend {
         if let Err(msg) = validate_target_against_allowlist(agent_dir, params.target_chat_id) {
             return Ok(tool_error("chat_id_not_in_allowlist", msg, None));
         }
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
+        let agent_dir = agent_dir.to_owned();
+        return self
+            .with_db(agent_name, move |conn| Box::pin(async move {
         if let Some(skills) = params.skill_names.as_deref()
             && !skills.is_empty()
-            && let Err(e) = right_agent::cron_skill_link::ensure_skills_live(&conn, skills).await
+            && let Err(e) = right_agent::cron_skill_link::ensure_skills_live(conn, skills).await
         {
-            return Ok(tool_error("cron_link_failed", &format!("{e:#}"), None));
+            return Ok(tool_error("cron_link_failed", format!("{e:#}"), None));
         }
-        let result = right_agent::cron_spec::create_spec_v2(
-            &conn,
-            &params.job_name,
-            params.schedule.as_deref(),
-            &params.prompt,
-            params.lock_ttl.as_deref(),
-            params.max_budget_usd,
-            params.recurring,
-            params.run_at.as_deref(),
-            Some(params.target_chat_id),
-            params.target_thread_id,
-            params.model.map(|m| m.as_alias()),
-            false,
-        )
+        let result = right_agent::cron_spec::create_spec_v2(conn, &params.job_name,
+        params.schedule.as_deref(),
+        &params.prompt,
+        params.lock_ttl.as_deref(),
+        params.max_budget_usd,
+        params.recurring,
+        params.run_at.as_deref(),
+        Some(params.target_chat_id),
+        params.target_thread_id,
+        params.model.map(|m| m.as_alias()),
+        false,)
         .await
         .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
         if let Some(skills) = params.skill_names.as_deref()
             && !skills.is_empty()
             && let Err(e) =
-                right_agent::cron_skill_link::link_agent(&conn, &params.job_name, skills).await
+                right_agent::cron_skill_link::link_agent(conn, &params.job_name, skills).await
         {
             // Compensate: the spec is already committed; remove it so the agent
             // gets a clean failure and can retry without hitting "already exists".
             if let Err(de) =
-                right_agent::cron_spec::delete_spec(&conn, &params.job_name, agent_dir).await
+                right_agent::cron_spec::delete_spec(conn, &params.job_name, &agent_dir).await
             {
                 tracing::warn!(job = %params.job_name, "rollback of cron after link failure failed: {de:#}");
             }
@@ -527,6 +806,8 @@ impl RightBackend {
         Ok(CallToolResult::success(vec![Content::text(
             right_agent::cron_spec::format_result(&result),
         )]))
+                }))
+            .await;
     }
 
     async fn call_cron_link_skill(
@@ -536,14 +817,22 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronLinkSkillParams =
             serde_json::from_value(args.clone()).context("invalid cron_link_skill params")?;
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        match right_agent::cron_skill_link::link_agent(&conn, &params.job_name, &params.skill_names)
-            .await
-        {
-            Ok(msg) => Ok(CallToolResult::success(vec![Content::text(msg)])),
-            Err(e) => Ok(tool_error("cron_link_failed", format!("{e:#}"), None)),
-        }
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    match right_agent::cron_skill_link::link_agent(
+                        conn,
+                        &params.job_name,
+                        &params.skill_names,
+                    )
+                    .await
+                    {
+                        Ok(msg) => Ok(CallToolResult::success(vec![Content::text(msg)])),
+                        Err(e) => Ok(tool_error("cron_link_failed", format!("{e:#}"), None)),
+                    }
+                })
+            })
+            .await;
     }
 
     async fn call_cron_unlink_skill(
@@ -553,18 +842,22 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronUnlinkSkillParams =
             serde_json::from_value(args.clone()).context("invalid cron_unlink_skill params")?;
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        match right_agent::cron_skill_link::unlink_agent(
-            &conn,
-            &params.job_name,
-            &params.skill_names,
-        )
-        .await
-        {
-            Ok(msg) => Ok(CallToolResult::success(vec![Content::text(msg)])),
-            Err(e) => Ok(tool_error("cron_unlink_failed", format!("{e:#}"), None)),
-        }
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    match right_agent::cron_skill_link::unlink_agent(
+                        conn,
+                        &params.job_name,
+                        &params.skill_names,
+                    )
+                    .await
+                    {
+                        Ok(msg) => Ok(CallToolResult::success(vec![Content::text(msg)])),
+                        Err(e) => Ok(tool_error("cron_unlink_failed", format!("{e:#}"), None)),
+                    }
+                })
+            })
+            .await;
     }
 
     async fn call_cron_update(
@@ -580,26 +873,30 @@ impl RightBackend {
         {
             return Ok(tool_error("chat_id_not_in_allowlist", msg, None));
         }
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        let result = right_agent::cron_spec::update_spec_partial(
-            &conn,
-            &params.job_name,
-            params.schedule.as_deref(),
-            params.run_at.as_deref(),
-            params.prompt.as_deref(),
-            params.recurring,
-            params.lock_ttl.as_deref(),
-            params.max_budget_usd,
-            params.target_chat_id,
-            params.target_thread_id,
-            params.model.map(|o| o.map(|m| m.as_alias())),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
-        Ok(CallToolResult::success(vec![Content::text(
-            right_agent::cron_spec::format_result(&result),
-        )]))
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    let result = right_agent::cron_spec::update_spec_partial(
+                        conn,
+                        &params.job_name,
+                        params.schedule.as_deref(),
+                        params.run_at.as_deref(),
+                        params.prompt.as_deref(),
+                        params.recurring,
+                        params.lock_ttl.as_deref(),
+                        params.max_budget_usd,
+                        params.target_chat_id,
+                        params.target_thread_id,
+                        params.model.map(|o| o.map(|m| m.as_alias())),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
+                    Ok(CallToolResult::success(vec![Content::text(
+                        right_agent::cron_spec::format_result(&result),
+                    )]))
+                })
+            })
+            .await;
     }
 
     async fn call_cron_delete(
@@ -610,21 +907,31 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronDeleteParams =
             serde_json::from_value(args.clone()).context("invalid cron_delete params")?;
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        let msg = right_agent::cron_spec::delete_spec(&conn, &params.job_name, agent_dir)
-            .await
-            .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
-        Ok(CallToolResult::success(vec![Content::text(msg)]))
+        let agent_dir = agent_dir.to_owned();
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    let msg =
+                        right_agent::cron_spec::delete_spec(conn, &params.job_name, &agent_dir)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
+                    Ok(CallToolResult::success(vec![Content::text(msg)]))
+                })
+            })
+            .await;
     }
 
     async fn call_cron_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        let output = right_agent::cron_spec::list_specs(&conn)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    let output = right_agent::cron_spec::list_specs(conn)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    Ok(CallToolResult::success(vec![Content::text(output)]))
+                })
+            })
+            .await;
     }
 
     async fn call_cron_list_runs(
@@ -634,10 +941,11 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronListRunsParams =
             serde_json::from_value(args.clone()).context("invalid cron_list_runs params")?;
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
         let limit = params.limit.unwrap_or(20);
-        let mut stmt = conn.prepare(
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    let mut stmt = conn.prepare(
             "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
                     run_note, delivery_json, delivered_at, delivery_status
              FROM async_runs
@@ -646,26 +954,29 @@ impl RightBackend {
              ORDER BY started_at DESC
              LIMIT ?2",
         )?;
-        let rows: Vec<serde_json::Value> = stmt
-            .query_map(right_db::params![params.job_name, limit], |row| {
-                Ok(cron_run_to_json(
-                    &row.get::<_, String>(0)?,
-                    &row.get::<_, String>(1)?,
-                    &row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?.as_deref(),
-                    row.get::<_, Option<i64>>(4)?,
-                    &row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?.as_deref(),
-                    row.get::<_, Option<String>>(7)?.as_deref(),
-                    row.get::<_, Option<String>>(8)?.as_deref(),
-                    row.get::<_, Option<String>>(9)?.as_deref(),
-                    row.get::<_, Option<String>>(10)?.as_deref(),
-                ))
+                    let rows: Vec<serde_json::Value> = stmt
+                        .query_map(right_db::params![params.job_name, limit], |row| {
+                            Ok(cron_run_to_json(right_agent::async_runs::CronRunJsonRow {
+                                id: row.get(0)?,
+                                job_name: row.get(1)?,
+                                started_at: row.get(2)?,
+                                finished_at: row.get(3)?,
+                                exit_code: row.get(4)?,
+                                status: row.get(5)?,
+                                log_path: row.get(6)?,
+                                run_note: row.get(7)?,
+                                delivery_json: row.get(8)?,
+                                delivered_at: row.get(9)?,
+                                delivery_status: row.get(10)?,
+                            }))
+                        })
+                        .await?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let output = serde_json::to_string_pretty(&rows)?;
+                    Ok(CallToolResult::success(vec![Content::text(output)]))
+                })
             })
-            .await?
-            .collect::<Result<Vec<_>, _>>()?;
-        let output = serde_json::to_string_pretty(&rows)?;
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+            .await;
     }
 
     async fn call_cron_show_run(
@@ -675,9 +986,10 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronShowRunParams =
             serde_json::from_value(args.clone()).context("invalid cron_show_run params")?;
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        let result = conn
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    let result = conn
             .query_row(
                 "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
                     run_note, delivery_json, delivered_at, delivery_status
@@ -685,32 +997,38 @@ impl RightBackend {
              WHERE kind = 'cron' AND id = ?1",
                 right_db::params![&params.run_id],
                 |row| {
-                    Ok(cron_run_to_json(
-                        &row.get::<_, String>(0)?,
-                        &row.get::<_, String>(1)?,
-                        &row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?.as_deref(),
-                        row.get::<_, Option<i64>>(4)?,
-                        &row.get::<_, String>(5)?,
-                        row.get::<_, Option<String>>(6)?.as_deref(),
-                        row.get::<_, Option<String>>(7)?.as_deref(),
-                        row.get::<_, Option<String>>(8)?.as_deref(),
-                        row.get::<_, Option<String>>(9)?.as_deref(),
-                        row.get::<_, Option<String>>(10)?.as_deref(),
-                    ))
+                    Ok(cron_run_to_json(right_agent::async_runs::CronRunJsonRow {
+                        id: row.get(0)?,
+                        job_name: row.get(1)?,
+                        started_at: row.get(2)?,
+                        finished_at: row.get(3)?,
+                        exit_code: row.get(4)?,
+                        status: row.get(5)?,
+                        log_path: row.get(6)?,
+                        run_note: row.get(7)?,
+                        delivery_json: row.get(8)?,
+                        delivered_at: row.get(9)?,
+                        delivery_status: row.get(10)?,
+                    }))
                 },
             )
             .await;
-        match result {
-            Ok(val) => {
-                let output = serde_json::to_string_pretty(&val)?;
-                Ok(CallToolResult::success(vec![Content::text(output)]))
-            }
-            Err(right_db::DbError::NotFound) => Ok(CallToolResult::success(vec![Content::text(
-                format!("cron run '{}' not found", params.run_id),
-            )])),
-            Err(e) => Err(e.into()),
-        }
+                    match result {
+                        Ok(val) => {
+                            let output = serde_json::to_string_pretty(&val)?;
+                            Ok(CallToolResult::success(vec![Content::text(output)]))
+                        }
+                        Err(right_db::DbError::NotFound) => {
+                            Ok(CallToolResult::success(vec![Content::text(format!(
+                                "cron run '{}' not found",
+                                params.run_id
+                            ))]))
+                        }
+                        Err(e) => Err(e.into()),
+                    }
+                })
+            })
+            .await;
     }
 
     async fn call_cron_trigger(
@@ -743,20 +1061,24 @@ impl RightBackend {
             None => None,
         };
 
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        let msg = right_agent::cron_spec::trigger_spec(
-            &conn,
-            &params.job_name,
-            params.notify,
-            params.extra_instruction.as_deref(),
-            then_json.as_deref(),
-            origin_chat,
-            origin_thread,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
-        Ok(CallToolResult::success(vec![Content::text(msg)]))
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    let msg = right_agent::cron_spec::trigger_spec(
+                        conn,
+                        &params.job_name,
+                        params.notify,
+                        params.extra_instruction.as_deref(),
+                        then_json.as_deref(),
+                        origin_chat,
+                        origin_thread,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
+                    Ok(CallToolResult::success(vec![Content::text(msg)]))
+                })
+            })
+            .await;
     }
 
     // ------------------------------------------------------------------
@@ -764,21 +1086,25 @@ impl RightBackend {
     // ------------------------------------------------------------------
 
     async fn call_mcp_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        let servers = right_mcp::credentials::db_list_servers(&conn).await?;
-        let items: Vec<serde_json::Value> = servers
-            .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "name": s.name,
-                    "url": s.url,
-                    "instructions": s.instructions,
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    let servers = right_mcp::credentials::db_list_servers(conn).await?;
+                    let items: Vec<serde_json::Value> = servers
+                        .iter()
+                        .map(|s| {
+                            serde_json::json!({
+                                "name": s.name,
+                                "url": s.url,
+                                "instructions": s.instructions,
+                            })
+                        })
+                        .collect();
+                    let output = serde_json::to_string_pretty(&items)?;
+                    Ok(CallToolResult::success(vec![Content::text(output)]))
                 })
             })
-            .collect();
-        let output = serde_json::to_string_pretty(&items)?;
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+            .await;
     }
 
     async fn call_send_progress(
@@ -1149,27 +1475,27 @@ impl RightBackend {
             return Ok(result);
         }
 
-        {
-            let conn_arc = self.get_conn(agent_name).await?;
-            let conn = conn_arc.lock().await;
-            right_agent::learned_skills::insert_learning_event(
-                &conn,
-                &right_agent::learned_skills::LearningEvent {
-                    invocation_id: invocation_id.clone(),
-                    agent_name: agent_name.to_owned(),
-                    action: params.action.as_domain(),
-                    skill_name: params.skill_name.clone(),
-                    phase: right_agent::learned_skills::LearningPhase::Start,
-                    status: None,
-                    hint_outcome: None,
-                    reason: params.reason.clone(),
-                    message: params.message.clone(),
-                    summary: None,
-                    event_refs: params.event_refs.clone().unwrap_or_default(),
-                },
-            )
-            .await?;
-        }
+        let event = right_agent::learned_skills::LearningEvent {
+            invocation_id: invocation_id.clone(),
+            agent_name: agent_name.to_owned(),
+            action: params.action.as_domain(),
+            skill_name: params.skill_name.clone(),
+            phase: right_agent::learned_skills::LearningPhase::Start,
+            status: None,
+            hint_outcome: None,
+            reason: params.reason.clone(),
+            message: params.message.clone(),
+            summary: None,
+            event_refs: params.event_refs.clone().unwrap_or_default(),
+        };
+        self.with_db(agent_name, move |conn| {
+            Box::pin(async move {
+                right_agent::learned_skills::insert_learning_event(conn, &event)
+                    .await
+                    .map_err(Into::into)
+            })
+        })
+        .await?;
 
         if let Err(result) = crate::learning::send_learning_message(
             &self.progress,
@@ -1244,29 +1570,27 @@ impl RightBackend {
             return Ok(result);
         }
 
-        {
-            let conn_arc = self.get_conn(agent_name).await?;
-            let conn = conn_arc.lock().await;
-            right_agent::learned_skills::insert_learning_event(
-                &conn,
-                &right_agent::learned_skills::LearningEvent {
-                    invocation_id: invocation_id.clone(),
-                    agent_name: agent_name.to_owned(),
-                    action: params.action.as_domain(),
-                    skill_name: params.skill_name.clone(),
-                    phase: right_agent::learned_skills::LearningPhase::Finish,
-                    status: Some(params.status.as_domain()),
-                    hint_outcome: params
-                        .hint_outcome
-                        .map(|hint_outcome| hint_outcome.as_str().to_owned()),
-                    reason: None,
-                    message: params.message.clone(),
-                    summary: params.summary.clone(),
-                    event_refs: params.event_refs.clone().unwrap_or_default(),
-                },
-            )
-            .await?;
-        }
+        let event = right_agent::learned_skills::LearningEvent {
+            invocation_id: invocation_id.clone(),
+            agent_name: agent_name.to_owned(),
+            action: params.action.as_domain(),
+            skill_name: params.skill_name.clone(),
+            phase: right_agent::learned_skills::LearningPhase::Finish,
+            status: Some(params.status.as_domain()),
+            hint_outcome: params.hint_outcome.map(|v| v.as_str().to_owned()),
+            reason: None,
+            message: params.message.clone(),
+            summary: params.summary.clone(),
+            event_refs: params.event_refs.clone().unwrap_or_default(),
+        };
+        self.with_db(agent_name, move |conn| {
+            Box::pin(async move {
+                right_agent::learned_skills::insert_learning_event(conn, &event)
+                    .await
+                    .map_err(Into::into)
+            })
+        })
+        .await?;
 
         let created_by = if params.status.is_success() {
             let kind = match self.progress.learning_invocation_kind(&invocation_id).await {
@@ -1317,19 +1641,31 @@ impl RightBackend {
 
         if let Some(created_by) = created_by {
             let now_utc = chrono::Utc::now();
-            let conn_arc = self.get_conn(agent_name).await?;
-            let conn = conn_arc.lock().await;
-            let outcome = match params.status.as_str() {
-                "created" => {
-                    right_lifecycle::mark_created(&conn, &params.skill_name, created_by, now_utc)
-                        .await
-                }
-                "updated" => {
-                    right_lifecycle::bump_patch(&conn, &params.skill_name, created_by, now_utc)
-                        .await
-                }
-                _ => Ok(()),
-            };
+            let skill_name = params.skill_name.clone();
+            let status = params.status.as_str().to_owned();
+            let outcome = self
+                .with_db(agent_name, move |conn| {
+                    Box::pin(async move {
+                        let result = match status.as_str() {
+                            "created" => {
+                                right_lifecycle::mark_created(
+                                    conn,
+                                    &skill_name,
+                                    created_by,
+                                    now_utc,
+                                )
+                                .await
+                            }
+                            "updated" => {
+                                right_lifecycle::bump_patch(conn, &skill_name, created_by, now_utc)
+                                    .await
+                            }
+                            _ => Ok(()),
+                        };
+                        result.map_err(Into::into)
+                    })
+                })
+                .await;
             if let Err(e) = outcome {
                 tracing::error!(
                     agent = %agent_name,
@@ -1370,7 +1706,7 @@ impl RightBackend {
                 ));
             }
         };
-        let query = params.query.trim();
+        let query = params.query.trim().to_owned();
         if query.is_empty() {
             return Ok(tool_error(
                 "invalid_argument",
@@ -1394,55 +1730,60 @@ impl RightBackend {
             Err(_) => return Ok(conversation_scope_unavailable()),
         };
 
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        let limit = params.limit.unwrap_or(CONVERSATION_SEARCH_DEFAULT_LIMIT);
-        let results = match mode {
-            ConversationSearchMode::Thread => {
-                right_db::conversation::search_thread(
-                    &conn,
-                    query,
-                    limit,
-                    scope.chat_id,
-                    scope.thread_id,
-                )
-                .await
-            }
-            ConversationSearchMode::Chat => {
-                right_db::conversation::search_chat(&conn, query, limit, scope.chat_id).await
-            }
-        }
-        .map_err(|e| anyhow::anyhow!("conversation search failed: {e}"))?;
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    let limit = params.limit.unwrap_or(CONVERSATION_SEARCH_DEFAULT_LIMIT);
+                    let results = match mode {
+                        ConversationSearchMode::Thread => {
+                            right_db::conversation::search_thread(
+                                conn,
+                                &query,
+                                limit,
+                                scope.chat_id,
+                                scope.thread_id,
+                            )
+                            .await
+                        }
+                        ConversationSearchMode::Chat => {
+                            right_db::conversation::search_chat(conn, &query, limit, scope.chat_id)
+                                .await
+                        }
+                    }
+                    .map_err(|e| anyhow::anyhow!("conversation search failed: {e}"))?;
 
-        let rows: Vec<serde_json::Value> = results
-            .into_iter()
-            .map(|row| {
-                serde_json::json!({
-                    "snippet": row.snippet,
-                    "role": row.role,
-                    "sender_user_id": row.sender_user_id,
-                    "sender_name": row.sender_name,
-                    "created_at": row.created_at,
-                    "thread_id": row.thread_id,
-                    "message_id": row.message_id,
-                    "root_session_id": row.root_session_id,
+                    let rows: Vec<serde_json::Value> = results
+                        .into_iter()
+                        .map(|row| {
+                            serde_json::json!({
+                                "snippet": row.snippet,
+                                "role": row.role,
+                                "sender_user_id": row.sender_user_id,
+                                "sender_name": row.sender_name,
+                                "created_at": row.created_at,
+                                "thread_id": row.thread_id,
+                                "message_id": row.message_id,
+                                "root_session_id": row.root_session_id,
+                            })
+                        })
+                        .collect();
+                    let scope_json = match mode {
+                        ConversationSearchMode::Thread => {
+                            serde_json::json!({ "type": "thread", "thread_id": scope.thread_id })
+                        }
+                        ConversationSearchMode::Chat => serde_json::json!({ "type": "chat" }),
+                    };
+                    let output = serde_json::json!({
+                        "scope": scope_json,
+                        "results": rows,
+                    });
+
+                    Ok(CallToolResult::success(vec![Content::text(
+                        serde_json::to_string_pretty(&output)?,
+                    )]))
                 })
             })
-            .collect();
-        let scope_json = match mode {
-            ConversationSearchMode::Thread => {
-                serde_json::json!({ "type": "thread", "thread_id": scope.thread_id })
-            }
-            ConversationSearchMode::Chat => serde_json::json!({ "type": "chat" }),
-        };
-        let output = serde_json::json!({
-            "scope": scope_json,
-            "results": rows,
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output)?,
-        )]))
+            .await;
     }
 
     async fn call_channel_list(
@@ -1505,32 +1846,37 @@ impl RightBackend {
             ));
         }
 
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        let limit = params
-            .limit
-            .unwrap_or(CHANNEL_READ_DEFAULT_LIMIT)
-            .min(CHANNEL_READ_MAX_LIMIT);
-        let rows = right_db::conversation::last_n_in_chat(&conn, params.channel, limit).await?;
-        let posts: Vec<serde_json::Value> = rows
-            .into_iter()
-            .map(|row| {
-                serde_json::json!({
-                    "id": row.id,
-                    "role": row.role,
-                    "snippet": row.snippet,
-                    "sender_user_id": row.sender_user_id,
-                    "sender_name": row.sender_name,
-                    "created_at": row.created_at,
-                    "thread_id": row.thread_id,
-                    "message_id": row.message_id,
-                    "root_session_id": row.root_session_id,
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    let limit = params
+                        .limit
+                        .unwrap_or(CHANNEL_READ_DEFAULT_LIMIT)
+                        .min(CHANNEL_READ_MAX_LIMIT);
+                    let rows =
+                        right_db::conversation::last_n_in_chat(conn, params.channel, limit).await?;
+                    let posts: Vec<serde_json::Value> = rows
+                        .into_iter()
+                        .map(|row| {
+                            serde_json::json!({
+                                "id": row.id,
+                                "role": row.role,
+                                "snippet": row.snippet,
+                                "sender_user_id": row.sender_user_id,
+                                "sender_name": row.sender_name,
+                                "created_at": row.created_at,
+                                "thread_id": row.thread_id,
+                                "message_id": row.message_id,
+                                "root_session_id": row.root_session_id,
+                            })
+                        })
+                        .collect();
+                    Ok(CallToolResult::success(vec![Content::text(
+                        serde_json::to_string_pretty(&posts)?,
+                    )]))
                 })
             })
-            .collect();
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&posts)?,
-        )]))
+            .await;
     }
 
     async fn call_get_messages_by_id(
@@ -1567,34 +1913,38 @@ impl RightBackend {
             Err(_) => return Ok(conversation_scope_unavailable()),
         };
 
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        let rows = right_db::conversation::fetch_by_ids(
-            &conn,
-            "telegram",
-            scope.chat_id,
-            scope.thread_id,
-            &params.message_ids,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("get_messages_by_id failed: {e:#}"))?;
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    let rows = right_db::conversation::fetch_by_ids(
+                        conn,
+                        "telegram",
+                        scope.chat_id,
+                        scope.thread_id,
+                        &params.message_ids,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("get_messages_by_id failed: {e:#}"))?;
 
-        let messages: Vec<serde_json::Value> = rows
-            .into_iter()
-            .map(|row| {
-                serde_json::json!({
-                    "message_id": row.message_id,
-                    "sender_name": row.sender_name,
-                    "text": row.text,
-                    "role": row.role,
+                    let messages: Vec<serde_json::Value> = rows
+                        .into_iter()
+                        .map(|row| {
+                            serde_json::json!({
+                                "message_id": row.message_id,
+                                "sender_name": row.sender_name,
+                                "text": row.text,
+                                "role": row.role,
+                            })
+                        })
+                        .collect();
+
+                    let output = serde_json::json!({ "messages": messages });
+                    Ok(CallToolResult::success(vec![Content::text(
+                        serde_json::to_string_pretty(&output)?,
+                    )]))
                 })
             })
-            .collect();
-
-        let output = serde_json::json!({ "messages": messages });
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output)?,
-        )]))
+            .await;
     }
 
     async fn call_thread_focus_set(
@@ -1620,7 +1970,7 @@ impl RightBackend {
             Ok(scope) => scope,
             Err(_) => return Ok(conversation_scope_unavailable()),
         };
-        let trimmed = params.focus.trim();
+        let trimmed = params.focus.trim().to_owned();
         if trimmed.chars().count() > THREAD_FOCUS_MAX_CHARS {
             return Ok(tool_error(
                 "invalid_argument",
@@ -1634,15 +1984,25 @@ impl RightBackend {
             Some(trimmed)
         };
 
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        right_db::thread_focus::set_agent(&conn, scope.chat_id, scope.thread_id, value)
-            .await
-            .map_err(|e| anyhow::anyhow!("thread_focus set failed: {e:#}"))?;
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    right_db::thread_focus::set_agent(
+                        conn,
+                        scope.chat_id,
+                        scope.thread_id,
+                        value.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("thread_focus set failed: {e:#}"))?;
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::json!({ "status": "ok", "cleared": value.is_none() }).to_string(),
-        )]))
+                    Ok(CallToolResult::success(vec![Content::text(
+                        serde_json::json!({ "status": "ok", "cleared": value.is_none() })
+                            .to_string(),
+                    )]))
+                })
+            })
+            .await;
     }
 
     // ------------------------------------------------------------------
@@ -1665,7 +2025,7 @@ impl RightBackend {
                 ));
             }
         };
-        let name = params.name.trim();
+        let name = params.name.trim().to_owned();
         if name.is_empty() || name.chars().count() > 128 {
             return Ok(tool_error(
                 "invalid_argument",
@@ -1707,7 +2067,7 @@ impl RightBackend {
         let request = ForumTopicCreateRequest {
             invocation_id,
             token: target.bot_send_token,
-            name: name.to_owned(),
+            name: name.clone(),
             icon_color,
             icon_custom_emoji_id: icon_custom_emoji_id.clone(),
         };
@@ -1731,22 +2091,24 @@ impl RightBackend {
         // authoritative thread_id: that would make the agent retry and create a
         // permanent duplicate topic (there is no delete tool to undo it). Log
         // loudly and still return the result; the cache self-heals on the next op.
-        if let Err(e) = async {
-            let conn_arc = self.get_conn(agent_name).await?;
-            let conn = conn_arc.lock().await;
-            right_db::forum_topics::upsert_created(
-                &conn,
-                target.chat_id,
-                i64::from(resp.message_thread_id),
-                name,
-                icon_color.map(i64::from),
-                icon_custom_emoji_id.as_deref(),
-            )
+        let registry_name = name.clone();
+        if let Err(e) = self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    right_db::forum_topics::upsert_created(
+                        conn,
+                        target.chat_id,
+                        i64::from(resp.message_thread_id),
+                        &registry_name,
+                        icon_color.map(i64::from),
+                        icon_custom_emoji_id.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+                    Ok::<(), anyhow::Error>(())
+                })
+            })
             .await
-            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-            Ok::<(), anyhow::Error>(())
-        }
-        .await
         {
             tracing::error!(
                 "forum_topic_create: registry write failed after Telegram created thread {}: {e:#}",
@@ -1812,21 +2174,22 @@ impl RightBackend {
         // Telegram succeeded; the local registry is a best-effort cache (see
         // call_forum_topic_create). A write failure must not report failure for
         // an op the user can already see — log loudly and continue.
-        if let Err(e) = async {
-            let conn_arc = self.get_conn(agent_name).await?;
-            let conn = conn_arc.lock().await;
-            right_db::forum_topics::update_edited(
-                &conn,
-                target.chat_id,
-                i64::from(params.message_thread_id),
-                trimmed_name.as_deref(),
-                params.icon_custom_emoji_id.as_deref(),
-            )
+        if let Err(e) = self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    right_db::forum_topics::update_edited(
+                        conn,
+                        target.chat_id,
+                        i64::from(params.message_thread_id),
+                        trimmed_name.as_deref(),
+                        params.icon_custom_emoji_id.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+                    Ok::<(), anyhow::Error>(())
+                })
+            })
             .await
-            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-            Ok::<(), anyhow::Error>(())
-        }
-        .await
         {
             tracing::error!(
                 "forum_topic_edit: registry write failed after Telegram edit of thread {}: {e:#}",
@@ -1924,20 +2287,21 @@ impl RightBackend {
         // Telegram succeeded; the local registry is a best-effort cache (see
         // call_forum_topic_create). A write failure must not report failure for
         // an op the user can already see — log loudly and continue.
-        if let Err(e) = async {
-            let conn_arc = self.get_conn(agent_name).await?;
-            let conn = conn_arc.lock().await;
-            right_db::forum_topics::set_state(
-                &conn,
-                target.chat_id,
-                i64::from(params.message_thread_id),
-                new_state,
-            )
+        if let Err(e) = self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    right_db::forum_topics::set_state(
+                        conn,
+                        target.chat_id,
+                        i64::from(params.message_thread_id),
+                        new_state,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+                    Ok::<(), anyhow::Error>(())
+                })
+            })
             .await
-            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-            Ok::<(), anyhow::Error>(())
-        }
-        .await
         {
             tracing::error!(
                 "{tool}: registry write failed after Telegram state change of thread {}: {e:#}",
@@ -1967,26 +2331,30 @@ impl RightBackend {
             Ok(s) => s,
             Err(_) => return Ok(forum_scope_unavailable()),
         };
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        let rows = right_db::forum_topics::list(&conn, scope.chat_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("forum list failed: {e:#}"))?;
-        let json: Vec<serde_json::Value> = rows
-            .into_iter()
-            .map(|topic| {
-                serde_json::json!({
-                    "message_thread_id": topic.message_thread_id,
-                    "name": topic.name,
-                    "icon_color": topic.icon_color,
-                    "icon_custom_emoji_id": topic.icon_custom_emoji_id,
-                    "state": topic.state,
+        return self
+            .with_db(agent_name, move |conn| {
+                Box::pin(async move {
+                    let rows = right_db::forum_topics::list(conn, scope.chat_id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("forum list failed: {e:#}"))?;
+                    let json: Vec<serde_json::Value> = rows
+                        .into_iter()
+                        .map(|topic| {
+                            serde_json::json!({
+                                "message_thread_id": topic.message_thread_id,
+                                "name": topic.name,
+                                "icon_color": topic.icon_color,
+                                "icon_custom_emoji_id": topic.icon_custom_emoji_id,
+                                "state": topic.state,
+                            })
+                        })
+                        .collect();
+                    Ok(CallToolResult::success(vec![Content::text(
+                        serde_json::json!({ "topics": json }).to_string(),
+                    )]))
                 })
             })
-            .collect();
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::json!({ "topics": json }).to_string(),
-        )]))
+            .await;
     }
 
     /// Report the agent's own provider inventory, credential values excluded.

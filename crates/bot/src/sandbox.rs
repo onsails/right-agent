@@ -68,6 +68,21 @@ pub(crate) async fn exec_argv(
 ) -> miette::Result<(String, i32)> {
     exec_argv_with_timeout(sandbox, argv, DEFAULT_EXEC_TIMEOUT).await
 }
+/// Run a short provisioning command as the unprivileged guest user.
+pub(crate) async fn exec_argv_as_guest(
+    sandbox: &SandboxHandle,
+    argv: &[&str],
+) -> miette::Result<(String, i32)> {
+    let request = guest_exec_request(argv, DEFAULT_EXEC_TIMEOUT);
+    let outcome = sandbox
+        .exec(&request)
+        .await
+        .map_err(|e| miette::miette!("sandbox guest exec {argv:?} failed: {e:#}"))?;
+    Ok((
+        String::from_utf8_lossy(&outcome.stdout).into_owned(),
+        outcome.code,
+    ))
+}
 
 /// Run `argv` in the guest with an explicit timeout. The guest process is
 /// SIGKILLed on expiry.
@@ -99,6 +114,12 @@ fn exec_request(argv: &[&str], timeout: Duration) -> ExecRequest {
         timeout: Some(timeout),
         ..ExecRequest::default()
     }
+}
+
+fn guest_exec_request(argv: &[&str], timeout: Duration) -> ExecRequest {
+    let mut request = exec_request(argv, timeout);
+    request.user = Some(right_sandbox::GUEST_USER.to_owned());
+    request
 }
 
 /// Upload a host file into a guest directory, mirroring `scp host guest_dir/`.

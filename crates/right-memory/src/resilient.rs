@@ -2,7 +2,7 @@
 //! + retain queue + status watch.
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{Mutex, watch};
@@ -69,7 +69,7 @@ pub const CLIENT_FLOOD_THRESHOLD: usize = 20;
 
 pub struct ResilientHindsight {
     inner: HindsightClient,
-    agent_db_path: PathBuf,
+    sink: Arc<dyn crate::retain_sink::PendingRetainSink>,
     breaker: Mutex<Breaker>,
     status_tx: watch::Sender<MemoryStatus>,
     client_drops: Mutex<VecDeque<Instant>>,
@@ -78,11 +78,15 @@ pub struct ResilientHindsight {
 }
 
 impl ResilientHindsight {
-    pub fn new(inner: HindsightClient, agent_db_path: PathBuf, source: impl Into<String>) -> Self {
+    pub fn new(
+        inner: HindsightClient,
+        sink: Arc<dyn crate::retain_sink::PendingRetainSink>,
+        source: impl Into<String>,
+    ) -> Self {
         let (tx, _rx) = watch::channel(MemoryStatus::Healthy);
         Self {
             inner,
-            agent_db_path,
+            sink,
             breaker: Mutex::new(Breaker::new()),
             status_tx: tx,
             client_drops: Mutex::new(VecDeque::new()),
@@ -94,8 +98,8 @@ impl ResilientHindsight {
         &self.inner
     }
 
-    pub fn agent_db_path(&self) -> &Path {
-        &self.agent_db_path
+    pub fn sink(&self) -> &Arc<dyn crate::retain_sink::PendingRetainSink> {
+        &self.sink
     }
 
     pub fn status(&self) -> MemoryStatus {
@@ -362,27 +366,20 @@ impl ResilientHindsight {
         update_mode: Option<&str>,
         tags: Option<&[String]>,
     ) {
-        // Open a fresh connection for each enqueue — cheap (WAL, same process),
-        // and avoids holding the drain connection while we're on the error path.
-        match right_db::open_connection(&self.agent_db_path, false).await {
-            Ok(conn) => {
-                if let Err(e) = super::retain_queue::enqueue(
-                    &conn,
-                    &self.source,
-                    content,
-                    context,
-                    document_id,
-                    update_mode,
-                    tags,
-                )
-                .await
-                {
-                    tracing::error!("retain enqueue failed: {e:#}");
-                }
-            }
-            Err(e) => {
-                tracing::error!("retain enqueue: open_connection failed: {e:#}");
-            }
+        // Best-effort at the fire-and-forget learning boundary: the retain
+        // already failed upstream, so an enqueue failure is logged, not
+        // propagated. The sink owns the actual queue write (owner-local SQL in
+        // the Aggregator, typed IPC in the bot).
+        let item = crate::retain_sink::NewPendingRetain {
+            source: self.source.clone(),
+            content: content.to_owned(),
+            context: context.map(str::to_owned),
+            document_id: document_id.map(str::to_owned),
+            update_mode: update_mode.map(str::to_owned),
+            tags: tags.map(|t| t.to_vec()),
+        };
+        if let Err(e) = self.sink.enqueue(item).await {
+            tracing::error!("retain enqueue failed: {e:#}");
         }
     }
 
@@ -435,14 +432,17 @@ impl ResilientHindsight {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use right_db::open_connection;
-    use tempfile::tempdir;
+    use crate::retain_sink::{InMemoryRetainQueue, RetainLeaseQueue};
+
+    fn mem_wrapper(client: HindsightClient) -> ResilientHindsight {
+        ResilientHindsight::new(client, Arc::new(InMemoryRetainQueue::new()), "bot")
+    }
 
     #[tokio::test]
     async fn bump_client_drop_records_timestamp() {
         setup_crypto();
         let client = HindsightClient::new("hs_x", "b", "high", 1024, Some("http://127.0.0.1:1"));
-        let w = ResilientHindsight::new(client, PathBuf::from("/tmp"), "bot");
+        let w = mem_wrapper(client);
         assert_eq!(w.client_drops_24h().await, 0);
         w.bump_client_drop().await;
         w.bump_client_drop().await;
@@ -453,7 +453,7 @@ mod tests {
     async fn status_starts_healthy() {
         setup_crypto();
         let client = HindsightClient::new("hs_x", "b", "high", 1024, Some("http://127.0.0.1:1"));
-        let w = ResilientHindsight::new(client, PathBuf::from("/tmp"), "bot");
+        let w = mem_wrapper(client);
         assert!(matches!(w.status(), MemoryStatus::Healthy));
     }
 
@@ -484,12 +484,13 @@ mod tests {
         (handle, url)
     }
 
-    async fn wrap(url: &str) -> ResilientHindsight {
+    async fn wrap(url: &str) -> (ResilientHindsight, Arc<InMemoryRetainQueue>) {
         setup_crypto();
-        let dir = tempdir().unwrap().keep();
-        let _ = open_connection(&dir, true).await.unwrap();
+        let queue = Arc::new(InMemoryRetainQueue::new());
+        let sink: Arc<dyn crate::retain_sink::PendingRetainSink> = queue.clone();
         let client = HindsightClient::new("hs_x", "bank-1", "high", 1024, Some(url));
-        ResilientHindsight::new(client, dir, "bot")
+        let wrapper = ResilientHindsight::new(client, sink, "bot");
+        (wrapper, queue)
     }
 
     fn setup_crypto() {
@@ -501,7 +502,7 @@ mod tests {
     #[tokio::test]
     async fn recall_success_returns_results() {
         let (_h, url) = mock(r#"{"results": [{"text": "hi", "score": 0.9}]}"#, 200).await;
-        let w = wrap(&url).await;
+        let (w, _queue) = wrap(&url).await;
         let policy = RetryPolicy {
             per_attempt: Duration::from_secs(2),
             attempts: 0,
@@ -515,7 +516,7 @@ mod tests {
     #[tokio::test]
     async fn recall_auth_sets_status_auth_failed_and_returns_upstream_err() {
         let (_h, url) = mock(r#"{"error": "unauthorized"}"#, 401).await;
-        let w = wrap(&url).await;
+        let (w, _queue) = wrap(&url).await;
         let policy = RetryPolicy {
             per_attempt: Duration::from_secs(2),
             attempts: 0,
@@ -528,7 +529,7 @@ mod tests {
     #[tokio::test]
     async fn recall_circuit_open_skips_http_call() {
         // No mock server at this port — if breaker let us through we'd get a connect error.
-        let w = wrap("http://127.0.0.1:1").await;
+        let (w, _queue) = wrap("http://127.0.0.1:1").await;
         // Force breaker open by feeding it an Auth failure.
         {
             let mut b = w.breaker.lock().await;
@@ -548,7 +549,7 @@ mod tests {
     #[tokio::test]
     async fn retain_enqueues_on_transient_error() {
         let (_h, url) = mock(r#"{"error": "upstream down"}"#, 503).await;
-        let w = wrap(&url).await;
+        let (w, queue) = wrap(&url).await;
         let policy = RetryPolicy {
             per_attempt: Duration::from_secs(2),
             attempts: 0,
@@ -558,16 +559,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ResilientError::Upstream(_)));
-        // Row should now be in pending_retains.
-        let conn = open_connection(w.agent_db_path(), false).await.unwrap();
-        let cnt = crate::retain_queue::count(&conn).await.unwrap();
+        // Row should now be in the pending-retain queue.
+        let cnt = queue.stats().await.unwrap().count;
         assert_eq!(cnt, 1, "expected row enqueued on transient 503");
     }
 
     #[tokio::test]
     async fn retain_does_not_enqueue_on_client_error() {
         let (_h, url) = mock(r#"{"error": "bad payload"}"#, 400).await;
-        let w = wrap(&url).await;
+        let (w, queue) = wrap(&url).await;
         let policy = RetryPolicy {
             per_attempt: Duration::from_secs(2),
             attempts: 0,
@@ -577,8 +577,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ResilientError::Upstream(_)));
-        let conn = open_connection(w.agent_db_path(), false).await.unwrap();
-        let cnt = crate::retain_queue::count(&conn).await.unwrap();
+        let cnt = queue.stats().await.unwrap().count;
         assert_eq!(cnt, 0, "4xx must not enqueue");
         // Client drop counter must have been bumped.
         assert_eq!(w.client_drops_24h().await, 1);
@@ -587,7 +586,7 @@ mod tests {
     #[tokio::test]
     async fn retain_402_sets_quota_status_no_enqueue() {
         let (_h, url) = mock(r#"{"detail":"Insufficient credits. Balance: $-0.01"}"#, 402).await;
-        let w = wrap(&url).await;
+        let (w, queue) = wrap(&url).await;
         let policy = RetryPolicy {
             per_attempt: Duration::from_secs(2),
             attempts: 0,
@@ -602,8 +601,7 @@ mod tests {
             "expected QuotaExhausted, got {:?}",
             w.status()
         );
-        let conn = open_connection(w.agent_db_path(), false).await.unwrap();
-        let cnt = crate::retain_queue::count(&conn).await.unwrap();
+        let cnt = queue.stats().await.unwrap().count;
         assert_eq!(cnt, 0, "402 must not enqueue (will never drain)");
     }
 
@@ -642,7 +640,7 @@ mod tests {
             (200, r#"{"results":[]}"#),
         ])
         .await;
-        let w = wrap(&url).await;
+        let (w, _queue) = wrap(&url).await;
         let policy = RetryPolicy {
             per_attempt: Duration::from_secs(2),
             attempts: 0,
@@ -669,7 +667,7 @@ mod tests {
             (401, r#"{"error":"unauthorized"}"#),
         ])
         .await;
-        let w = wrap(&url).await;
+        let (w, _queue) = wrap(&url).await;
         let policy = RetryPolicy {
             per_attempt: Duration::from_secs(2),
             attempts: 0,
@@ -713,7 +711,7 @@ mod tests {
     #[tokio::test]
     async fn retain_passes_sanitized_content_for_critical_pattern() {
         let (handle, url) = mock_capture(r#"{"success": true}"#, 200).await;
-        let w = wrap(&url).await;
+        let (w, _queue) = wrap(&url).await;
         let policy = RetryPolicy {
             per_attempt: Duration::from_secs(2),
             attempts: 0,
@@ -748,7 +746,7 @@ mod tests {
     #[tokio::test]
     async fn retain_passes_unchanged_content_for_non_critical_pattern() {
         let (handle, url) = mock_capture(r#"{"success": true}"#, 200).await;
-        let w = wrap(&url).await;
+        let (w, _queue) = wrap(&url).await;
         let policy = RetryPolicy {
             per_attempt: Duration::from_secs(2),
             attempts: 0,

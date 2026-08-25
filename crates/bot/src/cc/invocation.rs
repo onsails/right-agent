@@ -624,7 +624,7 @@ pub(crate) async fn build_claude_command(
     args: &[String],
     agent_dir: &Path,
     sandbox: &crate::sandbox::Sandbox,
-) -> crate::cc::sandbox_process::SandboxCommand {
+) -> anyhow::Result<crate::cc::sandbox_process::SandboxCommand> {
     let script =
         quote_guest_args(args.iter().map(String::as_str)).expect("claude args contain no NUL byte");
     build_claude_script_command(script, agent_dir, sandbox).await
@@ -636,7 +636,7 @@ pub(crate) async fn build_claude_script_command(
     script: String,
     agent_dir: &Path,
     sandbox: &crate::sandbox::Sandbox,
-) -> crate::cc::sandbox_process::SandboxCommand {
+) -> anyhow::Result<crate::cc::sandbox_process::SandboxCommand> {
     // `claude` installs into /sandbox/.local/bin, which reaches PATH through
     // /sandbox/.right/env.sh. Under the old SSH transport a login shell
     // sourced that via .bashrc; a direct guest exec gets no login shell, so
@@ -645,11 +645,24 @@ pub(crate) async fn build_claude_script_command(
         "if [ -r {env} ]; then . {env}; fi\n{script}",
         env = crate::sandbox::GUEST_ENV_SCRIPT,
     );
-    let command = crate::cc::sandbox_process::SandboxCommand::shell(sandbox, script);
-    match crate::login::load_auth_token(agent_dir).await {
-        Some(token) => command.env("CLAUDE_CODE_OAUTH_TOKEN", token),
-        None => command,
-    }
+    build_claude_script_command_with_token(
+        crate::login::load_auth_token(agent_dir).await,
+        |token| {
+            let command = crate::cc::sandbox_process::SandboxCommand::shell(sandbox, script);
+            match token {
+                Some(token) => command.env("CLAUDE_CODE_OAUTH_TOKEN", token),
+                None => command,
+            }
+        },
+    )
+}
+
+fn build_claude_script_command_with_token<T>(
+    token_result: anyhow::Result<Option<String>>,
+    build: impl FnOnce(Option<String>) -> T,
+) -> anyhow::Result<T> {
+    let token = token_result.context("load Claude authentication token")?;
+    Ok(build(token))
 }
 
 #[cfg(test)]
@@ -667,6 +680,31 @@ mod tests {
             .expect_err("a missing sandbox must refuse");
         assert_eq!(refused.agent, "agent-x");
         assert!(format!("{refused}").contains("refusing to run agent 'agent-x' on the host"));
+    }
+
+    #[test]
+    fn command_build_preserves_auth_load_error_chain() {
+        let source = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "database denied");
+        let error = build_claude_script_command_with_token(
+            Err(anyhow::Error::new(source).context("open auth token database")),
+            |_| (),
+        )
+        .expect_err("auth DB failure must prevent command construction");
+
+        assert_eq!(
+            format!("{error:#}"),
+            "load Claude authentication token: open auth token database: database denied"
+        );
+    }
+
+    #[test]
+    fn command_build_allows_an_absent_auth_token() {
+        let built = build_claude_script_command_with_token(Ok(None), |token| {
+            assert!(token.is_none());
+            "built"
+        })
+        .expect("an absent token row is not an error");
+        assert_eq!(built, "built");
     }
 
     fn minimal() -> ClaudeInvocation {

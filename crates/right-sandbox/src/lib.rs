@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_test_module)]
+
 //! Agent Sandbox backend.
 //!
 //! Owns every microVM interaction: runtime install, sandbox lifecycle,

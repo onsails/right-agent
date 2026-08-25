@@ -18,6 +18,12 @@ header credentials through the dashboard headers route. Header values are
 write-only secrets; list APIs return header names only. `URL as-is` registers
 the exact original URL without token/header injection, preserving query-string
 credentials.
+Replacing an existing server is transactional from the dashboard's perspective:
+Right serializes dashboard add/remove/header/OAuth mutations per agent and
+server, snapshots the complete durable server/auth/header/OAuth record, and
+keeps the existing proxy routed while the replacement connects. A failed
+connect restores the prior record byte-for-field and leaves the prior
+proxy/status published; failure of a brand-new server removes only that row.
 
 OAuth-capable HTTP MCP servers can advertise a canonical resource URI through
 RFC 9728 protected-resource metadata. Right persists that resource with the
@@ -267,7 +273,7 @@ line; they are disposable runtime state, not persisted across restarts.
 
 ## MCP Aggregator
 
-The Aggregator replaces HttpMemoryServer as the MCP endpoint. One shared process
+The Aggregator is the MCP endpoint. One shared process
 serves all agents on TCP :8100/mcp with per-agent Bearer token authentication.
 
 Sandboxed agents reach the host-side aggregator through
@@ -303,25 +309,25 @@ Tool routing:
   - `rightmeta__` prefix → Aggregator management (read-only: mcp_list)
   - `{server}__` prefix → ProxyBackend (forwarded to upstream MCP)
 
-Internal REST API on Unix socket (~/.right/run/internal.sock):
-  - POST /mcp-add — register external MCP server
-  - POST /mcp-remove — remove external MCP server
-  - POST /mcp-set-headers — replace stored HTTP header credentials for an
-    external MCP server
-  - POST /set-token — deliver OAuth tokens after authentication
-  - POST /mcp-list — list MCP servers with status
-  - POST /mcp-instructions — fetch MCP server instructions markdown
-  - POST /progress/register — register an invocation for foreground progress,
-    foreground learning, probe-writer learning, curator learning, or search scope
-  - POST /progress/unregister — remove that invocation when the run ends
-  - POST /message/send — deliver a foreground agent message (text and/or
-    attachments) for `mcp__right__send_message` (reuses the progress channel)
+Internal REST API on owner-only Unix socket (`~/.right/run/internal.sock`, mode
+0600) carries MCP management and finite typed database-domain operations. The
+bot first calls `POST /db/ready`; all subsequent interaction state, run ledger,
+auth/MCP registry, learning/usage, dashboard, and provider-binding requests use
+named DTOs and routes from `right_mcp::internal_db`. The wire contract exposes
+no SQL, table names, raw rows, or generic operation parameters.
 
-Telegram dashboard routes use InternalClient (hyper UDS) to call these
-endpoints; the `/mcp` Telegram command only opens the dashboard MCP view.
-Dashboard MCP management routes do not edit MCP config files or credential
-stores directly.
-Agents cannot reach the Unix socket from inside the sandbox.
+MCP management includes `/mcp-add`, `/mcp-remove`, `/mcp-set-headers`,
+`/set-token`, `/mcp-list`, and `/mcp-instructions`. Progress and delivery use
+`/progress/register`, `/progress/unregister`, and `/message/send`. Aggregator
+handlers serialize each accepted operation through the per-agent owner and map
+failures into typed categories without returning server-side error chains or
+secrets.
+
+Provider binding resolution is the narrow secret-bearing exception. Requests
+authenticate the exact agent with the `provider-binding-ipc` HMAC label;
+responses carry redacted `SecretString` DTOs only over the UDS. The bot converts
+each DTO immediately to `right_sandbox::SecretBinding` for create/reconcile/apply
+and drops it. Agents inside the sandbox cannot reach the socket.
 
 ## Invocation-scoped MCP tools
 

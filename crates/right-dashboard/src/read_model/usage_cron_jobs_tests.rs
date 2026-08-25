@@ -24,6 +24,7 @@ async fn insert_usage(
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_usage_with_tokens(
     conn: &right_db::Connection,
     ts: &str,

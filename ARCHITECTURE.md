@@ -413,22 +413,20 @@ message pointing at `right up`". `PC_PORT` may still be referenced by
 
 ## Local Database Rules
 
-Per-agent `data.db` is a SQLite-compatible database. Runtime local
-storage uses the `turso` crate with `sync` enabled for future Turso Cloud
-backup work, and that driver implementation is hidden behind `right-db`.
+Per-agent `data.db` and `~/.right/providers.db` are SQLite-compatible
+databases whose driver implementation is hidden behind `right-db`.
+Filesystem opens use Turso standard-local WAL with the experimental index
+method enabled for FTS; `experimental_multiprocess_wal`, custom no-lock IO,
+and `data.db-tshm` are forbidden.
 
-`right-db` is the only crate that owns local database-driver details.
-Local filesystem-backed opens must enable Turso's experimental
-index-method feature (FTS uses `CREATE INDEX ... USING fts`) and the
-experimental multiprocess-WAL path so bot and MCP aggregator processes
-can open the same per-agent `data.db`; this may create Turso sidecar
-files such as `data.db-tshm`. Files matching `data.db-*` are disposable
-runtime sidecars, not durable backup state — backup and restore flows
-preserve only the canonical `VACUUM INTO` snapshot stored as `data.db`.
-The in-memory test/helper path is the exception: Turso does not support
-multiprocess WAL for `:memory:`. Other crates must use project-owned
-`right_db` types and must not expose raw `turso` connection, transaction,
-row, error, value, or parameter types in public APIs.
+The Aggregator MUST own exactly one writable live connection for each
+per-agent `data.db` and the one `providers.db`; bots MUST use typed domain
+operations over owner-only `~/.right/run/internal.sock`. Direct database
+opens are offline-only and MUST prove runtime quiescence first.
+
+`right-db` is the only crate that owns local database-driver details. Other
+crates must use project-owned `right_db` types and must not expose raw `turso`
+connection, transaction, row, error, value, or parameter types in public APIs.
 
 The runtime database API is async-first: `open_connection`, `open_db`,
 `query_*`, migrations, and transactions are awaited directly by callers.
@@ -444,15 +442,12 @@ scrubbed.
 
 ### Migration Ownership
 
-Both `right-mcp-server` and bot processes run schema bootstrap on
-per-agent `data.db` via `right_db::open_connection(path, migrate: true)`.
-This is the only path that may run migrations. `right-db` serializes that
-bootstrap with a per-agent advisory lock file so concurrent startup is
-safe without relying on process-compose ordering. Migration v34 drops any
-remaining legacy SQLite FTS5 triggers/virtual tables and creates the Turso
-FTS indexes; it stays idempotent for any database Turso can already open.
-Runtime opens with `migrate: false` do not apply migrations. Read-only
-helpers do not mutate files. The migration registry
+The Aggregator opens every registered per-agent `data.db` with
+`right_db::open_connection(path, migrate: true)` before publishing readiness;
+bots wait for the typed `/db/ready` handshake and never run schema bootstrap.
+The bootstrap lock remains mandatory for migrations and explicit offline
+maintenance. Runtime opens with `migrate: false` do not apply migrations,
+read-only helpers do not mutate files, and the migration registry
 (`right_db::migrations::MIGRATIONS`) is the sole place to add new tables.
 
 All pending migrations run inside a single immediate transaction.
@@ -711,8 +706,9 @@ lives in the backend; the UI optimizes for user clarity.
   secret intercepts every destination on the intercepted ports except
   `TLS_BYPASS_HOSTS`. Adding a host to that list removes interception
   from it — treat the list as security-relevant inventory (ADR-0003).
-- **Substitution is keyed by env-var name**, not by the owning provider's
-  hosts, so a declared provider's hosts do not confine its credential.
+- **Substitution is per-SNI host-gated**: the SDK substitutes a placeholder
+  only on connections whose SNI matches its binding's `allowed_hosts`;
+  cross-provider substitution is impossible (#92, OpenShell-era, closed).
 - CC actively manages `.claude.json` — it strips unknown project trust
   entries on startup. Use `--dangerously-skip-permissions` instead of
   relying on trust entries.
@@ -721,11 +717,11 @@ lives in the backend; the UI optimizes for user clarity.
   `host.microsandbox.internal` alias, which resolves to a host loopback
   address, so binding every interface would expose the aggregator to the
   local network for no benefit.
-- **Sandbox user-local executables**: `/sandbox/.local/bin` is the only
-  platform-supported install target (sourced via `/sandbox/.right/env.sh`
-  from `/sandbox/.bashrc` and before sandboxed `claude -p`). npm uses
-  `NPM_CONFIG_PREFIX=/sandbox/.local` + `NPM_CONFIG_CACHE=/sandbox/.npm`.
-  Do not document or generate `~/bin`.
+- **Sandbox executable PATH**: `/sandbox/.local/bin` is the supported guest
+  install target and intentionally precedes the root-owned `/opt/right/bin`
+  host-staged fallback. Both come from `/sandbox/.right/env.sh` before
+  sandboxed `claude -p`; npm uses `NPM_CONFIG_PREFIX=/sandbox/.local` +
+  `NPM_CONFIG_CACHE=/sandbox/.npm`. Do not document or generate `~/bin`.
 - **Every network change needs a recreate**: there is no policy hot-apply.
   Egress is applied by the SDK at create, so an `agent.yaml`
   `network_policy` change takes effect only on a recreated sandbox.

@@ -868,6 +868,17 @@ fn check_tunnel_health(home: &Path) -> DoctorCheck {
 /// Tokens with expires_at=0 (non-expiring) count as ok (REFRESH-04).
 /// Only synchronous file I/O — no HTTP calls.
 async fn check_mcp_tokens_impl(home: &Path) -> DoctorCheck {
+    let _quiescence_guard = match crate::runtime::require_runtime_quiesced(home).await {
+        Ok(guard) => guard,
+        Err(error) => {
+            return DoctorCheck {
+                name: "mcp-tokens".to_string(),
+                status: CheckStatus::Warn,
+                detail: format!("offline database check unavailable: {error:#}"),
+                fix: Some("stop Right before running offline database diagnostics".to_string()),
+            };
+        }
+    };
     let agents_dir = right_config::agents_dir(home);
 
     if !agents_dir.exists() {
@@ -1028,6 +1039,22 @@ fn check_sandbox_runtime() -> DoctorCheck {
 /// has crons and all of them are healthy. Returns an empty Vec if the agent has no crons.
 pub async fn check_cron_targets(agent_dir: &Path) -> Vec<DoctorCheck> {
     let mut out = Vec::new();
+    let home = agent_dir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(agent_dir);
+    let _quiescence_guard = match crate::runtime::require_runtime_quiesced(home).await {
+        Ok(guard) => guard,
+        Err(error) => {
+            out.push(DoctorCheck {
+                name: "cron targets".into(),
+                status: CheckStatus::Warn,
+                detail: format!("offline database check unavailable: {error:#}"),
+                fix: Some("stop Right before running offline database diagnostics".into()),
+            });
+            return out;
+        }
+    };
 
     let conn = match right_db::open_connection(agent_dir, false).await {
         Ok(c) => c,
@@ -1164,6 +1191,14 @@ pub async fn check_cron_targets(agent_dir: &Path) -> Vec<DoctorCheck> {
 /// unreadable `data.db` as a `Fail`. This check exists only to make an in-flight
 /// run visible, so the absence of a readable DB is not its concern.
 pub async fn check_cron_runs(agent_dir: &Path) -> Vec<DoctorCheck> {
+    let home = agent_dir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(agent_dir);
+    let _quiescence_guard = match crate::runtime::require_runtime_quiesced(home).await {
+        Ok(guard) => guard,
+        Err(_) => return Vec::new(),
+    };
     let conn = match right_db::open_connection(agent_dir, false).await {
         Ok(c) => c,
         Err(_) => return Vec::new(), // unreadable DB is covered by check_memory
@@ -1217,6 +1252,22 @@ pub async fn check_cron_runs(agent_dir: &Path) -> Vec<DoctorCheck> {
 /// other checks (one failing check shouldn't hide the rest).
 pub async fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     let mut out = Vec::new();
+    let home = agent_dir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(agent_dir);
+    let _quiescence_guard = match crate::runtime::require_runtime_quiesced(home).await {
+        Ok(guard) => guard,
+        Err(error) => {
+            out.push(DoctorCheck {
+                name: "memory db".into(),
+                status: CheckStatus::Warn,
+                detail: format!("offline database check unavailable: {error:#}"),
+                fix: Some("stop Right before running offline database diagnostics".into()),
+            });
+            return out;
+        }
+    };
     let db_path = agent_dir.join("data.db");
 
     // 1. data.db opens.

@@ -1,13 +1,11 @@
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
-
-use frankenstein::types::Message;
-use right_db::conversation::{ConversationMessage, ConversationRole, archive_message};
 
 use super::mention::{AddressKind, BotIdentity, is_bot_addressed};
 use super::msg_ext;
 use super::session::effective_thread_id;
+use frankenstein::types::Message;
+use right_mcp::internal_db as ipc;
 
 // Why 4: bounded so a Telegram traffic burst cannot queue unbounded
 // blocking-pool tasks; SQLite WAL handles small write concurrency well.
@@ -189,25 +187,27 @@ pub(crate) async fn archive_outbound_channel_post(
     message_id: i32,
     content: &str,
 ) -> anyhow::Result<()> {
-    let conn = right_db::open_connection(agent_dir, false).await?;
-    archive_message(
-        &conn,
-        ConversationMessage {
-            platform: "telegram",
-            chat_id,
-            thread_id: 0,
-            message_id: Some(message_id),
-            sender_user_id: None,
-            sender_name: None,
-            addressed_to_bot: false,
-            routed_to_agent: true,
-            root_session_id: None,
-            turn_id: None,
-            role: ConversationRole::Assistant,
-            content,
-        },
-    )
-    .await?;
+    let (client, agent) = crate::db::client_for_agent_dir(agent_dir)?;
+    client
+        .archive_message(&ipc::ArchiveMessageRequest {
+            agent,
+            request_id: crate::db::request_id(),
+            message: ipc::ConversationMessageDto {
+                platform: "telegram".to_owned(),
+                chat_id,
+                thread_id: 0,
+                message_id: Some(message_id),
+                sender_user_id: None,
+                sender_name: None,
+                addressed_to_bot: false,
+                routed_to_agent: true,
+                root_session_id: None,
+                turn_id: None,
+                role: "assistant".to_owned(),
+                content: content.to_owned(),
+            },
+        })
+        .await?;
     Ok(())
 }
 
@@ -262,69 +262,96 @@ async fn write_assistant_payload(payload: AssistantArchivePayload) {
     retry_archive_assistant_db_write(meta, "assistant archive", &payload).await;
 }
 
-async fn retry_archive_user_db_write(
+fn archive_error_is_transient(error: &ipc::InternalDbError) -> bool {
+    matches!(
+        error,
+        ipc::InternalDbError::Transport(_)
+            | ipc::InternalDbError::Server {
+                category: ipc::DbErrorCategory::Unavailable
+                    | ipc::DbErrorCategory::NotReady
+                    | ipc::DbErrorCategory::Transient,
+                ..
+            }
+    )
+}
+
+async fn archive_with_retry(
     meta: ArchiveLogMeta,
     operation: &'static str,
-    payload: &ArchivePayload,
+    agent_dir: &Path,
+    message: ipc::ConversationMessageDto,
 ) {
+    let (client, agent) = match crate::db::client_for_agent_dir(agent_dir) {
+        Ok(pair) => pair,
+        Err(error) => {
+            tracing::warn!(
+                chat_id = meta.chat_id,
+                thread_id = meta.thread_id,
+                message_id = meta.message_id,
+                operation,
+                "archive internal client resolution failed: {error:#}"
+            );
+            return;
+        }
+    };
+    // Reuse one request id across lost-response retries so owner-side
+    // idempotency cannot duplicate an archive row.
+    let request = ipc::ArchiveMessageRequest {
+        agent,
+        request_id: crate::db::request_id(),
+        message,
+    };
     let deadline = std::time::Instant::now() + ARCHIVE_WRITE_RETRY_TIMEOUT;
-    let mut attempts = 0;
-    let mut conn: Option<right_db::Connection> = None;
+    let mut attempts = 0usize;
     loop {
         attempts += 1;
-        if conn.is_none() {
-            match right_db::open_connection(&payload.agent_dir, false).await {
-                Ok(opened) => conn = Some(opened),
-                Err(e) if e.is_transient() && std::time::Instant::now() < deadline => {
-                    tokio::time::sleep(ARCHIVE_WRITE_RETRY_DELAY).await;
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        chat_id = meta.chat_id,
-                        thread_id = meta.thread_id,
-                        message_id = meta.message_id,
-                        attempts,
-                        operation,
-                        "archive database open failed: {e:#}"
-                    );
-                    return;
-                }
-            }
-        }
-        let handle = conn.as_ref().expect("connection initialized above");
-        let message = ConversationMessage {
-            platform: "telegram",
-            chat_id: payload.chat_id,
-            thread_id: payload.thread_id,
-            message_id: Some(payload.message_id),
-            sender_user_id: payload.sender_user_id,
-            sender_name: payload.sender_name.as_deref(),
-            addressed_to_bot: payload.addressed_to_bot,
-            routed_to_agent: payload.routed_to_agent,
-            root_session_id: None,
-            turn_id: None,
-            role: ConversationRole::User,
-            content: &payload.content,
-        };
-        match archive_message(handle, message).await {
+        match client.archive_message(&request).await {
             Ok(_) => return,
-            Err(e) if e.is_transient() && std::time::Instant::now() < deadline => {
+            Err(error)
+                if archive_error_is_transient(&error) && std::time::Instant::now() < deadline =>
+            {
                 tokio::time::sleep(ARCHIVE_WRITE_RETRY_DELAY).await;
             }
-            Err(e) => {
+            Err(error) => {
                 tracing::warn!(
                     chat_id = meta.chat_id,
                     thread_id = meta.thread_id,
                     message_id = meta.message_id,
                     attempts,
                     operation,
-                    "archive database write failed: {e:#}"
+                    "archive owner write failed: {error:#}"
                 );
                 return;
             }
         }
     }
+}
+
+async fn retry_archive_user_db_write(
+    meta: ArchiveLogMeta,
+    operation: &'static str,
+    payload: &ArchivePayload,
+) {
+    archive_with_retry(
+        meta,
+        operation,
+        &payload.agent_dir,
+        ipc::ConversationMessageDto {
+            platform: "telegram".to_owned(),
+            chat_id: payload.chat_id,
+            thread_id: payload.thread_id,
+            message_id: Some(payload.message_id),
+            sender_user_id: payload.sender_user_id,
+            sender_name: payload.sender_name.clone(),
+            addressed_to_bot: payload.addressed_to_bot,
+            routed_to_agent: payload.routed_to_agent,
+            root_session_id: None,
+            turn_id: None,
+            role: "user".to_owned(),
+            content: payload.content.clone(),
+        },
+    )
+    .await;
 }
 
 async fn retry_archive_assistant_db_write(
@@ -332,388 +359,28 @@ async fn retry_archive_assistant_db_write(
     operation: &'static str,
     payload: &AssistantArchivePayload,
 ) {
-    let deadline = std::time::Instant::now() + ARCHIVE_WRITE_RETRY_TIMEOUT;
-    let mut attempts = 0;
-    let mut conn: Option<right_db::Connection> = None;
-    loop {
-        attempts += 1;
-        if conn.is_none() {
-            match right_db::open_connection(&payload.agent_dir, false).await {
-                Ok(opened) => conn = Some(opened),
-                Err(e) if e.is_transient() && std::time::Instant::now() < deadline => {
-                    tokio::time::sleep(ARCHIVE_WRITE_RETRY_DELAY).await;
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        chat_id = meta.chat_id,
-                        thread_id = meta.thread_id,
-                        message_id = meta.message_id,
-                        attempts,
-                        operation,
-                        "archive database open failed: {e:#}"
-                    );
-                    return;
-                }
-            }
-        }
-        let handle = conn.as_ref().expect("connection initialized above");
-        let message = ConversationMessage {
-            platform: "telegram",
+    archive_with_retry(
+        meta,
+        operation,
+        &payload.agent_dir,
+        ipc::ConversationMessageDto {
+            platform: "telegram".to_owned(),
             chat_id: payload.chat_id,
             thread_id: payload.thread_id,
             message_id: None,
             sender_user_id: None,
-            sender_name: Some(payload.agent_name.as_str()),
+            sender_name: Some(payload.agent_name.clone()),
             addressed_to_bot: false,
             routed_to_agent: true,
-            root_session_id: Some(payload.session_uuid.as_str()),
+            root_session_id: Some(payload.session_uuid.clone()),
             turn_id: Some(payload.turn_id),
-            role: ConversationRole::Assistant,
-            content: &payload.content,
-        };
-        match archive_message(handle, message).await {
-            Ok(_) => return,
-            Err(e) if e.is_transient() && std::time::Instant::now() < deadline => {
-                tokio::time::sleep(ARCHIVE_WRITE_RETRY_DELAY).await;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    chat_id = meta.chat_id,
-                    thread_id = meta.thread_id,
-                    message_id = meta.message_id,
-                    attempts,
-                    operation,
-                    "archive database write failed: {e:#}"
-                );
-                return;
-            }
-        }
-    }
+            role: "assistant".to_owned(),
+            content: payload.content.clone(),
+        },
+    )
+    .await;
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::LazyLock;
-
-    use frankenstein::types::Message;
-
-    use super::super::mention::{AddressKind, BotIdentity};
-
-    static ARCHIVE_TEST_MUTEX: LazyLock<tokio::sync::Mutex<()>> =
-        LazyLock::new(|| tokio::sync::Mutex::new(()));
-
-    async fn archive_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        ARCHIVE_TEST_MUTEX.lock().await
-    }
-
-    fn message(payload: serde_json::Value) -> Message {
-        serde_json::from_value(payload).unwrap()
-    }
-
-    #[test]
-    fn archive_payload_falls_back_to_sender_chat_for_channel_posts() {
-        let dir = tempfile::tempdir().unwrap();
-        let msg: Message = serde_json::from_value(serde_json::json!({
-            "message_id": 7, "date": 0,
-            "chat": {"id": -1001234567890_i64, "type": "channel", "title": "RiskOff"},
-            "sender_chat": {"id": -1001234567890_i64, "type": "channel", "title": "RiskOff"},
-            "text": "hello channel"
-        }))
-        .unwrap();
-        let payload = super::ArchivePayload::from_message(dir.path(), &msg, false, false).unwrap();
-        assert_eq!(payload.sender_user_id, None);
-        assert_eq!(payload.sender_name.as_deref(), Some("RiskOff"));
-    }
-
-    #[test]
-    fn archive_payload_prefers_from_over_sender_chat() {
-        let dir = tempfile::tempdir().unwrap();
-        let msg = message(serde_json::json!({
-            "message_id": 8,
-            "date": 0,
-            "chat": {"id": -1001234567890_i64, "type": "channel", "title": "RiskOff"},
-            "from": {"id": 42, "is_bot": false, "first_name": "User"},
-            "sender_chat": {"id": -1001234567890_i64, "type": "channel", "title": "Chan"},
-            "text": "both senders"
-        }));
-        let payload = super::ArchivePayload::from_message(dir.path(), &msg, false, false).unwrap();
-        assert_eq!(payload.sender_name.as_deref(), Some("User"));
-    }
-
-    #[tokio::test]
-    async fn archive_outbound_channel_post_writes_assistant_row() {
-        let dir = tempfile::tempdir().expect("agent dir");
-        right_db::open_connection(dir.path(), true)
-            .await
-            .expect("create database");
-
-        super::archive_outbound_channel_post(dir.path(), -100, 7, "published post")
-            .await
-            .expect("archive outbound channel post");
-
-        let conn = right_db::open_connection(dir.path(), false)
-            .await
-            .expect("open database");
-        let row: (String, String, i64) = conn
-            .query_row(
-                "SELECT role, content, thread_id
-                 FROM conversation_messages
-                 WHERE platform = 'telegram' AND chat_id = ?1",
-                [-100],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .await
-            .expect("outbound row");
-
-        assert_eq!(
-            row,
-            ("assistant".to_owned(), "published post".to_owned(), 0)
-        );
-    }
-
-    fn bot_identity() -> BotIdentity {
-        BotIdentity {
-            username: "rightaww_bot".to_string(),
-            user_id: 999,
-        }
-    }
-
-    async fn archived_row(
-        conn: &right_db::Connection,
-        chat_id: i64,
-        message_id: i32,
-    ) -> Option<(String, i64)> {
-        conn.query_row(
-            "SELECT content, routed_to_agent
-             FROM conversation_messages
-             WHERE platform = 'telegram'
-               AND chat_id = ?1
-               AND message_id = ?2
-               AND role = 'user'",
-            (chat_id, message_id),
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .await
-        .ok()
-    }
-
-    async fn poll_archived_row(
-        agent_dir: &std::path::Path,
-        chat_id: i64,
-        message_id: i32,
-    ) -> Option<(String, i64)> {
-        poll_archived_row_for(
-            agent_dir,
-            chat_id,
-            message_id,
-            std::time::Duration::from_secs(6),
-        )
-        .await
-    }
-
-    async fn poll_archived_row_for(
-        agent_dir: &std::path::Path,
-        chat_id: i64,
-        message_id: i32,
-        timeout: std::time::Duration,
-    ) -> Option<(String, i64)> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        let mut conn = None;
-        loop {
-            if conn.is_none()
-                && let Ok(opened) = right_db::open_connection(agent_dir, false).await
-            {
-                conn = Some(opened);
-            }
-            if let Some(opened) = conn.as_ref()
-                && let Some(row) = archived_row(opened, chat_id, message_id).await
-            {
-                return Some(row);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return None;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn archive_content_uses_text() {
-        let msg = message(serde_json::json!({
-            "message_id": 1,
-            "date": 0,
-            "chat": {"id": 42, "type": "private", "first_name": "User"},
-            "from": {"id": 42, "is_bot": false, "first_name": "User"},
-            "text": "  hello archive  "
-        }));
-
-        assert_eq!(
-            super::archive_content(&msg),
-            Some("hello archive".to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn archive_content_uses_caption() {
-        let msg = message(serde_json::json!({
-            "message_id": 1,
-            "date": 0,
-            "chat": {"id": -1001, "type": "supergroup", "title": "g"},
-            "from": {"id": 42, "is_bot": false, "first_name": "User"},
-            "caption": "  caption  ",
-            "photo": [{
-                "file_id": "AgAD",
-                "file_unique_id": "u",
-                "width": 1,
-                "height": 1
-            }]
-        }));
-
-        assert_eq!(
-            super::archive_content(&msg),
-            Some("caption\n[photo]".to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn archive_content_records_media_without_text() {
-        let msg = message(serde_json::json!({
-            "message_id": 1,
-            "date": 0,
-            "chat": {"id": -1001, "type": "supergroup", "title": "g"},
-            "from": {"id": 42, "is_bot": false, "first_name": "User"},
-            "document": {
-                "file_id": "BAAD",
-                "file_unique_id": "uniq",
-                "file_name": "plan.pdf",
-                "mime_type": "application/pdf",
-                "file_size": 1024
-            }
-        }));
-
-        assert_eq!(
-            super::archive_content(&msg),
-            Some("[document: plan.pdf]".to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn group_messages_are_archivable_before_routing() {
-        let msg = message(serde_json::json!({
-            "message_id": 1,
-            "date": 0,
-            "chat": {"id": -1001, "type": "supergroup", "title": "g"},
-            "from": {"id": 42, "is_bot": false, "first_name": "User"},
-            "text": "unaddressed group message"
-        }));
-
-        assert!(super::should_archive_seen_group_message(&msg));
-    }
-
-    #[tokio::test]
-    async fn group_archive_persists_unrouted_message_row() {
-        let _guard = archive_test_guard().await;
-        let dir = tempfile::tempdir().unwrap();
-        right_db::open_connection(dir.path(), true).await.unwrap();
-        let msg = message(serde_json::json!({
-            "message_id": 11,
-            "date": 0,
-            "chat": {"id": -1001, "type": "supergroup", "title": "g"},
-            "from": {"id": 42, "is_bot": false, "first_name": "User"},
-            "text": "  group archive  "
-        }));
-
-        super::archive_seen_group_message(dir.path(), &bot_identity(), &msg);
-
-        let row = poll_archived_row(dir.path(), -1001, 11)
-            .await
-            .expect("archive row should be written");
-        assert_eq!(row, ("group archive".to_string(), 0));
-    }
-
-    #[tokio::test]
-    async fn routed_dm_archive_persists_routed_message_row() {
-        let _guard = archive_test_guard().await;
-        let dir = tempfile::tempdir().unwrap();
-        right_db::open_connection(dir.path(), true).await.unwrap();
-        let msg = message(serde_json::json!({
-            "message_id": 12,
-            "date": 0,
-            "chat": {"id": 42, "type": "private", "first_name": "User"},
-            "from": {"id": 42, "is_bot": false, "first_name": "User"},
-            "text": "dm archive"
-        }));
-
-        super::archive_routed_dm_message(dir.path(), &msg, Some(AddressKind::DirectMessage));
-
-        let row = poll_archived_row(dir.path(), 42, 12)
-            .await
-            .expect("archive row should be written");
-        assert_eq!(row, ("dm archive".to_string(), 1));
-    }
-
-    #[tokio::test]
-    async fn private_message_seen_by_group_archive_does_not_persist() {
-        let _guard = archive_test_guard().await;
-        let dir = tempfile::tempdir().unwrap();
-        right_db::open_connection(dir.path(), true).await.unwrap();
-        let msg = message(serde_json::json!({
-            "message_id": 13,
-            "date": 0,
-            "chat": {"id": 42, "type": "private", "first_name": "User"},
-            "from": {"id": 42, "is_bot": false, "first_name": "User"},
-            "text": "private"
-        }));
-
-        super::archive_seen_group_message(dir.path(), &bot_identity(), &msg);
-
-        assert!(
-            poll_archived_row_for(dir.path(), 42, 13, std::time::Duration::from_millis(100))
-                .await
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn archive_seen_group_message_does_not_wait_for_locked_db() {
-        let _guard = archive_test_guard().await;
-        let dir = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
-        let tx = conn.transaction().await.unwrap();
-        tx.execute(
-            "INSERT INTO conversation_messages (
-                platform, chat_id, thread_id, message_id, sender_user_id, sender_name,
-                addressed_to_bot, routed_to_agent, root_session_id, turn_id, role, content
-             ) VALUES (
-                'telegram', -1001, 0, 98, 42, 'User',
-                0, 0, NULL, NULL, 'user', 'lock holder'
-             )",
-            [],
-        )
-        .await
-        .unwrap();
-        let msg = message(serde_json::json!({
-            "message_id": 14,
-            "date": 0,
-            "chat": {"id": -1001, "type": "supergroup", "title": "g"},
-            "from": {"id": 42, "is_bot": false, "first_name": "User"},
-            "text": "contended"
-        }));
-
-        let started = std::time::Instant::now();
-        super::archive_seen_group_message(dir.path(), &bot_identity(), &msg);
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(250),
-            "archive helper must not block on SQLite contention"
-        );
-
-        // Turso only finalizes a dropped transaction on the next use of that
-        // same connection. Roll back explicitly so another connection can
-        // observe the write lock release.
-        tx.rollback().await.unwrap();
-        poll_archived_row(dir.path(), -1001, 14)
-            .await
-            .expect("archive row should be written after lock release");
-    }
-}
+#[path = "archive_tests.rs"]
+mod tests;

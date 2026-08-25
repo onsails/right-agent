@@ -1,4 +1,11 @@
-use super::{DEFAULT_EXEC_TIMEOUT, SANDBOX_HOME, exec_request};
+use super::{DEFAULT_EXEC_TIMEOUT, SANDBOX_HOME, exec_request, guest_exec_request};
+
+#[test]
+fn guest_exec_request_uses_unprivileged_user() {
+    let request = guest_exec_request(&["true"], DEFAULT_EXEC_TIMEOUT);
+
+    assert_eq!(request.user.as_deref(), Some(right_sandbox::GUEST_USER));
+}
 
 #[test]
 fn exec_request_splits_program_from_arguments() {

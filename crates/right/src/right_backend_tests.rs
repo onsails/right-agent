@@ -3051,21 +3051,3 @@ async fn send_message_rejects_bad_path() {
     let body = extract_error_body(&result);
     assert_eq!(body["error"]["code"], "send_message_bad_path");
 }
-
-#[tokio::test]
-async fn get_conn_opens_per_operation_without_caching() {
-    let tmp = tempfile::tempdir().unwrap();
-    let agents_dir = tmp.path().to_path_buf();
-    let agent_dir = agents_dir.join("agent");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    right_db::open_connection(&agent_dir, true).await.unwrap();
-
-    let backend = RightBackend::new(agents_dir, None);
-    let a = backend.get_conn("agent").await.unwrap();
-    let b = backend.get_conn("agent").await.unwrap();
-
-    assert!(
-        !std::sync::Arc::ptr_eq(&a, &b),
-        "get_conn must open per operation, not return a cached handle",
-    );
-}

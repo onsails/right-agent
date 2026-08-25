@@ -7,11 +7,13 @@ pub mod hindsight;
 pub mod prefetch;
 pub mod resilient;
 pub mod retain_queue;
+pub mod retain_sink;
 pub(crate) mod status;
 
 pub use classify::ErrorKind;
 pub use error::MemoryError;
 pub use resilient::{ResilientError, ResilientHindsight};
+pub use retain_sink::{PendingRetainSink, RetainLeaseQueue};
 pub use status::MemoryStatus;
 
 pub mod alert_types {

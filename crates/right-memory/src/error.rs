@@ -10,6 +10,9 @@ pub enum MemoryError {
     #[error("db error: {0}")]
     Db(#[from] DbError),
 
+    #[error("retain lease conflict: {0}")]
+    LeaseConflict(String),
+
     #[error("content rejected: possible prompt injection detected")]
     InjectionDetected,
 

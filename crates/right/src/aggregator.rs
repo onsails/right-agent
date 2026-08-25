@@ -26,21 +26,23 @@ use rmcp::transport::streamable_http_server::{
 };
 use tokio_util::sync::CancellationToken;
 
+const LISTENER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const OWNER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 use crate::right_backend::RightBackend;
 
 // ---------------------------------------------------------------------------
-// Auth types & middleware (moved from memory_server_http.rs)
+// Auth types & middleware
 // ---------------------------------------------------------------------------
 
 /// Token -> agent mapping for multi-agent HTTP mode.
 pub(crate) type AgentTokenMap = Arc<tokio::sync::RwLock<HashMap<String, AgentInfo>>>;
 
-/// Per-agent refresh scheduler sender map.
-pub(crate) type RefreshSenders = Arc<HashMap<String, tokio::sync::mpsc::Sender<RefreshMessage>>>;
+pub(crate) type RefreshSenders = Arc<DashMap<String, tokio::sync::mpsc::Sender<RefreshMessage>>>;
 
 /// Per-agent reconnect manager map (one manager per agent, mutex-protected for mutable access).
 pub(crate) type ReconnectManagers =
-    Arc<HashMap<String, tokio::sync::Mutex<right_mcp::reconnect::ReconnectManager>>>;
+    Arc<DashMap<String, tokio::sync::Mutex<right_mcp::reconnect::ReconnectManager>>>;
 
 /// Agent identity resolved from a Bearer token.
 #[derive(Clone, Debug)]
@@ -737,11 +739,102 @@ fn build_streamable_config(
         config.with_allowed_hosts(allowed_hosts.iter().cloned())
     }
 }
+async fn shutdown_signal() -> miette::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|error| miette::miette!("install SIGTERM handler: {error:#}"))?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result.map_err(|error| miette::miette!("listen for SIGINT: {error:#}"))?;
+            }
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(|error| miette::miette!("listen for shutdown signal: {error:#}"))?;
+    Ok(())
+}
+
+async fn serve_until_shutdown<HTTP, UDS, SHUTDOWN, DRAIN>(
+    cancellation: CancellationToken,
+    http_server: HTTP,
+    uds_server: UDS,
+    shutdown: SHUTDOWN,
+    drain: DRAIN,
+) -> miette::Result<()>
+where
+    HTTP: Future<Output = std::io::Result<()>>,
+    UDS: Future<Output = std::io::Result<()>>,
+    SHUTDOWN: Future<Output = miette::Result<()>>,
+    DRAIN: Future<Output = miette::Result<()>>,
+{
+    tokio::pin!(http_server);
+    tokio::pin!(uds_server);
+    tokio::pin!(shutdown);
+
+    let server_result = tokio::select! {
+        result = &mut http_server => {
+            cancellation.cancel();
+            match tokio::time::timeout(LISTENER_SHUTDOWN_TIMEOUT, uds_server).await {
+                Ok(uds_result) => result.and(uds_result),
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "UDS listener shutdown timed out",
+                )),
+            }
+        }
+        result = &mut uds_server => {
+            cancellation.cancel();
+            match tokio::time::timeout(LISTENER_SHUTDOWN_TIMEOUT, http_server).await {
+                Ok(http_result) => result.and(http_result),
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "HTTP listener shutdown timed out",
+                )),
+            }
+        }
+        signal_result = &mut shutdown => {
+            signal_result?;
+            // Cancellation reaches both graceful-shutdown futures first, so
+            // both listeners stop accepting before owner draining begins.
+            cancellation.cancel();
+            match tokio::time::timeout(
+                LISTENER_SHUTDOWN_TIMEOUT,
+                async { tokio::join!(http_server, uds_server) },
+            )
+            .await
+            {
+                Ok((http_result, uds_result)) => http_result.and(uds_result),
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Aggregator listener shutdown timed out",
+                )),
+            }
+        }
+    };
+
+    let server_result =
+        server_result.map_err(|error| miette::miette!("Aggregator server error: {error:#}"));
+    tokio::time::timeout(OWNER_DRAIN_TIMEOUT, drain)
+        .await
+        .map_err(|_| miette::miette!("Aggregator owner drain timed out"))??;
+    server_result
+}
 
 /// Run the MCP Aggregator over HTTP with per-agent Bearer authentication.
 ///
-/// Replaces `run_memory_server_http` — same auth middleware, but dispatches
-/// through the prefix-based `ToolDispatcher` instead of `HttpMemoryServer`.
+/// Serves the `right` MCP endpoint with per-agent Bearer authentication and
+/// dispatches through the prefix-based `ToolDispatcher`.
+#[cfg(unix)]
+fn restrict_socket_permissions(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_aggregator_http(
@@ -754,6 +847,7 @@ pub(crate) async fn run_aggregator_http(
     providers: Arc<right_providers::ProviderStore>,
     refresh_senders: RefreshSenders,
     reconnect_managers: ReconnectManagers,
+    db_owners: crate::db_owner::DbOwnerRegistry,
     allowed_hosts: Vec<String>,
 ) -> miette::Result<()> {
     let ct = CancellationToken::new();
@@ -789,17 +883,22 @@ pub(crate) async fn run_aggregator_http(
             .map_err(|e| miette::miette!("create UDS parent dir: {e:#}"))?;
     }
 
-    let internal_app = crate::internal_api::internal_router(
-        dispatcher,
-        refresh_senders,
-        reconnect_managers,
-        token_map_for_reload,
-        token_map_path,
-        agents_dir.clone(),
-        providers,
-    );
+    let internal_app =
+        crate::internal_api::internal_router(crate::internal_api::InternalRouterDeps {
+            dispatcher,
+            refresh_senders: Arc::clone(&refresh_senders),
+            reconnect_managers: Arc::clone(&reconnect_managers),
+            token_map: token_map_for_reload,
+            db_owners: db_owners.clone(),
+            token_map_path,
+            agents_dir: agents_dir.clone(),
+            providers,
+        });
     let uds_listener = tokio::net::UnixListener::bind(&socket_path)
         .map_err(|e| miette::miette!("bind UDS {}: {e:#}", socket_path.display()))?;
+    #[cfg(unix)]
+    restrict_socket_permissions(&socket_path)
+        .map_err(|e| miette::miette!("set UDS permissions on {}: {e:#}", socket_path.display()))?;
 
     tracing::info!(
         port,
@@ -808,34 +907,63 @@ pub(crate) async fn run_aggregator_http(
         "MCP Aggregator listening"
     );
 
-    let ct_uds_shutdown = ct.clone();
-    let ct_uds_fail = ct.clone();
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(uds_listener, internal_app.into_make_service())
-            .with_graceful_shutdown(async move { ct_uds_shutdown.cancelled().await })
+    let http_shutdown = ct.clone();
+    let uds_shutdown = ct.clone();
+    let http_server = async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move { http_shutdown.cancelled().await })
             .await
-        {
-            tracing::error!("UDS server error: {e:#}");
-            ct_uds_fail.cancel(); // propagate failure — shut down the whole aggregator
+    };
+    let uds_server = async move {
+        axum::serve(uds_listener, internal_app.into_make_service())
+            .with_graceful_shutdown(async move { uds_shutdown.cancelled().await })
+            .await
+    };
+    let drain = async move {
+        for bundle in db_owners.all_bundles().await {
+            if let Some(manager) = reconnect_managers.get(bundle.owner.agent()) {
+                manager.lock().await.cancel_all();
+            }
+            refresh_senders.remove(bundle.owner.agent());
+            bundle.drain(OWNER_DRAIN_TIMEOUT).await.map_err(|error| {
+                miette::miette!("database owner shutdown drain failed: {error:#}")
+            })?;
         }
-    });
+        Ok(())
+    };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move { ct.cancelled().await })
-        .await
-        .map_err(|e| miette::miette!("HTTP server error: {e:#}"))
+    let serve_result =
+        serve_until_shutdown(ct, http_server, uds_server, shutdown_signal(), drain).await;
+    match std::fs::remove_file(&socket_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(miette::miette!(
+                "remove shutdown UDS {}: {error:#}",
+                socket_path.display()
+            ));
+        }
+    }
+    serve_result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Install ring as the rustls process-level crypto provider. Idempotent —
-    /// safe to call from multiple tests in the same binary.
-    fn setup_crypto() {
-        // install_default returns Err(existing provider Arc) when already
-        // installed by another test in the same binary — that's not a failure.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+    #[cfg(unix)]
+    #[test]
+    fn internal_socket_permissions_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("internal.sock");
+        std::fs::write(&path, b"").unwrap();
+        restrict_socket_permissions(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[derive(Clone)]
@@ -1381,14 +1509,16 @@ mod tests {
     async fn make_hindsight_backend(
         url: &str,
     ) -> (tempfile::TempDir, std::sync::Arc<HindsightBackend>) {
-        setup_crypto();
         use right_memory::ResilientHindsight;
         use right_memory::hindsight::HindsightClient;
+        use right_memory::retain_sink::InMemoryRetainQueue;
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().to_path_buf();
-        let _ = right_db::open_connection(&dir, true).await.unwrap();
         let client = HindsightClient::new("hs_x", "bank-1", "high", 1024, Some(url));
-        let resilient = std::sync::Arc::new(ResilientHindsight::new(client, dir, "test"));
+        let resilient = std::sync::Arc::new(ResilientHindsight::new(
+            client,
+            std::sync::Arc::new(InMemoryRetainQueue::new()),
+            "test",
+        ));
         (tmp, std::sync::Arc::new(HindsightBackend::new(resilient)))
     }
 
@@ -1453,5 +1583,39 @@ mod tests {
             .expect("Ok with operation error");
         let body = aggregator_test_body(&result);
         assert_eq!(body["error"]["code"], "upstream_unreachable");
+    }
+    #[tokio::test]
+    async fn injected_shutdown_stops_servers_before_drain() {
+        let cancellation = CancellationToken::new();
+        let http_wait = cancellation.clone();
+        let http_observer = cancellation.clone();
+        let uds_wait = cancellation.clone();
+        let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drained_observer = Arc::clone(&drained);
+
+        serve_until_shutdown(
+            cancellation,
+            async move {
+                http_wait.cancelled().await;
+                Ok(())
+            },
+            async move {
+                uds_wait.cancelled().await;
+                Ok(())
+            },
+            async { Ok(()) },
+            async move {
+                assert!(
+                    http_observer.is_cancelled(),
+                    "listener cancellation must precede owner drain"
+                );
+                drained_observer.store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(drained.load(std::sync::atomic::Ordering::Acquire));
     }
 }

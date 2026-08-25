@@ -1,12 +1,25 @@
 use crate::DbError;
 
+enum RowInner<'row> {
+    Sdk(&'row turso::Row),
+    Core(&'row [turso::core::Value]),
+}
+
 pub struct Row<'row> {
-    inner: &'row turso::Row,
+    inner: RowInner<'row>,
 }
 
 impl<'row> Row<'row> {
     pub(crate) fn new(inner: &'row turso::Row) -> Self {
-        Self { inner }
+        Self {
+            inner: RowInner::Sdk(inner),
+        }
+    }
+
+    pub(crate) fn new_core(inner: &'row [turso::core::Value]) -> Self {
+        Self {
+            inner: RowInner::Core(inner),
+        }
     }
 
     pub fn get<I, T>(&self, idx: I) -> Result<T, DbError>
@@ -17,7 +30,15 @@ impl<'row> Row<'row> {
         let idx = idx
             .try_into()
             .map_err(|_| DbError::InvalidParameter("column index does not fit in usize".into()))?;
-        T::from_value(self.inner.get_value(idx)?)
+        let value = match self.inner {
+            RowInner::Sdk(row) => row.get_value(idx)?,
+            RowInner::Core(row) => row
+                .get(idx)
+                .ok_or_else(|| DbError::InvalidParameter("column index out of range".into()))?
+                .clone()
+                .into(),
+        };
+        T::from_value(value)
     }
 }
 

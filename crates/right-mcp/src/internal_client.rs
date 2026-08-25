@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use http_body_util::BodyExt as _;
+use hyper::body::{Body, Bytes};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -68,6 +70,18 @@ pub const PROGRESS_MESSAGE_MAX_CHARS: usize = 2000;
 // Error
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedactedServerCategory {
+    Unavailable,
+    NotReady,
+    NotFound,
+    Conflict,
+    Transient,
+    Invalid,
+    Internal,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum InternalClientError {
     #[error("Connection to aggregator failed: {0}")]
@@ -81,14 +95,77 @@ pub enum InternalClientError {
 
     #[error("Server error ({status}): {body}")]
     Server { status: u16, body: String },
+
+    #[error("Server error ({status}, {category:?}): response body redacted")]
+    RedactedServer {
+        status: u16,
+        category: Option<RedactedServerCategory>,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ErrorBodyMode {
+    Diagnostic,
+    Redacted,
+}
+
+const MAX_DIAGNOSTIC_ERROR_BYTES: usize = 4 * 1024;
+
+async fn collect_body_limited<B>(
+    mut body: B,
+    max_bytes: usize,
+) -> Result<Vec<u8>, InternalClientError>
+where
+    B: Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
+    if body.size_hint().lower() > max_bytes as u64 {
+        return Err(InternalClientError::Http(format!(
+            "response body too large (max {max_bytes} bytes)"
+        )));
+    }
+
+    let mut collected = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|error| InternalClientError::Http(format!("{error:#}")))?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        if data.len() > max_bytes.saturating_sub(collected.len()) {
+            return Err(InternalClientError::Http(format!(
+                "response body too large (max {max_bytes} bytes)"
+            )));
+        }
+        collected.extend_from_slice(&data);
+    }
+    Ok(collected)
+}
+
+#[derive(Deserialize)]
+struct RedactedErrorBody {
+    category: RedactedServerCategory,
 }
 
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
+/// Default request/response body caps for internal API POSTs. Domain payloads
+/// are small JSON documents; the ceiling exists to fail fast on a runaway
+/// payload rather than buffer unboundedly.
+pub(crate) const DEFAULT_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
 pub struct InternalClient {
     socket_path: PathBuf,
+}
+
+impl std::fmt::Debug for InternalClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InternalClient")
+            .field("socket_path", &self.socket_path)
+            .finish()
+    }
 }
 
 impl InternalClient {
@@ -103,10 +180,35 @@ impl InternalClient {
     }
 
     /// POST JSON to the internal API and parse the response.
-    async fn post<Req: Serialize, Res: DeserializeOwned>(
+    ///
+    /// `pub(crate)`: the typed domain methods in `internal_db` are the only
+    /// callers beside the legacy methods in this file. Not public API —
+    /// production callers depend on typed methods, never raw routes.
+    pub(crate) async fn post<Req: Serialize, Res: DeserializeOwned>(
         &self,
         path: &str,
         body: &Req,
+    ) -> Result<Res, InternalClientError> {
+        self.post_bounded(
+            path,
+            body,
+            DEFAULT_MAX_REQUEST_BYTES,
+            DEFAULT_MAX_RESPONSE_BYTES,
+            ErrorBodyMode::Diagnostic,
+        )
+        .await
+    }
+
+    /// POST with explicit body limits. Error bodies are either retained as a
+    /// bounded diagnostic or discarded after extracting only their typed
+    /// category for secret-bearing routes.
+    pub(crate) async fn post_bounded<Req: Serialize, Res: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &Req,
+        max_request_bytes: usize,
+        max_response_bytes: usize,
+        error_body_mode: ErrorBodyMode,
     ) -> Result<Res, InternalClientError> {
         // 1. Connect to Unix socket
         let stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
@@ -124,8 +226,14 @@ impl InternalClient {
             }
         });
 
-        // 3. Build request
+        // 3. Build request (capped)
         let body_bytes = serde_json::to_vec(body)?;
+        if body_bytes.len() > max_request_bytes {
+            return Err(InternalClientError::Http(format!(
+                "request body too large: {} bytes (max {max_request_bytes})",
+                body_bytes.len()
+            )));
+        }
         let req = hyper::Request::post(path)
             .header("content-type", "application/json")
             .body(http_body_util::Full::new(hyper::body::Bytes::from(
@@ -139,24 +247,39 @@ impl InternalClient {
             .await
             .map_err(|e| InternalClientError::Http(format!("{e:#}")))?;
 
-        // 5. Read response body
+        // 5. Stream the response and stop as soon as the configured cap is
+        // crossed. This intentionally leaves later frames unread.
         let status = response.status().as_u16();
-        let body_bytes = http_body_util::BodyExt::collect(response.into_body())
-            .await
-            .map_err(|e| InternalClientError::Http(format!("{e:#}")))?
-            .to_bytes();
+        let body_bytes = collect_body_limited(response.into_body(), max_response_bytes).await?;
 
-        // 6. Handle errors
+        // 6. Handle errors. Secret routes never retain raw response text in
+        // any error value, even when the server returned a typed JSON body.
         if status >= 400 {
-            let body_str = String::from_utf8_lossy(&body_bytes).to_string();
-            return Err(InternalClientError::Server {
-                status,
-                body: body_str,
-            });
+            return match error_body_mode {
+                ErrorBodyMode::Diagnostic => {
+                    let diagnostic_len = body_bytes.len().min(MAX_DIAGNOSTIC_ERROR_BYTES);
+                    let body = String::from_utf8_lossy(&body_bytes[..diagnostic_len]).into_owned();
+                    Err(InternalClientError::Server { status, body })
+                }
+                ErrorBodyMode::Redacted => {
+                    let category = serde_json::from_slice::<RedactedErrorBody>(&body_bytes)
+                        .ok()
+                        .map(|body| body.category);
+                    Err(InternalClientError::RedactedServer { status, category })
+                }
+            };
         }
 
         // 7. Deserialize response
         serde_json::from_slice(&body_bytes).map_err(Into::into)
+    }
+
+    /// Query whether the aggregator owns a ready database for this agent.
+    pub async fn db_ready(
+        &self,
+        request: &DbReadyRequest,
+    ) -> Result<DbReadyResponse, InternalClientError> {
+        self.post("/db/ready", request).await
     }
 
     /// Add an MCP server for the given agent.
@@ -624,6 +747,28 @@ pub struct ReloadResponse {
     pub total: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbReadyRequest {
+    pub agent: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DbReadyState {
+    Starting,
+    Ready,
+    Draining,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbReadyResponse {
+    pub agent: String,
+    pub state: DbReadyState,
+    pub ready: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgressInvocationKindDto {
@@ -879,6 +1024,168 @@ pub struct ForumTopicOkResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::convert::Infallible;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+
+    use http_body_util::Full;
+    use hyper::body::{Body, Bytes, Frame, SizeHint};
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use secrecy::{ExposeSecret as _, SecretString};
+
+    use crate::internal_db::{
+        DbErrorCategory, InternalDbError, ResolveNamedProviderBindingRequest,
+        ResolveNamedProviderBindingResponse, SecretBindingDto,
+    };
+
+    struct CountingBody {
+        frames: VecDeque<Bytes>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl Body for CountingBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(self.frames.pop_front().map(|data| Ok(Frame::data(data))))
+        }
+
+        fn size_hint(&self) -> SizeHint {
+            SizeHint::default()
+        }
+    }
+
+    async fn serve_one_json_response(
+        status: u16,
+        body: String,
+    ) -> (tempfile::TempDir, PathBuf, tokio::task::JoinHandle<()>) {
+        let tempdir = tempfile::tempdir().unwrap();
+        let socket_path = tempdir.path().join("internal.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(move |_request| {
+                let body = body.clone();
+                async move {
+                    Ok::<_, Infallible>(
+                        hyper::Response::builder()
+                            .status(status)
+                            .header("content-type", "application/json")
+                            .body(Full::new(Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+        (tempdir, socket_path, task)
+    }
+
+    #[tokio::test]
+    async fn bounded_response_stops_before_polling_frames_after_cap() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let body = CountingBody {
+            frames: VecDeque::from([
+                Bytes::from_static(b"1234"),
+                Bytes::from_static(b"5"),
+                Bytes::from_static(b"must-not-be-consumed"),
+            ]),
+            polls: Arc::clone(&polls),
+        };
+
+        let error = collect_body_limited(body, 4).await.unwrap_err();
+
+        assert!(error.to_string().contains("response body too large"));
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn secret_route_server_errors_never_retain_response_body() {
+        const CANARY: &str = "secret-error-canary-must-not-escape";
+        for (status, expected_category) in [
+            (400, DbErrorCategory::Invalid),
+            (500, DbErrorCategory::Internal),
+        ] {
+            let category = match expected_category {
+                DbErrorCategory::Invalid => "invalid",
+                DbErrorCategory::Internal => "internal",
+                _ => unreachable!(),
+            };
+            let response = format!(r#"{{"category":"{category}","message":"{CANARY}"}}"#);
+            let (_tempdir, socket_path, server) = serve_one_json_response(status, response).await;
+            let client = InternalClient::new(socket_path);
+
+            let error = client
+                .resolve_named_provider_binding(&ResolveNamedProviderBindingRequest {
+                    agent: "alpha".to_owned(),
+                    provider: "example".to_owned(),
+                    auth: SecretString::from("request-secret"),
+                })
+                .await
+                .unwrap_err();
+            server.await.unwrap();
+
+            let display = error.to_string();
+            let debug = format!("{error:?}");
+            assert!(
+                !display.contains(CANARY),
+                "Display leaked canary: {display}"
+            );
+            assert!(!debug.contains(CANARY), "Debug leaked canary: {debug}");
+            assert!(std::error::Error::source(&error).is_none());
+            assert!(matches!(
+                error,
+                InternalDbError::Server {
+                    category,
+                    status: actual_status,
+                    ..
+                } if category == expected_category && actual_status == status
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_secret_response_round_trips_and_redacts_debug() {
+        const CANARY: &str = "successful-provider-secret";
+        let response = serde_json::to_string(&ResolveNamedProviderBindingResponse {
+            binding: SecretBindingDto {
+                provider: "example".to_owned(),
+                env_var: "EXAMPLE_TOKEN".to_owned(),
+                source_env_var: "SOURCE_TOKEN".to_owned(),
+                placeholder: "right-provider://example".to_owned(),
+                allowed_hosts: vec!["api.example.com".to_owned()],
+                inject_query: false,
+                value: SecretString::from(CANARY),
+            },
+        })
+        .unwrap();
+        let (_tempdir, socket_path, server) = serve_one_json_response(200, response).await;
+        let client = InternalClient::new(socket_path);
+
+        let response = client
+            .resolve_named_provider_binding(&ResolveNamedProviderBindingRequest {
+                agent: "alpha".to_owned(),
+                provider: "example".to_owned(),
+                auth: SecretString::from("request-secret"),
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(response.binding.value.expose_secret(), CANARY);
+        assert!(!format!("{response:?}").contains(CANARY));
+    }
 
     #[test]
     fn error_display_server() {
@@ -904,6 +1211,25 @@ mod tests {
     fn client_construction() {
         let client = InternalClient::new("/tmp/test.sock");
         assert_eq!(client.socket_path(), Path::new("/tmp/test.sock"));
+    }
+
+    #[test]
+    fn db_ready_dtos_round_trip() {
+        let request = DbReadyRequest {
+            agent: "alpha".to_owned(),
+        };
+        let request_json = serde_json::to_string(&request).unwrap();
+        assert_eq!(request_json, r#"{"agent":"alpha"}"#);
+
+        let response = DbReadyResponse {
+            agent: "alpha".to_owned(),
+            state: DbReadyState::Ready,
+            ready: true,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let roundtrip: DbReadyResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.state, DbReadyState::Ready);
+        assert!(roundtrip.ready);
     }
 
     #[test]

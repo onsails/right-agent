@@ -110,16 +110,20 @@ impl PcClient {
 
     /// List all processes and their current status.
     pub async fn list_processes(&self) -> miette::Result<Vec<ProcessInfo>> {
+        self.fetch_processes()
+            .await
+            .map_err(|e| miette::miette!("failed to list processes: {e:#}"))
+    }
+
+    /// `list_processes` with the raw reqwest error preserved so callers can
+    /// classify transport failures (`is_connect`) instead of stringly
+    /// matching rendered miette text.
+    async fn fetch_processes(&self) -> Result<Vec<ProcessInfo>, reqwest::Error> {
         let resp = self
             .auth(self.client.get(format!("{}/processes", self.base_url)))
             .send()
-            .await
-            .map_err(|e| miette::miette!("failed to list processes: {e:#}"))?;
-
-        let data: ProcessesResponse = resp
-            .json()
-            .await
-            .map_err(|e| miette::miette!("failed to parse process list: {e:#}"))?;
+            .await?;
+        let data: ProcessesResponse = resp.json().await?;
         Ok(data.data)
     }
 
@@ -269,6 +273,133 @@ impl PcClient {
             .map_err(|e| miette::miette!("failed to shutdown process-compose: {e:#}"))?;
         Ok(())
     }
+
+    /// Stop the whole project and wait until the runtime is provably down.
+    ///
+    /// Used by offline operator commands (`right agent db-repair`) that mutate
+    /// `data.db*` files: quiescence must be PROVEN, never assumed.
+    ///
+    /// Sequence: snapshot process names → `POST /project/stop` → poll
+    /// health/process endpoints every [`SHUTDOWN_POLL_DELAY`] until the server
+    /// is unreachable (process-compose exits once all processes stop — the
+    /// generated config never sets `--keep-project`) after every previously
+    /// active `right-mcp-server`/`*-bot` was observed terminal.
+    ///
+    /// Fail-closed rules:
+    /// - endpoint unreachable BEFORE a successful shutdown request → error;
+    /// - shutdown request rejected → error;
+    /// - `timeout` elapses first → error naming the still-active processes.
+    ///
+    /// Returns the sorted names of processes that were active at snapshot.
+    pub async fn shutdown_and_wait(
+        &self,
+        timeout: std::time::Duration,
+    ) -> miette::Result<Vec<String>> {
+        self.health_check().await.map_err(|e| {
+            miette::miette!(
+                "runtime state exists but process-compose is unreachable before shutdown; \
+                 refusing to proceed (fail closed): {e:#}"
+            )
+        })?;
+        let snapshot = self.list_processes().await.map_err(|e| {
+            miette::miette!("failed to snapshot process list before shutdown: {e:#}")
+        })?;
+        let mut previously_active: Vec<String> = snapshot
+            .iter()
+            .filter(|p| !is_terminal_status(&p.status))
+            .map(|p| p.name.clone())
+            .collect();
+        previously_active.sort();
+
+        // The shared `shutdown()` ignores the response status; quiescence
+        // requires the request to be accepted, so issue it here with a
+        // checked status.
+        let resp = self
+            .auth(self.client.post(format!("{}/project/stop", self.base_url)))
+            .send()
+            .await
+            .map_err(|e| miette::miette!("failed to shutdown process-compose: {e:#}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.map_err(|error| {
+                miette::miette!(
+                    "process-compose project stop failed ({status}) and its error body \
+                     could not be read: {error:#}"
+                )
+            })?;
+            return Err(miette::miette!(
+                "process-compose project stop failed ({status}): {body}"
+            ));
+        }
+
+        let deadline = std::time::Instant::now() + timeout;
+        let mut still_active: Vec<String> = snapshot
+            .iter()
+            .filter(|p| is_db_holding_process(&p.name) && !is_terminal_status(&p.status))
+            .map(|p| format!("{} ({})", p.name, p.status))
+            .collect();
+        let mut last_api_error: Option<String> = None;
+        loop {
+            match self.fetch_processes().await {
+                Ok(processes) => {
+                    still_active = processes
+                        .iter()
+                        .filter(|p| {
+                            is_db_holding_process(&p.name) && !is_terminal_status(&p.status)
+                        })
+                        .map(|p| format!("{} ({})", p.name, p.status))
+                        .collect();
+                }
+                Err(e) if e.is_connect() => {
+                    // Server gone: process-compose only exits after stopping
+                    // every process, so the runtime is quiesced.
+                    return Ok(previously_active);
+                }
+                Err(error) => {
+                    // A non-connect transport/body error is not proof of
+                    // quiescence. Retain it for the timeout error chain while
+                    // allowing process-compose to finish shutting down.
+                    last_api_error = Some(format!("{error:#}"));
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                let api_detail = last_api_error
+                    .as_deref()
+                    .map(|error| format!("; last process endpoint error: {error}"))
+                    .unwrap_or_default();
+                return if still_active.is_empty() {
+                    Err(miette::miette!(
+                        "timed out ({timeout:?}) waiting for process-compose to exit after \
+                         project stop; processes are terminal but the server is still up{api_detail}"
+                    ))
+                } else {
+                    Err(miette::miette!(
+                        "timed out ({timeout:?}) waiting for runtime shutdown; still active: {}{}",
+                        still_active.join(", "),
+                        api_detail
+                    ))
+                };
+            }
+            tokio::time::sleep(SHUTDOWN_POLL_DELAY).await;
+        }
+    }
+}
+
+/// Poll cadence for [`PcClient::shutdown_and_wait`].
+const SHUTDOWN_POLL_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Processes that hold `data.db*` handles: the MCP aggregator and per-agent
+/// bots. Cloudflared never touches the databases, so it is not gated on.
+fn is_db_holding_process(name: &str) -> bool {
+    name == "right-mcp-server" || name.ends_with("-bot")
+}
+
+/// Terminal process-compose statuses (v1.110 `src/types/process.go`):
+/// the process will not run again without an explicit start. Anything else
+/// (Running, Launching, Launched, Restarting, Terminating, Pending,
+/// Foreground, Scheduled) is treated as active — fail-closed.
+fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "Completed" | "Skipped" | "Error" | "Disabled")
 }
 
 #[cfg(test)]

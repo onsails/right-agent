@@ -1,7 +1,7 @@
 use super::{
     SupervisorDeps, agent_sandbox_spec_for, degrade_decision, diagnose, resolve_named_provider,
-    right_managed_secret_env_vars, right_managed_secret_env_vars_with, secret_bindings,
-    secret_bindings_with,
+    retryable_sync_diagnosis, retryable_upgrade_diagnosis, right_managed_secret_env_vars,
+    right_managed_secret_env_vars_with, secret_bindings, secret_bindings_with,
 };
 use right_agent::agent::types::AgentConfig;
 use right_providers::{Credential, NewProvider, ProviderKind, ProviderStore};
@@ -39,6 +39,116 @@ fn a_command_level_failure_is_inconclusive_not_a_backend_verdict() {
     });
 
     assert_eq!(diagnosis.cause, SandboxCause::Unreachable);
+}
+
+#[test]
+fn transient_claude_acquisition_retries_but_invalid_config_remains_hard() {
+    let transient = miette::Report::new(crate::claude_runtime::ClaudeRuntimeError::Retryable(
+        miette::miette!("network timeout"),
+    ));
+    assert!(retryable_sync_diagnosis(&transient).is_some());
+
+    let hard = miette::Report::new(crate::claude_runtime::ClaudeRuntimeError::Hard(
+        miette::miette!("unsupported architecture"),
+    ));
+    assert!(retryable_sync_diagnosis(&hard).is_none());
+    assert!(retryable_sync_diagnosis(&miette::miette!("malformed agent config")).is_none());
+}
+
+#[test]
+fn upgrade_transport_retries_but_broken_executables_and_nonzero_exits_are_hard() {
+    let transport = crate::upgrade::StartupUpgradeError::Sandbox(SandboxError::ExecLost {
+        name: "right-agent".to_owned(),
+        cmd: "/bin/sh".to_owned(),
+    });
+    assert_eq!(
+        retryable_upgrade_diagnosis(&transport).map(|diagnosis| diagnosis.cause),
+        Some(SandboxCause::Unreachable)
+    );
+
+    let broken_executable = crate::upgrade::StartupUpgradeError::Sandbox(SandboxError::ExecSpawn {
+        name: "right-agent".to_owned(),
+        cmd: "/bin/sh".to_owned(),
+        kind: "NotFound".to_owned(),
+        message: "claude not found".to_owned(),
+    });
+    assert!(retryable_upgrade_diagnosis(&broken_executable).is_none());
+
+    let nonzero = crate::upgrade::StartupUpgradeError::Command(miette::miette!(
+        "claude upgrade exited with code 2"
+    ));
+    assert!(retryable_upgrade_diagnosis(&nonzero).is_none());
+}
+
+#[test]
+fn bring_up_validates_claude_after_staging_before_ready() {
+    let source = include_str!("sandbox_supervisor.rs");
+    let bring_up = source
+        .split("pub(crate) async fn bring_up_sandbox")
+        .nth(1)
+        .expect("bring-up source")
+        .split("/// Reconcile provider declarations")
+        .next()
+        .expect("bring-up body");
+
+    let initial_sync = bring_up
+        .find("sync::initial_sync")
+        .expect("initial sync gate");
+    let upgrade = bring_up
+        .find("crate::upgrade::run_startup_upgrade")
+        .expect("effective Claude readiness gate");
+    let publishable = bring_up
+        .find("Ok(Ok(SandboxBringUp { sandbox }))")
+        .expect("publishable bring-up result");
+
+    assert!(
+        initial_sync < upgrade,
+        "pinned fallback must be staged first"
+    );
+    assert!(
+        upgrade < publishable,
+        "Ready must be impossible before validation"
+    );
+}
+
+#[test]
+fn startup_uses_shared_bring_up_gate_once() {
+    let startup = include_str!("lib.rs");
+    assert!(
+        !startup.contains("upgrade::run_startup_upgrade"),
+        "lib.rs must not double-run the gate after shared bring-up"
+    );
+}
+
+#[test]
+fn recovery_publishes_ready_and_notifies_only_after_successful_bring_up() {
+    let source = include_str!("sandbox_supervisor.rs");
+    let recovery = source
+        .split("async fn recovery_step")
+        .nth(1)
+        .expect("recovery step source")
+        .split("/// Drive the supervisor loop")
+        .next()
+        .expect("recovery step body");
+    let success = recovery
+        .split("Ok(Ok(bring_up)) =>")
+        .nth(1)
+        .expect("successful bring-up arm")
+        .split("Ok(Err(diagnosis)) =>")
+        .next()
+        .expect("successful bring-up body");
+    let failures = recovery
+        .split("Ok(Err(diagnosis)) =>")
+        .nth(1)
+        .expect("failed bring-up arms");
+
+    let set_ready = success.find("handle.set_ready").expect("Ready publication");
+    let notify = success
+        .find("notify_back_online")
+        .expect("recovery notification");
+    assert!(set_ready < notify, "notification follows Ready publication");
+    assert!(!failures.contains("handle.set_ready"));
+    assert!(!failures.contains("notify_back_online"));
 }
 
 /// Restores the property the deleted `sandbox_supervisor_phase_tests.rs`

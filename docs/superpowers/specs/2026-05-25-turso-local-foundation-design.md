@@ -6,6 +6,15 @@
 > supported in-process; databases still carrying legacy FTS5 virtual tables
 > that Turso cannot open now fail the open instead of being scrubbed. Migration
 > v34 remains idempotent for databases Turso can already open.
+>
+> **Superseded in part (single-owner standard-local cutover):** any assumption
+> that bot and Aggregator may concurrently open or migrate the same filesystem
+> database is obsolete. The Aggregator now owns one standard-local writable
+> connection per `data.db` and the sole `providers.db` connection; bots use
+> typed `internal.sock` operations, and direct opens are offline-only under
+> quiescence. The Turso driver boundary, index-method FTS, WAL mode, and
+> migration registry described here remain current.
+
 
 ## Context
 

@@ -72,11 +72,17 @@ Bot startup (bring_up_sandbox, crates/bot/src/sandbox_supervisor.rs):
   ├─ fs_mkdir /sandbox/inbox and /sandbox/outbox — recreated every bring-up
   │   because a recreated sandbox starts from the stock image
   ├─ initial_sync (blocking — before the Telegram bot starts)
+  │   ├─ Create the guest user and its user-local CLI/npm directories
+  │   ├─ Write the managed env and patch `.bashrc`
   │   ├─ Deploy platform files to /sandbox/.platform/ (content-addressed +
   │   │   symlinks)
-  │   ├─ Remove obsolete legacy built-in skill links from
-  │   │   /sandbox/.claude/skills/
-  │   └─ Write .claude.json, verify trust keys, fix if CC overwrote them
+  │   ├─ Write .claude.json and verify trust keys
+  │   └─ Host-download and verify pinned Claude Code, upload it to a unique
+  │       root-owned `/opt/right/claude/` target, then atomically activate
+  │       `/opt/right/bin/claude`; agent-owned `/sandbox/.platform` is irrelevant
+  ├─ run_startup_upgrade — invoke the effective `claude` through the managed
+  │   PATH; transport failures degrade and retry, while deterministic command
+  │   failures are hard, and neither path publishes Ready
   └─ reverse_sync_md — startup identity mirror (advisory: logged, not fatal)
 
 Create-time state:
@@ -102,6 +108,10 @@ Sandbox network:
   ├─ Egress is a typed value applied at create: Permissive, or Restrictive
   │   with a domain-suffix allow list (anthropic.com, claude.com, claude.ai,
   │   storage.googleapis.com). Suffixes, not globs.
+  ├─ Startup does not download guest packages or installers. Claude Code is
+  │   downloaded by the host, verified before guest mutation, and uploaded
+  │   through the SDK fs control plane, so existing restrictive sandboxes
+  │   adopt it on restart without recreation or public guest egress.
   ├─ The host destination group is always open on top of the allow list —
   │   that is how the guest reaches the MCP aggregator on the host.
   └─ Guest → host loopback services resolve through
@@ -130,13 +140,17 @@ during initial_sync):
   └─ TOOLS.md                  — agent-editable tool notes seeded for turn 1
   EXCLUDED: skills (deployed to /sandbox/.platform/), credentials, plugins
 
-Platform store (/sandbox/.platform/ inside the guest):
-  ├─ Content-addressed files: settings.json.<hash>, reply-schema.json.<hash>
-  ├─ Content-addressed skill dirs (one per `right_codegen::BUILTIN_SKILL_NAMES`)
-  ├─ Symlinked from /sandbox/.claude/ → /sandbox/.platform/
-  ├─ Read-only (chmod a-w after deploy) — which only means anything because
-  │   the agent runs as the unprivileged `sandbox` user, not root
-  └─ GC removes stale entries after each sync cycle
+Platform store (`/sandbox/.platform/` inside the guest):
+  ├─ Content-addressed settings, schemas, and built-in skill directories
+  ├─ Symlinked from agent-visible locations into `/sandbox/.platform/`
+  └─ Reconciled and made read-only by manifest deployment; because `/sandbox`
+      is guest-owned, it is not an authoritative root-owned runtime location
+
+Claude runtime store (`/opt/right/` inside the guest):
+  ├─ Root-owned content-addressed binaries under `/opt/right/claude/`, mode 0555
+  ├─ Atomic active symlink `/opt/right/bin/claude`
+  ├─ Failed uploads and verification never replace the active symlink
+  └─ GC retains the active/current target plus at most one prior target
 ```
 
 Sandbox names come from `right_sandbox::resolve_sandbox_name`: the explicit
@@ -164,14 +178,12 @@ inventory/details. Overview rendering does not run these probes.
 ### Graceful degrade
 
 When the sandbox cannot be brought up, `bring_up_sandbox` (in
-`crates/bot/src/sandbox_supervisor.rs`) classifies the `SandboxError` into a
+`crates/bot/src/sandbox_supervisor.rs`) classifies availability failures into a
 cause-specific `SandboxDiagnosis` (summary + ordered fixes) and returns
-`Ok(Err(diagnosis))` instead of crashing. Recoverable availability failures —
-runtime install failure, no hypervisor, boot failure, a sandbox still
-starting, an unreachable guest agent — all take this path. Errors that say
-nothing about backend health (invalid spec, a guest command that failed) fall
-back to `Unreachable`. Genuine non-self-healing config errors still propagate
-as hard failures.
+`Ok(Err(diagnosis))` instead of crashing. Runtime installation, hypervisor,
+boot, reachability, and transient Claude acquisition/upload failures retry with
+supervisor backoff. Invalid specs, malformed agent configuration, unsupported
+host/guest architecture, and invalid pinned metadata remain hard failures.
 
 On a degraded start, `lib.rs` logs the diagnosis at ERROR, constructs the
 `SandboxRuntimeHandle` with health `Unavailable`, and continues booting
@@ -183,10 +195,11 @@ single bring-up attempt) is the sole writer of `SandboxRuntimeHandle` after
 startup:
 
 - **Recovery loop:** retries `bring_up_sandbox` with a fixed backoff schedule
-  of 5 → 10 → 15 → 15 → 30 s (last value repeats). On success it calls
-  `handle.set_ready(sandbox)`, spawns the background sync task, and sends a
-  "✅ Sandbox back online" notice to every chat that received an
-  unavailability message during the outage.
+  of 5 → 10 → 15 → 15 → 30 s (last value repeats). Bring-up stages the pinned
+  runtime and validates/upgrades the effective `claude` before it can succeed;
+  only then does recovery call `handle.set_ready(sandbox)`, spawn the background
+  sync task, and send a "✅ Sandbox back online" notice to every chat that
+  received an unavailability message during the outage.
 - **Monitor mode:** when `Ready`, the supervisor waits for a failure report or
   shutdown. Worker, keepalive, and periodic sync failures all call
   `SandboxRuntimeHandle::report_suspected_failure()`; the supervisor verifies
@@ -204,11 +217,13 @@ a `Sandbox` for the process lifetime.
 ### User-Local CLI Environment
 
 Right Agent treats `/sandbox/.local/bin` as the canonical user-installed
-executable directory. Startup sync writes `/sandbox/.right/env.sh`, ensures
-`/sandbox/.bashrc` sources it, and the Claude invocation wrapper sources the
-same file with an inline fallback. This makes manually installed CLIs and
-`npm install -g` bins available both to `claude -p` turns and to interactive
-guest shells.
+executable directory. Startup sync creates `/sandbox/.local/bin` and
+`/sandbox/.npm`, writes `/sandbox/.right/env.sh`, and ensures `.bashrc` sources
+it. The invocation wrapper uses the same inline fallback. PATH order is
+`/sandbox/.local/bin` first and root-owned `/opt/right/bin` second. This is an
+explicit trust boundary: a guest-owned binary installed by the upgrade task
+overrides the host-verified pinned fallback; removing that override restores the
+pinned runtime. No guest network download is needed for the fallback.
 
 Guest process stdin is buffered through `SandboxStdin`, whose explicit async
 `close` drains every queued chunk through the SDK and awaits the SDK EOF frame.

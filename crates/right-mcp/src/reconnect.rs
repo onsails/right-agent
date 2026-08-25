@@ -4,7 +4,6 @@
 //! the loop must be cancelled so it does not overwrite the fresh token.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -232,7 +231,7 @@ pub async fn do_refresh_cancellable(
 /// Steps:
 /// 1. Call [`do_refresh_cancellable`] — cancellable retry loop.
 /// 2. Write new access token to `token_arc` (shared with [`ProxyBackend`]).
-/// 3. Persist refreshed OAuth state to SQLite via [`crate::credentials::db_update_oauth_token`].
+/// 3. Persist refreshed OAuth state owner-locally via [`crate::persistence::McpPersistence`].
 /// 4. Send [`RefreshMessage::NewEntry`] to the refresh scheduler.
 /// 5. Call [`ProxyBackend::connect`] to re-establish the MCP session.
 ///
@@ -246,7 +245,7 @@ pub async fn reconnect_task(
     oauth_state: OAuthServerState,
     token_arc: Arc<RwLock<Option<String>>>,
     http_client: reqwest::Client,
-    agent_dir: PathBuf,
+    persistence: Arc<dyn crate::persistence::McpPersistence>,
     refresh_tx: mpsc::Sender<RefreshMessage>,
     cancel: CancellationToken,
 ) -> Result<(), ReconnectError> {
@@ -277,20 +276,17 @@ pub async fn reconnect_task(
     // Write access token to shared state so DynamicAuthClient picks it up immediately.
     *token_arc.write().await = Some(access_token.clone());
 
-    // Persist to SQLite.
-    let conn = right_db::open_connection(&agent_dir, false)
+    // Persist owner-locally.
+    let expires_at = new_state.expires_at.to_rfc3339();
+    persistence
+        .update_oauth_token(
+            &server_name,
+            &access_token,
+            new_state.refresh_token.as_deref(),
+            &expires_at,
+        )
         .await
         .map_err(|e| ReconnectError::PersistFailed(format!("{e:#}")))?;
-    let expires_at = new_state.expires_at.to_rfc3339();
-    crate::credentials::db_update_oauth_token(
-        &conn,
-        &server_name,
-        &access_token,
-        new_state.refresh_token.as_deref(),
-        &expires_at,
-    )
-    .await
-    .map_err(|e| ReconnectError::PersistFailed(format!("{e:#}")))?;
 
     // Notify refresh scheduler so it schedules the next refresh.
     refresh_tx
@@ -320,18 +316,20 @@ pub async fn reconnect_task(
 pub struct ReconnectManager {
     in_flight: HashMap<String, CancellationToken>,
     refresh_tx: mpsc::Sender<RefreshMessage>,
-    agent_dir: PathBuf,
+    persistence: Arc<dyn crate::persistence::McpPersistence>,
 }
 
 impl ReconnectManager {
-    pub fn new(refresh_tx: mpsc::Sender<RefreshMessage>, agent_dir: PathBuf) -> Self {
+    pub fn new(
+        refresh_tx: mpsc::Sender<RefreshMessage>,
+        persistence: Arc<dyn crate::persistence::McpPersistence>,
+    ) -> Self {
         Self {
             in_flight: HashMap::new(),
             refresh_tx,
-            agent_dir,
+            persistence,
         }
     }
-
     /// Start a reconnect task for `server_name`.
     ///
     /// If one is already in flight for this server, it is cancelled first.
@@ -353,7 +351,7 @@ impl ReconnectManager {
         self.in_flight.insert(server_name.clone(), cancel.clone());
 
         let refresh_tx = self.refresh_tx.clone();
-        let agent_dir = self.agent_dir.clone();
+        let persistence = Arc::clone(&self.persistence);
 
         tokio::spawn(async move {
             reconnect_task(
@@ -362,7 +360,7 @@ impl ReconnectManager {
                 oauth_state,
                 token_arc,
                 http_client,
-                agent_dir,
+                persistence,
                 refresh_tx,
                 cancel,
             )
@@ -581,7 +579,7 @@ mod tests {
         let token_arc: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
         let backend = Arc::new(ProxyBackend::new(
             "composio".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             "https://example.com/mcp".into(),
             token_arc.clone(),
             crate::proxy::AuthMethod::Bearer,
@@ -597,7 +595,7 @@ mod tests {
         let handle = {
             let backend = backend.clone();
             let token_arc = token_arc.clone();
-            let agent_dir = tmp.path().to_path_buf();
+            let persistence = crate::persistence::test_support::sqlite(tmp.path());
             let client = reqwest::Client::new();
             tokio::spawn(async move {
                 reconnect_task(
@@ -606,7 +604,7 @@ mod tests {
                     entry,
                     token_arc,
                     client,
-                    agent_dir,
+                    persistence,
                     refresh_tx,
                     cancel,
                 )
@@ -680,7 +678,7 @@ mod tests {
         let token_arc: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
         let backend = Arc::new(ProxyBackend::new(
             "composio".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             // Fake URL — connect() will fail, which is expected.
             "https://example.com/mcp".into(),
             token_arc.clone(),
@@ -697,7 +695,7 @@ mod tests {
             entry,
             token_arc.clone(),
             client,
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             refresh_tx,
             cancel,
         )

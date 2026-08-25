@@ -1,7 +1,6 @@
 //! MCP proxy types for aggregating external MCP servers.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
@@ -114,7 +113,7 @@ pub(crate) enum ProbeOutcome {
 /// `query_string`-auth embeds the credential in the URL, and rmcp transport
 /// errors can quote the URL verbatim — this keeps that token out of logs and
 /// out of the `last_connect_error` surfaced to the dashboard.
-pub(crate) fn redact_query_strings(msg: &str) -> String {
+pub fn redact_query_strings(msg: &str) -> String {
     msg.split(' ')
         .map(|tok| {
             if tok.contains("://") {
@@ -376,7 +375,7 @@ impl StreamableHttpClient for DynamicAuthClient {
 /// instructions, and forwards tool calls through the MCP client session.
 pub struct ProxyBackend {
     server_name: String,
-    agent_dir: PathBuf,
+    persistence: Arc<dyn crate::persistence::McpPersistence>,
     url: String,
     auth_method: AuthMethod,
     cached_tools: RwLock<Vec<Tool>>,
@@ -402,14 +401,14 @@ pub struct ProxyBackend {
 impl ProxyBackend {
     pub fn new(
         server_name: String,
-        agent_dir: PathBuf,
+        persistence: Arc<dyn crate::persistence::McpPersistence>,
         url: String,
         token: Arc<RwLock<Option<String>>>,
         auth_method: AuthMethod,
     ) -> Self {
         Self {
             server_name,
-            agent_dir,
+            persistence,
             url,
             auth_method,
             cached_tools: RwLock::new(Vec::new()),
@@ -430,6 +429,22 @@ impl ProxyBackend {
     pub async fn connect(
         &self,
         http_client: reqwest::Client,
+    ) -> Result<Option<String>, ProxyError> {
+        self.connect_inner(http_client, true).await
+    }
+
+    /// Connect and validate without persisting instructions before publication.
+    pub async fn connect_staged(
+        &self,
+        http_client: reqwest::Client,
+    ) -> Result<Option<String>, ProxyError> {
+        self.connect_inner(http_client, false).await
+    }
+
+    async fn connect_inner(
+        &self,
+        http_client: reqwest::Client,
+        persist_instructions: bool,
     ) -> Result<Option<String>, ProxyError> {
         // Hold this guard for the full body — serializes concurrent `connect()` calls
         // so refresh-driven reconnects and dashboard OAuth reconnects can't
@@ -494,27 +509,20 @@ impl ProxyBackend {
         let tool_count = filtered.len();
         *self.cached_tools.write().await = filtered;
 
-        // Extract server instructions and write to SQLite.
+        // Extract server instructions and persist them owner-locally.
         let instructions = client
             .peer()
             .peer_info()
             .and_then(|info| info.instructions.clone());
-        let conn = right_db::open_connection(&self.agent_dir, false)
-            .await
-            .map_err(|e| ProxyError::InstructionsCacheFailed {
-                server: self.server_name.clone(),
-                source: e.into(),
-            })?;
-        crate::credentials::db_update_instructions(
-            &conn,
-            &self.server_name,
-            instructions.as_deref(),
-        )
-        .await
-        .map_err(|e| ProxyError::InstructionsCacheFailed {
-            server: self.server_name.clone(),
-            source: e.into(),
-        })?;
+        if persist_instructions {
+            self.persistence
+                .update_instructions(&self.server_name, instructions.as_deref())
+                .await
+                .map_err(|e| ProxyError::InstructionsCacheFailed {
+                    server: self.server_name.clone(),
+                    source: e.into(),
+                })?;
+        }
 
         *self.client.write().await = Some(client);
         *self.status.write().await = BackendStatus::Connected;
@@ -781,9 +789,10 @@ impl ProxyBackend {
         &self.url
     }
 
-    /// Agent directory used for the backend's SQLite state.
-    pub fn agent_dir(&self) -> &std::path::Path {
-        &self.agent_dir
+    /// Owner-local persistence handle (reused when the Aggregator rebuilds
+    /// this backend, e.g. after an OAuth reconnect).
+    pub fn persistence(&self) -> Arc<dyn crate::persistence::McpPersistence> {
+        Arc::clone(&self.persistence)
     }
 
     /// Shared token reference for external token updates (e.g., from internal API).
@@ -931,7 +940,7 @@ mod tests {
         let token = Arc::new(RwLock::new(None));
         let backend = ProxyBackend::new(
             "test-server".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             "http://localhost:9999/mcp".into(),
             token,
             AuthMethod::default(),
@@ -947,7 +956,7 @@ mod tests {
         let token = Arc::new(RwLock::new(None));
         let backend = ProxyBackend::new(
             "notion".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             "http://localhost:9999/mcp".into(),
             token,
             AuthMethod::default(),
@@ -975,7 +984,7 @@ mod tests {
         let token = Arc::new(RwLock::new(Some("secret".to_string())));
         let backend = ProxyBackend::new(
             "notion".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             "http://localhost:9999/mcp".into(),
             token,
             AuthMethod::Header("bad header".into()),
@@ -997,7 +1006,7 @@ mod tests {
         let token = Arc::new(RwLock::new(None));
         let backend = ProxyBackend::new(
             "notion".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             "http://localhost:9999/mcp".into(),
             token,
             AuthMethod::default(),
@@ -1156,7 +1165,7 @@ mod tests {
         let token = Arc::new(RwLock::new(None));
         let backend = ProxyBackend::new(
             "composio".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             "http://localhost:9999/mcp".into(),
             token,
             AuthMethod::default(),
@@ -1187,7 +1196,7 @@ mod tests {
         let token = Arc::new(RwLock::new(None));
         let backend = ProxyBackend::new(
             "twotool".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             url,
             token,
             AuthMethod::default(),
@@ -1230,7 +1239,7 @@ mod tests {
         let token = Arc::new(RwLock::new(None));
         let backend = ProxyBackend::new(
             "obsidian".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             url,
             token,
             AuthMethod::default(),
@@ -1272,7 +1281,7 @@ mod tests {
         let token = Arc::new(RwLock::new(None));
         let backend = ProxyBackend::new(
             "obsidian".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             url,
             token,
             AuthMethod::default(),
@@ -1338,7 +1347,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let backend = ProxyBackend::new(
             "dead".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             "http://127.0.0.1:1/mcp".into(),
             Arc::new(RwLock::new(None)),
             AuthMethod::default(),
@@ -1361,7 +1370,7 @@ mod tests {
             .unwrap();
         let backend = ProxyBackend::new(
             "srv".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             url,
             Arc::new(RwLock::new(None)),
             AuthMethod::default(),

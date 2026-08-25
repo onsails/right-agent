@@ -1,10 +1,24 @@
 #![warn(unreachable_pub)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    unnameable_test_items,
+    clippy::collapsible_if,
+    clippy::nonminimal_bool,
+    clippy::result_large_err,
+    clippy::unused_io_amount,
+    clippy::useless_vec
+)]
 
 pub(crate) mod async_delivery;
 pub(crate) mod background;
+pub(crate) mod bootstrap_ipc;
 pub(crate) mod cc;
+mod claude_runtime;
 mod config_watcher;
 pub(crate) mod cron;
+pub(crate) mod db;
 pub(crate) mod idle_compaction;
 mod keepalive;
 pub(crate) mod learning_curator;
@@ -13,7 +27,9 @@ pub(crate) mod learning_prefilter;
 pub(crate) mod learning_probe_writer;
 pub(crate) mod lifecycle;
 pub(crate) mod login;
+pub(crate) mod provider_bindings;
 pub(crate) mod reflection;
+pub(crate) mod retain_ipc;
 pub(crate) mod sandbox;
 pub(crate) mod sandbox_copy;
 pub mod sandbox_runtime;
@@ -21,10 +37,12 @@ pub(crate) mod sandbox_supervisor;
 mod stt;
 pub(crate) mod sync;
 pub mod telegram;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod upgrade;
 pub use keepalive::{InitAuthProbe, validate_init_auth};
 pub use sandbox::Sandbox;
-pub use sandbox_supervisor::agent_sandbox_spec_for;
+pub use sandbox_supervisor::agent_sandbox_spec_for_offline;
 pub use telegram::tg_bot::validate_telegram_token_live;
 
 use right_agent::agent::allowlist::{self, AllowlistHandle, AllowlistState};
@@ -162,6 +180,51 @@ pub async fn run(args: BotArgs) -> miette::Result<bool> {
 }
 
 async fn run_async(args: BotArgs) -> miette::Result<bool> {
+    const DB_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    const DB_READY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+    async fn wait_for_db_owner(
+        client: &right_mcp::internal_client::InternalClient,
+        agent: &str,
+    ) -> miette::Result<()> {
+        let deadline = tokio::time::Instant::now() + DB_READY_TIMEOUT;
+        loop {
+            match client
+                .db_ready(&right_mcp::internal_client::DbReadyRequest {
+                    agent: agent.to_owned(),
+                })
+                .await
+            {
+                Ok(response) if response.ready => return Ok(()),
+                Ok(response)
+                    if matches!(
+                        response.state,
+                        right_mcp::internal_client::DbReadyState::Failed
+                            | right_mcp::internal_client::DbReadyState::Draining
+                    ) =>
+                {
+                    return Err(miette::miette!(
+                        "aggregator database owner for agent '{agent}' is {:?}",
+                        response.state
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if tokio::time::Instant::now() >= deadline => {
+                    return Err(miette::miette!(
+                        "database readiness handshake for agent '{agent}' failed: {error:#}"
+                    ));
+                }
+                Err(_) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(miette::miette!(
+                    "timed out waiting for aggregator database owner for agent '{agent}'"
+                ));
+            }
+            tokio::time::sleep(DB_READY_RETRY_DELAY).await;
+        }
+    }
+
     use right_agent::agent::discovery::{parse_agent_config, validate_agent_name};
     use right_config::resolve_home;
     use std::path::PathBuf;
@@ -188,6 +251,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         }
         dir
     };
+
+    // The Aggregator is the live owner of data.db. Its typed readiness
+    // handshake is authoritative; the bot never falls back to opening early.
+    let internal_socket = home.join("run/internal.sock");
+    let internal_client = Arc::new(right_mcp::internal_client::InternalClient::new(
+        internal_socket,
+    ));
+    wait_for_db_owner(&internal_client, &args.agent).await?;
 
     // Create inbox/outbox directories for attachment handling
     for subdir in &["inbox", "outbox", "tmp/inbox", "tmp/outbox"] {
@@ -271,9 +342,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 None,
             );
 
+            let retain_queue = Arc::new(retain_ipc::IpcRetainQueue::new(
+                Arc::clone(&internal_client),
+                args.agent.clone(),
+            ));
             let wrapper = Arc::new(right_memory::ResilientHindsight::new(
                 client,
-                agent_dir.clone(),
+                retain_queue,
                 "bot",
             ));
 
@@ -350,25 +425,18 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let shutdown = CancellationToken::new();
     let _shutdown_guard = shutdown.clone().drop_guard();
 
-    // Spawn background drain task if wrapper is present.
-    // Periodically drains pending_retains from SQLite, calling drain_retain_item
-    // on each row. Skips when wrapper is non-Healthy (breaker open or auth failed).
-    //
-    // `drain_tick` holds `&right_db::Connection` across an `.await`, and
-    // the local connection wrapper is not shared between threads -- so the
-    // future is `!Send` and cannot be handed
-    // to `tokio::spawn`. We drive it via a `LocalSet` from a dedicated
-    // `spawn_blocking` thread; async upstream calls (e.g. Hindsight HTTP) still
-    // run on the shared runtime through the `Handle` captured inside `LocalSet`.
-    if let Some(ref w) = hindsight_wrapper {
-        let w = w.clone();
-        let agent_db = agent_dir.clone();
+    // Spawn the lease-based background drain task if wrapper is present.
+    // The bot claims/acks/nacks over typed internal IPC; only the Aggregator's
+    // AgentDbOwner touches the queue table. A crash after claim is recovered
+    // automatically when the lease expires.
+    if let Some(w) = &hindsight_wrapper {
+        let w = Arc::clone(w);
+        let queue = Arc::new(retain_ipc::IpcRetainQueue::new(
+            Arc::clone(&internal_client),
+            args.agent.clone(),
+        ));
         let drain_shutdown = shutdown.clone();
-        tokio::task::spawn_blocking(move || {
-            let handle = tokio::runtime::Handle::current();
-            let local = tokio::task::LocalSet::new();
-            handle.block_on(local.run_until(run_drain_loop(w, agent_db, drain_shutdown)));
-        });
+        tokio::spawn(run_drain_loop(w, queue, drain_shutdown));
     }
 
     // Re-install skills with correct memory variant.
@@ -384,17 +452,16 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         "bot starting"
     );
 
-    // Open data.db (creates if absent, applies migrations)
-    let conn = right_db::open_connection(&agent_dir, true)
+    // The readiness handshake above guarantees the Aggregator has opened and
+    // migrated this agent's database. Recover interrupted handoffs through the
+    // owner; the bot never opens `data.db` or falls back when the owner is down.
+    let interrupted_handoffs = internal_client
+        .recover_interrupted_handoffs(&right_mcp::internal_db::RecoverInterruptedHandoffsRequest {
+            agent: args.agent.clone(),
+        })
         .await
-        .map_err(|e| miette::miette!("failed to open data.db: {:#}", e))?;
-    tracing::info!(agent = %args.agent, "data.db opened");
-
-    let interrupted_handoffs = crate::background::mark_interrupted_handoffs(&conn)
-        .await
-        .map_err(|e| {
-            miette::miette!("failed to recover interrupted background handoffs: {:#}", e)
-        })?;
+        .map_err(|e| miette::miette!("failed to recover interrupted background handoffs: {e:#}"))?
+        .recovered;
     if interrupted_handoffs > 0 {
         tracing::info!(
             agent = %args.agent,
@@ -402,8 +469,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             "recovered interrupted background handoffs"
         );
     }
-
-    drop(conn);
 
     // Resolve Telegram token
     let token = telegram::resolve_token(&config)?;
@@ -427,24 +492,19 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         ),
     }
 
-    // Log registered MCP servers at startup.
-    {
-        let conn = right_db::open_connection(&agent_dir, false)
-            .await
-            .map_err(|e| miette::miette!("failed to open data.db for MCP check: {e:#}"))?;
-        match right_mcp::credentials::db_list_servers(&conn).await {
-            Ok(servers) => {
-                for s in &servers {
-                    tracing::info!(
-                        agent = %args.agent,
-                        server = %s.name,
-                        url = %s.url,
-                        "registered MCP server"
-                    );
-                }
+    // Log registered MCP servers from the Aggregator's redacted status view.
+    match internal_client.mcp_list(&args.agent).await {
+        Ok(response) => {
+            for server in &response.servers {
+                tracing::info!(
+                    agent = %args.agent,
+                    server = %server.name,
+                    url = server.url.as_deref().unwrap_or(""),
+                    "registered MCP server"
+                );
             }
-            Err(e) => tracing::warn!(agent = %args.agent, "db_list_servers check failed: {e:#}"),
         }
+        Err(e) => tracing::warn!(agent = %args.agent, "MCP status check failed: {e:#}"),
     }
 
     // Warn when the trusted-users set is empty — DMs will be silently dropped.
@@ -505,12 +565,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let progress_bot = telegram::bot::build_bot(token.clone());
     let agent_name = args.agent.clone();
 
-    // Internal API client for bot→aggregator IPC (MCP add/remove/set-token)
-    let internal_socket = home.join("run/internal.sock");
-    let internal_client = Arc::new(right_mcp::internal_client::InternalClient::new(
-        internal_socket,
-    ));
-
     let oauth_state = OAuthCallbackState {
         pending_auth: Arc::clone(&pending_auth),
         oauth_status: oauth_status.clone(),
@@ -561,13 +615,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         None => right_sandbox::sandbox_name(&args.agent),
     };
 
-    // Provider credentials reach the sandbox as source-ref secrets; the store
-    // is the only reader of a stored credential.
-    let providers = std::sync::Arc::new(
-        right_providers::ProviderStore::open(&home)
-            .await
-            .map_err(|e| miette::miette!("failed to open the provider store: {e:#}"))?,
-    );
+    // Provider credentials are resolved only by the Aggregator over the
+    // authenticated internal socket. The bot never opens `providers.db`.
+    let provider_bindings = Arc::new(provider_bindings::ProviderBindingResolver::new(
+        Arc::clone(&internal_client),
+        args.agent.clone(),
+        &agent_secret,
+    )?);
     // Serializes config-watcher and dashboard provider operations that mutate
     // provider state or address the sandbox.
     let provider_mutation = Arc::new(tokio::sync::Mutex::new(()));
@@ -611,7 +665,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     });
 
     // One-time migration: oauth-state.json → SQLite
-    migrate_oauth_state_to_db(&agent_dir).await;
+    migrate_oauth_state_to_db(&agent_dir, &args.agent, &internal_client).await;
 
     // --- Agent Sandbox lifecycle ---
     //
@@ -623,19 +677,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // The supervisor (monitor + recovery) owns the long-lived sync task from
     // here on; startup takes the same authoritative per-agent provider lock
     // used by every later sandbox mutation.
-    let _startup_provider_guard = providers
-        .agent_lock(&args.agent)
-        .await
-        .map_err(|error| miette::miette!("failed to lock startup provider reconcile: {error:#}"))?;
     let bring_up_ctx = sandbox_supervisor::BringUpCtx {
         agent: &args.agent,
         agent_dir: &agent_dir,
         sandbox_name: &sandbox_name,
         config: &config,
-        providers: &providers,
+        provider_bindings: &provider_bindings,
     };
     let startup_bring_up = sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await;
-    drop(_startup_provider_guard);
     let initial_sandbox = match startup_bring_up? {
         Ok(sandbox_supervisor::SandboxBringUp { sandbox }) => Ok(sandbox),
         Err(diagnosis) => {
@@ -676,7 +725,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             agent_dir.clone(),
             sandbox_name.clone(),
             Arc::clone(&provider_config),
-            std::sync::Arc::clone(&providers),
+            Arc::clone(&provider_bindings),
             Arc::clone(&provider_mutation),
             shutdown.clone(),
         ),
@@ -704,7 +753,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         const HOT_RECONCILE_BACKOFFS_MS: [u64; 2] = [500, 2000];
         let mut providers_rx = providers_rx;
         let agent = args.agent.clone();
-        let store = std::sync::Arc::clone(&providers);
+        let resolver = Arc::clone(&provider_bindings);
         let runtime = std::sync::Arc::clone(&sandbox_runtime);
         let shutdown = shutdown.clone();
         let provider_mutation = Arc::clone(&provider_mutation);
@@ -722,14 +771,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                     },
                 };
                 let _mutation = provider_mutation.lock().await;
-                let _agent_guard = match store.agent_lock(&agent).await {
-                    Ok(guard) => guard,
-                    Err(error) => {
-                        tracing::error!(error = %format!("{error:#}"),
-                            "providers hot-reconcile could not acquire the agent mutation lock");
-                        continue;
-                    }
-                };
                 // Capture the previously accepted provider declarations before
                 // publishing the new durable truth. Reconcile needs that union
                 // to identify bindings removed by this edit without ever
@@ -750,7 +791,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         &agent,
                         std::slice::from_ref(previous_cfg.as_ref()),
                         &new_cfg,
-                        &store,
+                        &resolver,
                         &sandbox,
                     )
                     .await
@@ -798,7 +839,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             allowlist: allowlist.clone(),
             foreground: Arc::clone(&dashboard_foreground),
             internal_client: Arc::clone(&internal_client),
-            providers: Some(Arc::clone(&providers)),
+            provider_bindings: Some(Arc::clone(&provider_bindings)),
             provider_mutation: Arc::clone(&provider_mutation),
             provider_config: Arc::clone(&provider_config),
             pending_auth: Arc::clone(&pending_auth),
@@ -811,7 +852,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // --- Telegram handler dependencies (hoisted above the UDS spawn) ---
     //
-    // The webhook router needs a fully-built `HandlerCtx`, which requires the
     // per-session control maps, idle timestamp, keepalive health, and STT
     // context. These are constructed here (once) and the resulting `Arc`s are
     // shared with the cron/delivery/keepalive tasks spawned later.
@@ -919,12 +959,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         std::sync::Arc::clone(&sandbox_runtime),
         config.attachments.retention_days,
     );
-
-    // Startup upgrade: runs before cron/telegram — no lock contention.
-    // (`upgrade_lock` is built above, before `setup_telegram`.)
-    if let Some(sandbox) = sandbox.as_ref() {
-        upgrade::run_startup_upgrade(sandbox, &args.agent).await;
-    }
 
     // CRON-01: spawn cron task alongside the Telegram webhook handler.
     // Cron results are persisted to DB; Telegram delivery is handled separately.
@@ -1040,7 +1074,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let curator_model = Arc::clone(&model_arc);
         let curator_shutdown = shutdown.clone();
         let curator_internal_client = Arc::clone(&internal_client);
-        let curator_idle_ts = std::sync::Arc::clone(&idle_timestamp);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1086,10 +1119,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         mode: curator_learning.curator_mode,
                     },
                 };
-                let latest_activity = crate::learning_curator::idle_secs_to_activity(
-                    curator_idle_ts.0.load(std::sync::atomic::Ordering::Relaxed),
-                );
-                crate::learning_curator::run_if_due(ctx, latest_activity).await;
+                crate::learning_curator::run_if_due(ctx).await;
             }
         });
     }
@@ -1253,15 +1283,13 @@ async fn wait_for_delivery_loop_shutdown(
     }
 }
 
-/// Memory drain loop. Periodically flushes `pending_retains` to Hindsight,
-/// skipping ticks when the resilient wrapper is in a non-Healthy state.
-///
-/// Holds `&right_db::Connection` across `.await`, so the returned future is
-/// `!Send` and must be driven from a `LocalSet`. Honours `shutdown` so the
-/// loop exits cleanly before the runtime starts tearing down its time driver.
+/// Memory drain loop. Periodically flushes the owner-backed pending retain
+/// queue to Hindsight, skipping ticks when the resilient wrapper is in a
+/// non-Healthy state. Claims are leased: a bot crash after claim is recovered
+/// by the owner's expiry reclaim on the next claim.
 async fn run_drain_loop(
     wrapper: std::sync::Arc<right_memory::ResilientHindsight>,
-    agent_db: std::path::PathBuf,
+    queue: std::sync::Arc<dyn right_memory::RetainLeaseQueue>,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -1276,16 +1304,9 @@ async fn run_drain_loop(
         if !matches!(wrapper.status(), right_memory::MemoryStatus::Healthy) {
             continue;
         }
-        let conn = match right_db::open_connection(&agent_db, false).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("drain: open_connection failed: {e:#}");
-                continue;
-            }
-        };
-        let w_call = wrapper.clone();
-        let report = right_memory::retain_queue::drain_tick(&conn, |items| {
-            let w = w_call.clone();
+        let w_call = std::sync::Arc::clone(&wrapper);
+        let report = right_memory::retain_queue::drain_claimed(queue.as_ref(), |items| {
+            let w = std::sync::Arc::clone(&w_call);
             async move {
                 let item = right_memory::hindsight::RetainItem {
                     content: items[0].content.clone(),
@@ -1305,14 +1326,17 @@ async fn run_drain_loop(
     }
 }
 
-/// Migrate OAuth state from oauth-state.json to SQLite (one-time).
-/// Non-fatal — logs warnings and continues on error.
-async fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
+/// Migrate OAuth state from oauth-state.json to the Aggregator-owned database
+/// through typed internal IPC. Non-fatal — logs warnings and continues.
+async fn migrate_oauth_state_to_db(
+    agent_dir: &std::path::Path,
+    agent_name: &str,
+    internal_client: &right_mcp::internal_client::InternalClient,
+) {
     let json_path = agent_dir.join("oauth-state.json");
     if !json_path.exists() {
         return;
     }
-
     let content = match std::fs::read_to_string(&json_path) {
         Ok(c) => c,
         Err(e) => {
@@ -1328,14 +1352,6 @@ async fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
         }
     };
 
-    let conn = match right_db::open_connection(agent_dir, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("failed to open DB for oauth-state migration: {e:#}");
-            return;
-        }
-    };
-
     let mut all_succeeded = true;
     if let Some(servers) = state.get("servers").and_then(|s| s.as_object()) {
         for (name, entry) in servers {
@@ -1347,8 +1363,14 @@ async fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
                 .get("client_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let client_secret = entry.get("client_secret").and_then(|v| v.as_str());
-            let refresh_token = entry.get("refresh_token").and_then(|v| v.as_str());
+            let client_secret = entry
+                .get("client_secret")
+                .and_then(|v| v.as_str())
+                .map(secrecy::SecretString::from);
+            let refresh_token = entry
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .map(secrecy::SecretString::from);
             let expires_at = entry
                 .get("expires_at")
                 .and_then(|v| v.as_str())
@@ -1359,19 +1381,19 @@ async fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            if let Err(e) = right_mcp::credentials::db_set_oauth_state(
-                &conn,
-                name,
-                "",
+            let request = right_mcp::internal_db::McpOauthStateSetRequest {
+                agent: agent_name.to_owned(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                server_name: name.clone(),
+                access_token: secrecy::SecretString::from(String::new()),
                 refresh_token,
-                token_endpoint,
-                client_id,
+                token_endpoint: token_endpoint.to_owned(),
+                client_id: client_id.to_owned(),
                 client_secret,
-                expires_at,
-                oauth_resource,
-            )
-            .await
-            {
+                expires_at: expires_at.to_owned(),
+                oauth_resource: oauth_resource.to_owned(),
+            };
+            if let Err(e) = internal_client.mcp_oauth_state_set(&request).await {
                 tracing::warn!(server = %name, "skipping oauth-state migration: {e:#}");
                 all_succeeded = false;
             }

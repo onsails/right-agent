@@ -6,7 +6,6 @@
 use frankenstein::types::{
     CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage,
 };
-use right_db::{Connection, DbError, OptionalExtension as _};
 
 use super::router::HandlerCtx;
 use super::tg_bot::TgError;
@@ -60,48 +59,26 @@ pub(crate) fn details_payload(raw_json: &str) -> DetailsPayload {
     }
 }
 
-/// Store the raw error JSON and sweep rows older than the TTL. Insert + delete
-/// are two writes → one immediate transaction. Returns the new row id.
-/// `now` is unix seconds (caller-supplied for testability).
+/// Store raw error JSON and sweep expired rows atomically in the owner.
 pub(crate) async fn insert_error_detail(
-    conn: &Connection,
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
     chat_id: i64,
     thread_id: i64,
     raw_json: &str,
     now: i64,
-) -> Result<i64, DbError> {
-    let cutoff = now - ERROR_DETAILS_TTL_DAYS * 86_400;
-    let tx = conn.transaction().await?;
-    tx.execute(
-        "DELETE FROM error_details WHERE created_at < ?1",
-        right_db::params![cutoff],
-    )
-    .await?;
-    tx.execute(
-        "INSERT INTO error_details (chat_id, thread_id, raw_json, created_at) \
-         VALUES (?1, ?2, ?3, ?4)",
-        right_db::params![chat_id, thread_id, raw_json, now],
-    )
-    .await?;
-    let id = tx.connection().last_insert_rowid();
-    tx.commit().await?;
-    Ok(id)
-}
-
-/// Fetch a stored error detail, scoped to `chat_id`. Returns `None` when the
-/// row is absent, expired (swept), or belongs to a different chat.
-pub(crate) async fn get_error_detail(
-    conn: &Connection,
-    id: i64,
-    chat_id: i64,
-) -> Result<Option<String>, DbError> {
-    conn.query_row(
-        "SELECT raw_json FROM error_details WHERE id = ?1 AND chat_id = ?2",
-        right_db::params![id, chat_id],
-        |row| row.get::<_, String>(0),
-    )
-    .await
-    .optional()
+) -> Result<i64, right_mcp::internal_db::InternalDbError> {
+    client
+        .error_detail_insert(&right_mcp::internal_db::ErrorDetailInsertRequest {
+            agent: agent.to_owned(),
+            request_id: crate::db::request_id(),
+            chat_id,
+            thread_id,
+            raw_json: raw_json.to_owned(),
+            created_at_unix: now,
+        })
+        .await
+        .map(|response| response.id)
 }
 
 /// Handle `errdet:<id>` callback queries: reply with the stored raw error JSON,
@@ -111,8 +88,6 @@ pub(crate) async fn handle_error_details_callback(
     q: &CallbackQuery,
 ) -> Result<(), TgError> {
     let bot = &ctx.bot;
-    let agent_dir = &ctx.agent_dir;
-
     // Resolve id + chat from the callback. Missing message or bad id → alert.
     let id = q.data.as_deref().and_then(parse_errdet_id);
     // The callback message carries the chat + the message to reply to. An
@@ -131,17 +106,29 @@ pub(crate) async fn handle_error_details_callback(
         return Ok(());
     };
 
-    // Open the per-agent DB (no migration on runtime opens) and fetch, scoped.
-    let raw = match right_db::open_connection(&agent_dir.0, false).await {
-        Ok(conn) => match get_error_detail(&conn, id, chat).await {
-            Ok(found) => found,
-            Err(e) => {
-                tracing::error!(chat_id = chat, "get_error_detail failed: {:#}", e);
-                None
-            }
-        },
-        Err(e) => {
-            tracing::error!(chat_id = chat, "open_connection failed: {:#}", e);
+    let agent_name = ctx
+        .agent_dir
+        .0
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let raw = match ctx
+        .internal_api
+        .0
+        .error_detail_get(&right_mcp::internal_db::ErrorDetailGetRequest {
+            agent: agent_name,
+            id,
+            chat_id: chat,
+        })
+        .await
+    {
+        Ok(response) => response.raw_json,
+        Err(error) => {
+            tracing::error!(
+                chat_id = chat,
+                "get_error_detail owner read failed: {error:#}"
+            );
             None
         }
     };
@@ -246,53 +233,5 @@ mod tests {
     fn details_payload_large_is_file() {
         let big = "x".repeat(5000);
         assert!(matches!(details_payload(&big), DetailsPayload::File(_)));
-    }
-
-    async fn migrated_conn() -> (tempfile::TempDir, right_db::Connection) {
-        let dir = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
-        (dir, conn)
-    }
-
-    #[tokio::test]
-    async fn insert_then_get_round_trips() {
-        let (_dir, conn) = migrated_conn().await;
-        let now = 1_700_000_000;
-        let id = insert_error_detail(&conn, 111, 0, r#"{"is_error":true}"#, now)
-            .await
-            .unwrap();
-        let got = get_error_detail(&conn, id, 111).await.unwrap();
-        assert_eq!(got.as_deref(), Some(r#"{"is_error":true}"#));
-    }
-
-    #[tokio::test]
-    async fn get_is_scoped_by_chat_id() {
-        let (_dir, conn) = migrated_conn().await;
-        let id = insert_error_detail(&conn, 111, 0, "{}", 1_700_000_000)
-            .await
-            .unwrap();
-        assert_eq!(get_error_detail(&conn, id, 222).await.unwrap(), None);
-        assert_eq!(get_error_detail(&conn, id + 999, 111).await.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn insert_sweeps_rows_older_than_ttl() {
-        let (_dir, conn) = migrated_conn().await;
-        let day = 86_400;
-        let now = 1_700_000_000;
-        let old = insert_error_detail(&conn, 111, 0, "old", now - 8 * day)
-            .await
-            .unwrap();
-        let fresh = insert_error_detail(&conn, 111, 0, "fresh", now)
-            .await
-            .unwrap();
-        assert_eq!(get_error_detail(&conn, old, 111).await.unwrap(), None);
-        assert_eq!(
-            get_error_detail(&conn, fresh, 111)
-                .await
-                .unwrap()
-                .as_deref(),
-            Some("fresh")
-        );
     }
 }

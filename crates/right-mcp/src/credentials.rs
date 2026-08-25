@@ -324,7 +324,7 @@ pub fn validate_server_url(url_str: &str) -> Result<(), CredentialError> {
 }
 
 /// Entry returned by `db_list_servers`.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct McpServerEntry {
     pub name: String,
     pub url: String,
@@ -338,6 +338,89 @@ pub struct McpServerEntry {
     pub client_secret: Option<String>,
     pub expires_at: Option<String>,
     pub oauth_resource: Option<String>,
+}
+
+impl std::fmt::Debug for McpServerEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerEntry")
+            .field("name", &self.name)
+            .field("url", &redact_url(&self.url))
+            .field("instructions", &self.instructions)
+            .field("auth_type", &self.auth_type)
+            .field("auth_header", &self.auth_header)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "token_endpoint",
+                &self.token_endpoint.as_deref().map(redact_url),
+            )
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("expires_at", &self.expires_at)
+            .field(
+                "oauth_resource",
+                &self.oauth_resource.as_deref().map(redact_url),
+            )
+            .finish()
+    }
+}
+
+/// Complete durable state for one MCP server, used to restore a failed replacement.
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpServerSnapshot {
+    pub server: McpServerEntry,
+    pub headers: Vec<HttpHeaderSecret>,
+    pub created_at: String,
+}
+
+impl std::fmt::Debug for McpServerSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerSnapshot")
+            .field("server", &self.server)
+            .field("headers", &self.headers)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
+/// Authentication state applied as part of an atomic MCP server replacement.
+#[derive(Clone, PartialEq, Eq)]
+pub enum McpServerAuth {
+    None,
+    Legacy {
+        auth_type: String,
+        auth_header: Option<String>,
+        auth_token: Option<String>,
+    },
+    Headers(Vec<HttpHeaderSecret>),
+}
+
+impl std::fmt::Debug for McpServerAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::Legacy {
+                auth_type,
+                auth_header,
+                auth_token,
+            } => f
+                .debug_struct("Legacy")
+                .field("auth_type", auth_type)
+                .field("auth_header", auth_header)
+                .field("auth_token", &auth_token.as_ref().map(|_| "<redacted>"))
+                .finish(),
+            Self::Headers(headers) => f.debug_tuple("Headers").field(headers).finish(),
+        }
+    }
 }
 
 /// Returns true if a server with the given name is registered.
@@ -442,6 +525,173 @@ pub async fn db_list_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, C
         (),
     )
     .await
+}
+
+/// Load the complete durable state for one server, including secret headers.
+pub async fn db_get_server_snapshot(
+    conn: &Connection,
+    name: &str,
+) -> Result<Option<McpServerSnapshot>, CredentialError> {
+    let server = conn
+        .query_one(
+            &format!("SELECT {SERVER_COLUMNS}, created_at FROM mcp_servers WHERE name = ?1"),
+            [name],
+            |row| Ok((server_entry_from_row(row)?, row.get(12)?)),
+        )
+        .await
+        .optional()?;
+    let Some((server, created_at)) = server else {
+        return Ok(None);
+    };
+    let headers = db_list_http_headers(conn, name).await?;
+    Ok(Some(McpServerSnapshot {
+        server,
+        headers,
+        created_at,
+    }))
+}
+
+async fn replace_server_auth(
+    tx: &right_db::Transaction<'_>,
+    name: &str,
+    auth: &McpServerAuth,
+) -> Result<(), CredentialError> {
+    let (auth_type, auth_header, auth_token) = match auth {
+        McpServerAuth::None => (None, None, None),
+        McpServerAuth::Legacy {
+            auth_type,
+            auth_header,
+            auth_token,
+        } => (
+            Some(auth_type.as_str()),
+            auth_header.as_deref(),
+            auth_token.as_deref(),
+        ),
+        McpServerAuth::Headers(_) => (Some("headers"), None, None),
+    };
+    let changed = tx
+        .execute(
+            "UPDATE mcp_servers SET
+                 auth_type = ?1, auth_header = ?2, auth_token = ?3,
+                 refresh_token = NULL, token_endpoint = NULL, client_id = NULL,
+                 client_secret = NULL, expires_at = NULL, oauth_resource = NULL
+             WHERE name = ?4",
+            params![auth_type, auth_header, auth_token, name],
+        )
+        .await?;
+    if changed == 0 {
+        return Err(CredentialError::ServerNotFound(name.to_owned()));
+    }
+    tx.execute(
+        "DELETE FROM mcp_http_headers WHERE server_name = ?1",
+        [name],
+    )
+    .await?;
+    if let McpServerAuth::Headers(headers) = auth {
+        for header in headers {
+            tx.execute(
+                "INSERT INTO mcp_http_headers (server_name, header_name, header_value)
+                 VALUES (?1, ?2, ?3)",
+                params![name, header.name(), header.value()],
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Atomically persist a replacement and return the state that preceded it.
+pub async fn db_replace_server(
+    conn: &Connection,
+    name: &str,
+    url: &str,
+    auth: &McpServerAuth,
+) -> Result<Option<McpServerSnapshot>, CredentialError> {
+    validate_server_name(name)?;
+    validate_server_url(url)?;
+    let tx = conn.transaction().await?;
+    let result: Result<Option<McpServerSnapshot>, CredentialError> = async {
+        let previous = db_get_server_snapshot(&tx, name).await?;
+        db_add_server(&tx, name, url).await?;
+        replace_server_auth(&tx, name, auth).await?;
+        Ok(previous)
+    }
+    .await;
+    match result {
+        Ok(previous) => {
+            tx.commit().await?;
+            Ok(previous)
+        }
+        Err(error) => {
+            tx.rollback().await?;
+            Err(error)
+        }
+    }
+}
+
+/// Atomically restore a complete server snapshot, including header and OAuth state.
+pub async fn db_restore_server_snapshot(
+    conn: &Connection,
+    snapshot: &McpServerSnapshot,
+) -> Result<(), CredentialError> {
+    let server = &snapshot.server;
+    let tx = conn.transaction().await?;
+    let result: Result<(), CredentialError> = async {
+        tx.execute(
+            "INSERT INTO mcp_servers (
+                 name, url, instructions, auth_type, auth_header, auth_token, refresh_token,
+                 token_endpoint, client_id, client_secret, expires_at, oauth_resource, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(name) DO UPDATE SET
+                 url = excluded.url, instructions = excluded.instructions,
+                 auth_type = excluded.auth_type, auth_header = excluded.auth_header,
+                 auth_token = excluded.auth_token, refresh_token = excluded.refresh_token,
+                 token_endpoint = excluded.token_endpoint, client_id = excluded.client_id,
+                 client_secret = excluded.client_secret, expires_at = excluded.expires_at,
+                 oauth_resource = excluded.oauth_resource, created_at = excluded.created_at",
+            params![
+                &server.name,
+                &server.url,
+                &server.instructions,
+                &server.auth_type,
+                &server.auth_header,
+                &server.auth_token,
+                &server.refresh_token,
+                &server.token_endpoint,
+                &server.client_id,
+                &server.client_secret,
+                &server.expires_at,
+                &server.oauth_resource,
+                &snapshot.created_at
+            ],
+        )
+        .await?;
+        tx.execute(
+            "DELETE FROM mcp_http_headers WHERE server_name = ?1",
+            [&server.name],
+        )
+        .await?;
+        for header in &snapshot.headers {
+            tx.execute(
+                "INSERT INTO mcp_http_headers (server_name, header_name, header_value)
+                 VALUES (?1, ?2, ?3)",
+                params![&server.name, header.name(), header.value()],
+            )
+            .await?;
+        }
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => {
+            tx.commit().await?;
+            Ok(())
+        }
+        Err(error) => {
+            tx.rollback().await?;
+            Err(error)
+        }
+    }
 }
 
 /// Update auth fields for an MCP server.
@@ -964,6 +1214,52 @@ mod db_tests {
         let servers = db_list_servers(&conn).await.unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].url, "https://new.notion.com/mcp");
+    }
+
+    #[tokio::test]
+    async fn mcp_server_snapshot_debug_redacts_all_secrets() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "nango", "https://example.com/mcp?key=url-secret")
+            .await
+            .unwrap();
+        db_set_oauth_state(
+            &conn,
+            "nango",
+            "access-secret",
+            Some("refresh-secret"),
+            "https://auth.example/token?secret=endpoint-secret",
+            "client-id",
+            Some("client-secret"),
+            "2027-01-02T03:04:05Z",
+            "https://example.com/resource?secret=resource-secret",
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mcp_http_headers (server_name, header_name, header_value) \
+             VALUES ('nango', 'authorization', 'header-secret')",
+            [],
+        )
+        .await
+        .unwrap();
+
+        let snapshot = db_get_server_snapshot(&conn, "nango")
+            .await
+            .unwrap()
+            .unwrap();
+        let debug = format!("{snapshot:?}");
+        for secret in [
+            "url-secret",
+            "access-secret",
+            "refresh-secret",
+            "endpoint-secret",
+            "client-secret",
+            "resource-secret",
+            "header-secret",
+        ] {
+            assert!(!debug.contains(secret), "Debug leaked {secret}: {debug}");
+        }
+        assert!(debug.contains("<redacted>"));
     }
 
     #[tokio::test]

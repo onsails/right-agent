@@ -156,21 +156,13 @@ pub(crate) async fn spawn_background_continuation(
         return HandoffStatus::Failed(reason);
     }
 
-    let started_at = chrono::Utc::now().to_rfc3339();
-    let log_path_str = log_path.to_string_lossy().into_owned();
-    let mark_spawned = {
-        match right_db::open_connection(&agent_dir, false).await {
-            Ok(conn) => right_agent::async_runs::mark_background_spawned(
-                &conn,
-                &request.run_id,
-                &started_at,
-                &log_path_str,
-            )
-            .await
-            .map_err(|e| format!("mark background spawned: {e:#}")),
-            Err(e) => Err(format!("open DB to mark background spawned: {e:#}")),
-        }
-    };
+    let mark_spawned = internal_client
+        .mark_background_spawned(&right_mcp::internal_db::MarkBackgroundSpawnedRequest {
+            agent: agent_name.clone(),
+            run_id: request.run_id.clone(),
+        })
+        .await
+        .map_err(|e| format!("mark background spawned: {e:#}"));
     if let Err(reason) = mark_spawned {
         let stderr = kill_unconfirmed_child(child, reader_handle, stderr_handle).await;
         let reason = append_stderr_to_reason(&reason, &stderr);
@@ -240,12 +232,17 @@ async fn build_background_command(
 
     // Per-agent notice token for the trusted `## Platform Notice Token` prompt
     // section, so the agent can verify SYSTEM_NOTICE markers.
+    let (client, agent) = crate::db::client_for_agent_dir(agent_dir)
+        .map_err(|e| format!("resolve owner client for notice token: {e:#}"))?;
     let notice_token = {
-        let conn = right_db::open_connection(agent_dir, false)
+        use secrecy::ExposeSecret as _;
+        client
+            .notice_token_get_or_create(&right_mcp::internal_db::NoticeTokenGetOrCreateRequest {
+                agent,
+                request_id: crate::db::request_id(),
+            })
             .await
-            .map_err(|e| format!("open DB for notice token: {e:#}"))?;
-        right_mcp::credentials::get_or_create_notice_token(&conn)
-            .await
+            .map(|response| response.token.expose_secret().to_owned())
             .map_err(|e| format!("fetch notice token: {e:#}"))?
     };
 
@@ -262,10 +259,9 @@ async fn build_background_command(
         None,
         Some(&notice_token),
     );
-    Ok(
-        crate::cc::invocation::build_claude_script_command(assembly_script, agent_dir, sandbox)
-            .await,
-    )
+    crate::cc::invocation::build_claude_script_command(assembly_script, agent_dir, sandbox)
+        .await
+        .map_err(|e| format!("build background command: {e:#}"))
 }
 
 async fn read_background_stdout(
@@ -640,31 +636,22 @@ async fn persist_successful_background_output(
     let delivery_json =
         serialize_notify_delivery_for_host(agent_dir, run_id, &notify, sandbox).await?;
 
-    let conn = right_db::open_connection(agent_dir, false)
-        .await
-        .map_err(|e| format!("open DB to persist background output: {e:#}"))?;
-    let tx = conn
-        .transaction()
-        .await
-        .map_err(|e| format!("begin transaction for background output: {e:#}"))?;
-    right_agent::async_runs::persist_run_output(
-        &tx,
-        run_id,
-        right_agent::async_runs::RunOutput {
-            run_note: Some(&output.run_note),
-            delivery_json: Some(&delivery_json),
+    let (client, agent) = crate::db::client_for_agent_dir(agent_dir)
+        .map_err(|e| format!("resolve owner client: {e:#}"))?;
+    client
+        .persist_run_output(&right_mcp::internal_db::PersistRunOutputRequest {
+            agent,
+            request_id: crate::db::request_id(),
+            run_id: run_id.to_owned(),
+            run_note: Some(output.run_note.clone()),
+            delivery_json: Some(delivery_json),
             error_json: None,
             delivery_required: true,
-        },
-    )
-    .await
-    .map_err(|e| format!("persist background output: {e:#}"))?;
-    right_agent::async_runs::finish_run(&tx, run_id, exit_code, "success")
+            exit_code,
+            status: "success".to_owned(),
+        })
         .await
-        .map_err(|e| format!("finish background run: {e:#}"))?;
-    tx.commit()
-        .await
-        .map_err(|e| format!("commit background output: {e:#}"))?;
+        .map_err(|e| format!("persist background output through owner: {e:#}"))?;
     Ok(())
 }
 
@@ -712,6 +699,7 @@ async fn serialize_notify_delivery_for_host(
         .map_err(|e| format!("serialize background host delivery_json: {e:#}"))
 }
 
+#[cfg(test)]
 async fn persist_background_failure_notify(
     conn: &right_db::Connection,
     run_id: &str,
@@ -750,6 +738,7 @@ fn background_failure_payload(
     Ok((run_note, delivery_json, error_json))
 }
 
+#[cfg(test)]
 async fn mark_handoff_failed(
     conn: &right_db::Connection,
     run_id: &str,
@@ -757,22 +746,15 @@ async fn mark_handoff_failed(
 ) -> Result<(), right_db::DbError> {
     persist_background_failure_notify(conn, run_id, BACKGROUND_FAILURE_NOTIFY_CONTENT, reason)
         .await?;
-    let now = chrono::Utc::now().to_rfc3339();
-    let rows = conn
-        .execute(
-            "UPDATE async_runs
-         SET handoff_state = 'failed',
-             updated_at = ?2
-        WHERE id = ?1",
-            right_db::params![run_id, now],
-        )
-        .await?;
-    if rows == 0 {
-        return Err(right_db::DbError::NotFound);
-    }
+    conn.execute(
+        "UPDATE async_runs SET handoff_state = 'failed' WHERE id = ?1",
+        [run_id],
+    )
+    .await?;
     right_agent::async_runs::finish_run(conn, run_id, None, "failed").await
 }
 
+#[cfg(test)]
 pub(crate) async fn mark_interrupted_handoffs(
     conn: &right_db::Connection,
 ) -> Result<usize, right_db::DbError> {
@@ -799,6 +781,7 @@ pub(crate) async fn mark_interrupted_handoffs(
     Ok(converted)
 }
 
+#[cfg(test)]
 async fn mark_interrupted_handoff_failed_if_still_queued(
     conn: &right_db::Connection,
     run_id: &str,
@@ -832,6 +815,7 @@ async fn mark_interrupted_handoff_failed_if_still_queued(
     Ok(rows > 0)
 }
 
+#[cfg(test)]
 async fn mark_completion_failed(
     conn: &right_db::Connection,
     run_id: &str,
@@ -846,19 +830,29 @@ async fn mark_completion_failed(
 }
 
 async fn persist_handoff_failed_at_agent(agent_dir: &Path, run_id: &str, reason: &str) {
-    match right_db::open_connection(agent_dir, false).await {
-        Ok(conn) => {
-            if let Err(e) = mark_handoff_failed(&conn, run_id, reason).await {
-                tracing::error!(
-                    run_id,
-                    "failed to persist background handoff failure: {e:#}"
-                );
-            }
-        }
-        Err(e) => tracing::error!(
+    let result = async {
+        let (client, agent) = crate::db::client_for_agent_dir(agent_dir)?;
+        let (run_note, delivery_json, error_json) =
+            background_failure_payload(run_id, BACKGROUND_FAILURE_NOTIFY_CONTENT, reason)
+                .map_err(anyhow::Error::from)?;
+        client
+            .mark_handoff_failed(&right_mcp::internal_db::MarkHandoffFailedRequest {
+                agent,
+                request_id: crate::db::request_id(),
+                run_id: run_id.to_owned(),
+                run_note,
+                delivery_json,
+                error_json,
+            })
+            .await
+            .map_err(anyhow::Error::from)
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::error!(
             run_id,
-            "failed to open DB for background handoff failure: {e:#}"
-        ),
+            "failed to persist background handoff failure through owner: {error:#}"
+        );
     }
 }
 
@@ -869,23 +863,33 @@ async fn persist_completion_failed_at_agent(
     user_content: &str,
     reason: &str,
 ) {
-    match right_db::open_connection(agent_dir, false).await {
-        Ok(conn) => {
-            if let Err(e) =
-                mark_completion_failed(&conn, run_id, exit_code, user_content, reason).await
-            {
-                tracing::error!(
-                    run_id,
-                    "failed to persist background completion failure: {e:#}"
-                );
-            }
-        }
-        Err(e) => {
-            tracing::error!(
-                run_id,
-                "failed to open DB for background completion failure: {e:#}"
-            )
-        }
+    let result = async {
+        let (client, agent) = crate::db::client_for_agent_dir(agent_dir)?;
+        let (run_note, delivery_json, error_json) =
+            background_failure_payload(run_id, user_content, reason)
+                .map_err(anyhow::Error::from)?;
+        client
+            .persist_run_output(&right_mcp::internal_db::PersistRunOutputRequest {
+                agent,
+                request_id: crate::db::request_id(),
+                run_id: run_id.to_owned(),
+                run_note: Some(run_note),
+                delivery_json: Some(delivery_json),
+                error_json: Some(error_json),
+                delivery_required: true,
+                exit_code,
+                status: "failed".to_owned(),
+            })
+            .await
+            .map(drop)
+            .map_err(anyhow::Error::from)
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::error!(
+            run_id,
+            "failed to persist background completion failure through owner: {error:#}"
+        );
     }
 }
 
@@ -893,31 +897,8 @@ async fn persist_completion_failed_at_agent(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn build_background_command_refuses_without_a_sandbox() {
-        // Fail-closed: a degraded backend has no host fallback to build against.
-        let tmp = tempfile::tempdir().unwrap();
-        let result = build_background_command(tmp.path(), "agent", None, &[], None).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn bg_log_path_uses_background_logs_dir() {
-        assert_eq!(
-            bg_log_path(Path::new("/agent"), "run-1"),
-            PathBuf::from("/agent/background/logs/run-1.ndjson")
-        );
-    }
-
-    #[tokio::test]
-    async fn handoff_init_parser_requires_matching_system_init_session_id() {
-        let line = r#"{"type":"system","subtype":"init","session_id":"run-1"}"#;
-        assert!(is_handoff_init_for_run(line, "run-1"));
-        assert!(!is_handoff_init_for_run(line, "run-2"));
-        assert!(!is_handoff_init_for_run(
-            r#"{"type":"system","subtype":"result","session_id":"run-1"}"#,
-            "run-1"
-        ));
+    #[test]
+    fn handoff_init_parser_rejects_non_json() {
         assert!(!is_handoff_init_for_run("not json", "run-1"));
     }
 

@@ -22,6 +22,21 @@ happens during a typical upgrade.
 5. Zero manual steps: every regenerated output reaches the agent on its
    next turn.
 
+## Database ownership cutover
+
+The Turso multiprocess-WAL release is a coordinated topology cutover, not a
+rolling bot restart. Operators first stop the complete runtime and use
+`right agent db-repair <name>...` for any legacy database: the explicit repair
+preserves byte-identical database/WAL forensics, removes coordination sidecars
+only from staging, validates a standalone snapshot, and swaps it atomically.
+The runtime is not restarted automatically.
+
+The new release starts the Aggregator and bots together. The Aggregator opens
+standard-local `data.db`/`providers.db` owners before readiness; bots abort if
+the typed readiness handshake fails and never fall back to a direct open. All
+backup, restore, repair, destroy, rebootstrap, migration, and inspection paths
+that open these databases directly require the shared runtime-quiescence gate.
+
 ## Identity mirror
 
 For sandboxed agents, identity `AgentOwned` files are authoritative in

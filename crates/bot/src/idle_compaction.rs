@@ -40,27 +40,23 @@ pub(crate) fn should_compact(model: Option<&str>, used_tokens: u64) -> bool {
     is_opus_1m(model) && used_tokens >= MIN_USED_TOKENS
 }
 
-/// Context footprint of the most recent interactive turn for this session:
-/// `input + cache_read + cache_creation` tokens. `None` when no turn exists.
-/// This is the prompt size going into the last API call — i.e. how full the
-/// context is, regardless of how much was cache-served.
+/// Context footprint of the most recent interactive turn for this session.
 pub(crate) async fn latest_interactive_context_tokens(
-    conn: &right_db::Connection,
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
     chat_id: i64,
     thread_id: i64,
-) -> Result<Option<u64>, right_db::DbError> {
-    use right_db::OptionalExtension as _;
-    conn.query_row(
-        "SELECT input_tokens + cache_read_tokens + cache_creation_tokens \
-         FROM usage_events \
-         WHERE chat_id = ?1 AND thread_id = ?2 AND source = 'interactive' \
-         ORDER BY ts DESC LIMIT 1",
-        right_db::params![chat_id, thread_id],
-        |r| r.get::<_, i64>(0),
-    )
-    .await
-    .optional()
-    .map(|opt| opt.map(|v| v.max(0) as u64))
+) -> Result<Option<u64>, right_mcp::internal_db::InternalDbError> {
+    client
+        .learning_latest_interactive_context_tokens(
+            &right_mcp::internal_db::LearningLatestInteractiveContextTokensRequest {
+                agent: agent.to_owned(),
+                chat_id,
+                thread_id,
+            },
+        )
+        .await
+        .map(|response| response.tokens)
 }
 
 /// Build the specialized maintenance invocation: `claude -p --resume <id>
@@ -126,27 +122,24 @@ pub(crate) struct IdleCompactionCtx {
     pub debug: Arc<AtomicBool>,
     pub chat_id: i64,
     pub thread_id: i64,
+    pub internal_client: Arc<right_mcp::internal_client::InternalClient>,
 }
 
-/// Open the per-agent DB and read this session's context footprint.
-/// Best-effort: logs and returns `None` on any DB error (the caller then
-/// skips this cycle).
-async fn open_and_read_fullness(ctx: &IdleCompactionCtx) -> Option<(right_db::Connection, u64)> {
-    let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: open_connection failed: {e:#}");
-            return None;
+async fn read_fullness(ctx: &IdleCompactionCtx) -> Option<u64> {
+    match latest_interactive_context_tokens(
+        &ctx.internal_client,
+        &ctx.agent_name,
+        ctx.chat_id,
+        ctx.thread_id,
+    )
+    .await
+    {
+        Ok(value) => Some(value.unwrap_or(0)),
+        Err(error) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: owner fullness query failed: {error:#}");
+            None
         }
-    };
-    let used = match latest_interactive_context_tokens(&conn, ctx.chat_id, ctx.thread_id).await {
-        Ok(v) => v.unwrap_or(0),
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: fullness query failed: {e:#}");
-            return None;
-        }
-    };
-    Some((conn, used))
+    }
 }
 
 /// Fire path. Re-checks eligibility, resolves the active session, takes the
@@ -162,7 +155,7 @@ async fn run_compaction(ctx: IdleCompactionCtx, token: CancellationToken) {
         token: token.clone(),
     };
 
-    let Some((conn, used)) = open_and_read_fullness(&ctx).await else {
+    let Some(used) = read_fullness(&ctx).await else {
         return;
     };
 
@@ -173,20 +166,24 @@ async fn run_compaction(ctx: IdleCompactionCtx, token: CancellationToken) {
         return;
     }
 
-    let root_session_id = match crate::telegram::session::get_active_session(
-        &conn,
-        ctx.chat_id,
-        ctx.thread_id,
-    )
-    .await
+    let root_session_id = match ctx
+        .internal_client
+        .get_active_session(&right_mcp::internal_db::GetActiveSessionRequest {
+            agent: ctx.agent_name.clone(),
+            chat_id: ctx.chat_id,
+            thread_id: ctx.thread_id,
+        })
+        .await
     {
-        Ok(Some(s)) => s.root_session_id,
-        Ok(None) => {
-            tracing::debug!(agent = %ctx.agent_name, "idle-compaction: no active session, skipping");
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: get_active_session failed: {e:#}");
+        Ok(response) => match response.session {
+            Some(session) => session.root_session_id,
+            None => {
+                tracing::debug!(agent = %ctx.agent_name, "idle-compaction: no active session, skipping");
+                return;
+            }
+        },
+        Err(error) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: owner session read failed: {error:#}");
             return;
         }
     };
@@ -219,8 +216,16 @@ async fn run_compaction(ctx: IdleCompactionCtx, token: CancellationToken) {
             return;
         }
     };
-    let child = match crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, sandbox)
+    let command = match crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, sandbox)
         .await
+    {
+        Ok(command) => command,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: command build failed: {e:#}");
+            return;
+        }
+    };
+    let child = match command
         .stdout(crate::cc::sandbox_process::Capture::Pipe)
         .stderr(crate::cc::sandbox_process::Capture::Pipe)
         .spawn()
@@ -273,16 +278,21 @@ async fn run_compaction(ctx: IdleCompactionCtx, token: CancellationToken) {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Some(b) = crate::cc::stream::parse_usage_full(&stdout)
-        && let Err(e) = right_agent::usage::insert::insert_idle_compaction(
-            &conn,
-            &b,
-            ctx.chat_id,
-            ctx.thread_id,
-        )
-        .await
+    if let Some(breakdown) = crate::cc::stream::parse_usage_full(&stdout)
+        && let Err(error) = ctx
+            .internal_client
+            .usage_insert_event(&right_mcp::internal_db::UsageInsertEventRequest {
+                agent: ctx.agent_name.clone(),
+                request_id: crate::db::request_id(),
+                source: right_mcp::internal_db::UsageSourceDto::IdleCompaction {
+                    chat_id: ctx.chat_id,
+                    thread_id: ctx.thread_id,
+                },
+                event: crate::db::usage_dto(&breakdown),
+            })
+            .await
     {
-        tracing::warn!(agent = %ctx.agent_name, "idle-compaction: usage insert failed: {e:#}");
+        tracing::warn!(agent = %ctx.agent_name, "idle-compaction: owner usage insert failed: {error:#}");
     }
 
     tracing::info!(
@@ -337,7 +347,7 @@ pub(crate) async fn on_turn_end(ctx: IdleCompactionCtx) {
         cancel(&ctx.compact_timers, ctx.chat_id, ctx.thread_id);
         return;
     }
-    let Some((_conn, used)) = open_and_read_fullness(&ctx).await else {
+    let Some(used) = read_fullness(&ctx).await else {
         return;
     };
     if should_compact(model.as_deref(), used) {
@@ -395,50 +405,6 @@ mod tests {
         assert!(!joined.contains("--mcp-config"));
     }
 
-    #[tokio::test]
-    async fn fullness_reads_latest_interactive_sum() {
-        let dir = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
-
-        let mk =
-            |input: u64, cache_read: u64, cache_create: u64| right_agent::usage::UsageBreakdown {
-                session_uuid: "s".into(),
-                total_cost_usd: 0.0,
-                num_turns: 1,
-                input_tokens: input,
-                output_tokens: 0,
-                cache_creation_tokens: cache_create,
-                cache_read_tokens: cache_read,
-                web_search_requests: 0,
-                web_fetch_requests: 0,
-                model_usage_json: "{}".into(),
-                api_key_source: "none".into(),
-                wall_elapsed_ms: None,
-            };
-
-        // Older smaller turn, then a newer larger turn, for the same (chat, thread).
-        right_agent::usage::insert::insert_interactive(&conn, &mk(1, 1, 1), 42, 0)
-            .await
-            .unwrap();
-        right_agent::usage::insert::insert_interactive(&conn, &mk(100, 200, 50), 42, 0)
-            .await
-            .unwrap();
-        // A different source must be ignored.
-        right_agent::usage::insert::insert_learning_prefilter(&conn, &mk(9_999, 0, 0), 42, 0)
-            .await
-            .unwrap();
-
-        let used = latest_interactive_context_tokens(&conn, 42, 0)
-            .await
-            .unwrap();
-        assert_eq!(used, Some(350)); // 100 + 200 + 50
-
-        let absent = latest_interactive_context_tokens(&conn, 999, 0)
-            .await
-            .unwrap();
-        assert_eq!(absent, None);
-    }
-
     fn dummy_ctx(
         timers: crate::telegram::CompactTimers,
         chat: i64,
@@ -457,6 +423,9 @@ mod tests {
             debug: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             chat_id: chat,
             thread_id: thread,
+            internal_client: std::sync::Arc::new(right_mcp::internal_client::InternalClient::new(
+                "/tmp/idle-compaction-test.sock",
+            )),
         }
     }
 

@@ -5,13 +5,16 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+chrono = { workspace = true }
 fs4 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 turso = { workspace = true }
-turso_core = { workspace = true }
 
 [features]
 test-support = ["dep:tempfile"]

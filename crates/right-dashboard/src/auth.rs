@@ -194,7 +194,7 @@ mod tests {
 
     fn signed_init_data(bot_token: &str, pairs: &[(&str, String)]) -> String {
         let mut data_pairs = pairs.to_vec();
-        data_pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
+        data_pairs.sort_by_key(|(left, _)| *left);
 
         let data_check_string = data_pairs
             .iter()

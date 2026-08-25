@@ -922,7 +922,6 @@ fn agent_init_force_recreates_agent() {
     let marker = dir.path().join("agents/test-agent/MARKER.txt");
     fs::write(&marker, "canary").unwrap();
     assert!(marker.exists());
-    let _ = fs::remove_file(dir.path().join("run/state.json"));
 
     // Re-init with --force-recreate.
     right_with_init_auth()
@@ -992,7 +991,6 @@ fn agent_init_force_recreate_preserves_config() {
         .assert()
         .success();
 
-    let _ = fs::remove_file(dir.path().join("run/state.json"));
     // Re-init with --force-recreate (no --fresh) — should preserve config.
     right_with_init_auth()
         .args([
@@ -1043,7 +1041,7 @@ fn agent_init_force_recreate_on_nonexistent_agent() {
 
     assert!(dir.path().join("agents/new-agent/agent.yaml").exists());
 }
-fn assert_force_recreate_rejects_bot_status(status: &str) {
+fn assert_force_recreate_rejects_reachable_runtime(status: &str) {
     let dir = tempdir().unwrap();
     let home = dir.path();
     fs::create_dir_all(home.join("agents/test-agent")).unwrap();
@@ -1097,16 +1095,57 @@ fn assert_force_recreate_rejects_bot_status(status: &str) {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(format!("currently {status}")));
+        .stderr(predicate::str::contains("offline database access"));
     server.join().unwrap();
     assert!(home.join("agents/test-agent/agent.yaml").exists());
 }
 
 #[test]
-fn agent_init_force_recreate_refuses_active_bot_states() {
+fn agent_init_force_recreate_refuses_reachable_runtime() {
     for status in ["Running", "Restarting", "Pending"] {
-        assert_force_recreate_rejects_bot_status(status);
+        assert_force_recreate_rejects_reachable_runtime(status);
     }
+}
+
+#[test]
+fn agent_init_force_recreate_refuses_unreachable_runtime() {
+    let dir = tempdir().unwrap();
+    let home = dir.path();
+    fs::create_dir_all(home.join("agents/test-agent")).unwrap();
+    fs::write(
+        home.join("agents/test-agent/agent.yaml"),
+        "sandbox:\n  name: right-test\n",
+    )
+    .unwrap();
+    fs::write(home.join("config.yaml"), minimal_config_yaml(home)).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    fs::create_dir_all(home.join("run")).unwrap();
+    fs::write(
+        home.join("run/state.json"),
+        format!(
+            r#"{{"agents":[{{"name":"test-agent"}}],"socket_path":"/tmp/test.sock","started_at":"2026-01-01T00:00:00Z","pc_port":{port},"pc_api_token":null}}"#
+        ),
+    )
+    .unwrap();
+
+    right_with_init_auth()
+        .args([
+            "--home",
+            home.to_str().unwrap(),
+            "agent",
+            "init",
+            "test-agent",
+            "--force-recreate",
+            "-y",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unreachable"));
+    assert!(home.join("agents/test-agent/agent.yaml").exists());
 }
 
 // --- Agent SSH regression tests ---

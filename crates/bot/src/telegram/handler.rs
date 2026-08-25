@@ -605,13 +605,23 @@ pub(crate) async fn handle_new(
     let eff_thread_id = effective_thread_id(msg);
     let key: SessionKey = (chat_id, eff_thread_id);
 
-    let conn = right_db::open_connection(&agent_dir.0, false)
+    let prev_uuid = ctx
+        .internal_api
+        .0
+        .deactivate_current_session(&right_mcp::internal_db::DeactivateCurrentSessionRequest {
+            agent: ctx
+                .agent_dir
+                .0
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_owned(),
+            chat_id,
+            thread_id: eff_thread_id,
+        })
         .await
-        .map_err(|e| other_err(format!("new: open DB: {:#}", e)))?;
-
-    let prev_uuid = deactivate_current(&conn, chat_id, eff_thread_id)
-        .await
-        .map_err(|e| other_err(format!("new: deactivate: {:#}", e)))?;
+        .map_err(|e| other_err(format!("new: deactivate: {e:#}")))?
+        .previous_root_session_id;
 
     // Kill worker — channel closes, CC subprocess killed via kill_on_drop
     ctx.worker_map.remove(&key);
@@ -622,9 +632,23 @@ pub(crate) async fn handle_new(
     if !name.is_empty() {
         let new_uuid = uuid::Uuid::new_v4().to_string();
         let label = truncate_label(&name);
-        create_session(&conn, chat_id, eff_thread_id, &new_uuid, Some(label))
+        ctx.internal_api
+            .0
+            .create_session(&right_mcp::internal_db::CreateSessionRequest {
+                agent: ctx
+                    .agent_dir
+                    .0
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                chat_id,
+                thread_id: eff_thread_id,
+                session_uuid: new_uuid,
+                label: Some(label.to_owned()),
+            })
             .await
-            .map_err(|e| other_err(format!("new: create session: {:#}", e)))?;
+            .map_err(|e| other_err(format!("new: create session: {e:#}")))?;
         reply.push_str(&format!("New session: {name}\n"));
     } else {
         reply.push_str("Session cleared.\n");
@@ -657,13 +681,23 @@ pub(crate) async fn handle_list(ctx: &HandlerCtx, msg: &Message) -> Result<(), T
     let chat_id = msg.chat.id;
     let eff_thread_id = effective_thread_id(msg);
 
-    let conn = right_db::open_connection(&agent_dir.0, false)
+    let sessions = ctx
+        .internal_api
+        .0
+        .list_sessions(&right_mcp::internal_db::ListSessionsRequest {
+            agent: ctx
+                .agent_dir
+                .0
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_owned(),
+            chat_id,
+            thread_id: eff_thread_id,
+        })
         .await
-        .map_err(|e| other_err(format!("list: open DB: {:#}", e)))?;
-
-    let sessions = list_sessions(&conn, chat_id, eff_thread_id)
-        .await
-        .map_err(|e| other_err(format!("list: query: {:#}", e)))?;
+        .map_err(|e| other_err(format!("list: query: {e:#}")))?
+        .sessions;
 
     if sessions.is_empty() {
         bot.send_text(chat_id, "No sessions yet. Send a message to start one.")
@@ -681,7 +715,7 @@ pub(crate) async fn handle_list(ctx: &HandlerCtx, msg: &Message) -> Result<(), T
 }
 
 /// Format a session row as an HTML line for /list and /switch display.
-fn format_session_line(s: &super::session::SessionRow) -> String {
+fn format_session_line(s: &right_mcp::internal_db::SessionRowDto) -> String {
     let marker = if s.is_active { "●" } else { " " };
     let label = s.label.as_deref().unwrap_or("(unnamed)");
     let ago = format_relative_time(&s.last_used_at);
@@ -748,13 +782,24 @@ pub(crate) async fn handle_switch(
         return Ok(());
     }
 
-    let conn = right_db::open_connection(&agent_dir.0, false)
+    let matches = ctx
+        .internal_api
+        .0
+        .find_sessions_by_uuid(&right_mcp::internal_db::FindSessionsByUuidRequest {
+            agent: ctx
+                .agent_dir
+                .0
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_owned(),
+            chat_id,
+            thread_id: eff_thread_id,
+            uuid_prefix: uuid.clone(),
+        })
         .await
-        .map_err(|e| other_err(format!("switch: open DB: {:#}", e)))?;
-
-    let matches = find_sessions_by_uuid(&conn, chat_id, eff_thread_id, &uuid)
-        .await
-        .map_err(|e| other_err(format!("switch: query: {:#}", e)))?;
+        .map_err(|e| other_err(format!("switch: query: {e:#}")))?
+        .sessions;
 
     match matches.len() {
         0 => {
@@ -775,10 +820,20 @@ pub(crate) async fn handle_switch(
                 return Ok(());
             }
 
-            // activate_session atomically deactivates any other active session
-            activate_session(&conn, target.id)
+            ctx.internal_api
+                .0
+                .activate_session(&right_mcp::internal_db::ActivateSessionRequest {
+                    agent: ctx
+                        .agent_dir
+                        .0
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    session_id: target.id,
+                })
                 .await
-                .map_err(|e| other_err(format!("switch: activate: {:#}", e)))?;
+                .map_err(|e| other_err(format!("switch: activate: {e:#}")))?;
 
             ctx.worker_map.remove(&key);
 
@@ -1022,15 +1077,20 @@ pub(crate) async fn handle_cron(
     args: String,
 ) -> Result<(), TgError> {
     let bot = &ctx.bot;
-    let agent_dir = &ctx.agent_dir;
+    let agent = ctx
+        .agent_dir
+        .0
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
     if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "cron", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
     if args.trim().is_empty() {
-        handle_cron_list(bot, msg, &agent_dir.0).await
+        handle_cron_list(bot, msg, &ctx.internal_api.0, agent).await
     } else {
-        handle_cron_detail(bot, msg, args.trim(), &agent_dir.0).await
+        handle_cron_detail(bot, msg, args.trim(), &ctx.internal_api.0, agent).await
     }
 }
 
@@ -1038,15 +1098,16 @@ pub(crate) async fn handle_cron(
 async fn handle_cron_list(
     bot: &super::BotType,
     msg: &Message,
-    agent_dir: &Path,
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
 ) -> Result<(), TgError> {
-    let conn = right_db::open_connection(agent_dir, false)
+    let specs = client
+        .cron_specs_list(&right_mcp::internal_db::CronSpecsListRequest {
+            agent: agent.to_owned(),
+        })
         .await
-        .map_err(|e| other_err(format!("DB open failed: {e:#}")))?;
-
-    let specs = right_agent::cron_spec::load_specs_from_db(&conn)
-        .await
-        .map_err(|e| other_err(format!("load specs failed: {e:#}")))?;
+        .map_err(|e| other_err(format!("load specs failed: {e:#}")))?
+        .specs;
 
     if specs.is_empty() {
         bot.send_text(msg.chat.id, "No cron jobs configured.")
@@ -1055,23 +1116,26 @@ async fn handle_cron_list(
     }
 
     let mut text = String::from("Cron Jobs:\n\n");
-    let mut names: Vec<&String> = specs.keys().collect();
-    names.sort();
+    let mut specs = specs;
+    specs.sort_by(|a, b| a.job_name.cmp(&b.job_name));
 
-    for name in names {
-        let spec = &specs[name];
-        let desc = match &spec.schedule_kind {
-            right_agent::cron_spec::ScheduleKind::RunAt(dt) => {
-                html_escape(&format!("once at {}", dt.format("%Y-%m-%d %H:%M UTC")))
-            }
-            _ => html_escape(&right_agent::cron_spec::describe_schedule(
-                spec.schedule_kind.cron_schedule().unwrap_or(""),
-            )),
+    for spec in &specs {
+        let name = &spec.job_name;
+        let desc = if let Some(run_at) = &spec.run_at {
+            html_escape(&format!("once at {run_at}"))
+        } else {
+            html_escape(&right_agent::cron_spec::describe_schedule(&spec.schedule))
         };
 
-        let last_run = right_agent::cron_spec::get_recent_runs(&conn, name, 1)
+        let last_run = client
+            .cron_recent_runs(&right_mcp::internal_db::CronRecentRunsRequest {
+                agent: agent.to_owned(),
+                job_name: name.clone(),
+                limit: 1,
+            })
             .await
-            .map_err(|e| other_err(format!("get runs failed: {e:#}")))?;
+            .map_err(|e| other_err(format!("get runs failed: {e:#}")))?
+            .runs;
 
         let status_str = match last_run.first() {
             Some(run) => {
@@ -1097,15 +1161,17 @@ async fn handle_cron_detail(
     bot: &super::BotType,
     msg: &Message,
     job_name: &str,
-    agent_dir: &Path,
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
 ) -> Result<(), TgError> {
-    let conn = right_db::open_connection(agent_dir, false)
+    let detail = client
+        .cron_spec_detail(&right_mcp::internal_db::CronSpecDetailRequest {
+            agent: agent.to_owned(),
+            job_name: job_name.to_owned(),
+        })
         .await
-        .map_err(|e| other_err(format!("DB open failed: {e:#}")))?;
-
-    let detail = right_agent::cron_spec::get_spec_detail(&conn, job_name)
-        .await
-        .map_err(|e| other_err(format!("query failed: {e:#}")))?;
+        .map_err(|e| other_err(format!("query failed: {e:#}")))?
+        .detail;
 
     let Some(detail) = detail else {
         bot.send_text(msg.chat.id, &format!("Cron job '{job_name}' not found."))
@@ -1113,23 +1179,21 @@ async fn handle_cron_detail(
         return Ok(());
     };
 
-    let desc = html_escape(&right_agent::cron_spec::describe_schedule(&detail.schedule));
-    let schedule_escaped = html_escape(&detail.schedule);
+    let spec = &detail.spec;
+    let desc = html_escape(&right_agent::cron_spec::describe_schedule(&spec.schedule));
+    let schedule_escaped = html_escape(&spec.schedule);
     let mut text = format!(
         "<b>{}</b>\nSchedule: {} (<code>{}</code>)\nBudget: ${:.2}",
-        detail.job_name, desc, schedule_escaped, detail.max_budget_usd,
+        spec.job_name, desc, schedule_escaped, spec.max_budget_usd,
     );
-    if let Some(ref ttl) = detail.lock_ttl {
-        let ttl_escaped = html_escape(ttl);
-        text.push_str(&format!("\nLock TTL: {ttl_escaped}"));
+    if let Some(ttl) = &spec.lock_ttl {
+        text.push_str(&format!("\nLock TTL: {}", html_escape(ttl)));
     }
-    if detail.triggered_at.is_some() {
-        text.push_str("\n\u{26a1} Trigger pending");
+    if spec.triggered_at.is_some() {
+        text.push_str("\n⚡ Trigger pending");
     }
 
-    let runs = right_agent::cron_spec::get_recent_runs(&conn, job_name, 5)
-        .await
-        .map_err(|e| other_err(format!("get runs failed: {e:#}")))?;
+    let runs = detail.recent_runs;
 
     if runs.is_empty() {
         text.push_str("\n\nNo runs yet.");

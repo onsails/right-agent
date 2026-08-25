@@ -178,24 +178,18 @@ pub(crate) async fn handle_get(
             Some("invalid conversation focus scope"),
         );
     }
-    let conn = match right_db::open_connection_readonly(&state.agent_dir).await {
-        Ok(conn) => conn,
-        Err(error) => {
-            tracing::error!(agent = %state.agent_name, "focus get: open db failed: {error:#}");
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_open_failed",
-                Some("failed to open database"),
-            );
-        }
+    let request = right_mcp::internal_db::ThreadFocusGetRequest {
+        agent: state.agent_name.clone(),
+        chat_id: scope.chat_id,
+        thread_id: scope.thread_id,
     };
-    match right_db::thread_focus::get(&conn, scope.chat_id, scope.thread_id).await {
-        Ok(row) => Json(serde_json::json!({
-            "operator_focus": row.and_then(|r| r.operator_focus),
+    match state.internal_client.thread_focus_get(&request).await {
+        Ok(response) => Json(serde_json::json!({
+            "operator_focus": response.focus.and_then(|focus| focus.operator_focus),
         }))
         .into_response(),
         Err(error) => {
-            tracing::error!(agent = %state.agent_name, "focus get: query failed: {error:#}");
+            tracing::error!(agent = %state.agent_name, "focus get: owner read failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "focus_read_failed",
@@ -244,21 +238,18 @@ pub(crate) async fn handle_update(
     } else {
         Some(trimmed)
     };
-    let conn = match right_db::open_connection(&state.agent_dir, false).await {
-        Ok(conn) => conn,
-        Err(error) => {
-            tracing::error!(agent = %state.agent_name, "focus update: open db failed: {error:#}");
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_open_failed",
-                Some("failed to open database"),
-            );
-        }
+    let request = right_mcp::internal_db::ThreadFocusSetOperatorRequest {
+        agent: state.agent_name.clone(),
+        chat_id: req.chat_id,
+        thread_id: req.thread_id,
+        value: value.map(str::to_owned),
     };
-    if let Err(error) =
-        right_db::thread_focus::set_operator(&conn, req.chat_id, req.thread_id, value).await
+    if let Err(error) = state
+        .internal_client
+        .thread_focus_set_operator(&request)
+        .await
     {
-        tracing::error!(agent = %state.agent_name, "focus update: write failed: {error:#}");
+        tracing::error!(agent = %state.agent_name, "focus update: owner write failed: {error:#}");
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "focus_write_failed",

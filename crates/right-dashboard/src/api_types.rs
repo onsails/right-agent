@@ -521,7 +521,7 @@ impl SkillSummary {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SkillSpendAgg {
     pub learn_cost_usd: f64,
     pub fix_cost_usd: f64,
@@ -673,7 +673,7 @@ pub struct SandboxProcess {
     pub command: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillLifecycleOverviewResponse {
     pub agent: String,
     pub total_active: i64,
@@ -688,7 +688,7 @@ pub struct SkillLifecycleOverviewResponse {
     pub recently_used: Vec<RecentSkill>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecentSkill {
     pub package_name: String,
     pub use_count: u64,

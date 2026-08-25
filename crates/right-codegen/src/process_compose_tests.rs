@@ -466,6 +466,10 @@ fn right_mcp_server_process_included_when_token_map_provided() {
     assert!(yaml.contains("mcp-server"), "must run mcp-server command");
     assert!(yaml.contains("--port 8100"), "must specify port");
     assert!(
+        yaml.contains("right-mcp-server:") && yaml.contains("timeout_seconds: 30"),
+        "aggregator shutdown must budget listener stop plus owner drain: {yaml}"
+    );
+    assert!(
         yaml.contains("depends_on:"),
         "bot must depend on mcp server"
     );

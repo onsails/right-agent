@@ -21,14 +21,15 @@ use crate::spec::SandboxSpec;
 
 /// Guest image every Agent Sandbox boots from.
 ///
-/// A stock OCI image: Right maintains no image and no base snapshot, so the
-/// guest toolchain is installed imperatively after create.
+/// A stock OCI image. Right does not run package-manager or installer
+/// downloads during startup: restrictive egress is create-time state and
+/// existing sandboxes cannot adopt newly allowlisted download hosts in place.
 pub const DEFAULT_SANDBOX_IMAGE: &str = "node:22-slim";
 
 /// Unprivileged guest user the agent's `claude` runs as.
 ///
-/// Provisioning runs as root and then `chmod a-w`s `/sandbox/.platform`, which
-/// only means anything because the agent itself is not root.
+/// Provisioning makes the `.platform` entry root-owned and read-only, but its
+/// guest-owned `/sandbox` parent means this is not an authoritative root path.
 pub const GUEST_USER: &str = "sandbox";
 
 /// The agent's home inside the guest, and the working directory every exec
@@ -50,8 +51,9 @@ const RESTRICTIVE_EGRESS_ALLOW: &[&str] = &[
 /// Translate an agent's declared network policy into a typed egress value.
 ///
 /// Egress is create-time only — the SDK cannot change network policy on a
-/// running sandbox — so changing this in `agent.yaml` needs a sandbox
-/// recreate.
+/// running sandbox. Startup provisioning must therefore work without adding
+/// public hosts here; otherwise existing restrictive sandboxes would require
+/// recreation to start.
 pub fn egress_for(network_policy: NetworkPolicy) -> Egress {
     match network_policy {
         NetworkPolicy::Permissive => Egress::Permissive,
@@ -124,6 +126,20 @@ mod tests {
             !allow.iter().any(|domain| domain.starts_with("*.")),
             "entries are domain suffixes, not globs: {allow:?}"
         );
+    }
+
+    #[test]
+    fn restrictive_policy_does_not_open_package_download_hosts() {
+        let Egress::Restrictive { allow } = egress_for(NetworkPolicy::Restrictive) else {
+            panic!("restrictive policy must produce restrictive egress");
+        };
+
+        for host in ["deb.debian.org", "security.debian.org", "bun.sh"] {
+            assert!(
+                !allow.iter().any(|suffix| host.ends_with(suffix)),
+                "startup provisioning must not depend on guest access to {host}: {allow:?}"
+            );
+        }
     }
 
     #[test]

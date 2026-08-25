@@ -25,7 +25,7 @@ MCP OAuth tokens and HTTP header secrets are stored per-agent in the host-side S
 Third-party API credentials (provider keys such as `GITHUB_TOKEN`) are held in the host-side store `~/.right/providers.db` (mode 0600), never in the sandbox. The guest receives only an opaque placeholder env var (`$MSB_<NAME>`); the real value is substituted into outbound requests on the intercepted connection. Two consequences for the threat model:
 
 - **No exfiltration to the open internet.** A compromised agent cannot read the credential — it only ever holds the placeholder. TLS interception is a bypass deny-list: Anthropic's hosts are never intercepted, and a request to any bypassed host is forwarded verbatim, so the inert placeholder is what reaches it.
-- **Substitution is not provider-scoped (known limitation).** A placeholder is resolved by environment-variable name on any intercepted destination in that binding's allowed-host set — not only the owning provider's host. An agent with two or more credentialed providers attached could therefore route one provider's token to another provider's host. The exposure is bounded (only the operator can attach providers and MCP servers). Tracked in [#92](https://github.com/onsails/right-agent/issues/92).
+- **Cross-provider substitution is impossible.** A placeholder is substituted only on a connection whose destination matches that binding's allowed hosts (matched per-connection by TLS SNI). A compromised agent that tries to send one provider's placeholder to another provider's host does not get the credential injected — the connection is dropped before any value is written. So an agent holding several providers cannot route one provider's token to another provider's host.
 
 ## Network Policy
 

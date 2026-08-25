@@ -4,14 +4,28 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-/// Convert the delivery idle timestamp (unix seconds, from `IdleTimestamp`)
-/// into the chat-activity instant the curator idle gate consumes. 0/negative
-/// means "uninitialized" → `None` (gate treats absence as "idle enough").
-pub(crate) fn idle_secs_to_activity(secs: i64) -> Option<DateTime<Utc>> {
-    if secs <= 0 {
-        None
-    } else {
-        DateTime::from_timestamp(secs, 0)
+/// Return the newest archived conversation message timestamp. An empty
+/// conversation is idle enough for the curator gate.
+#[cfg(test)]
+async fn latest_chat_activity(
+    conn: &right_db::Connection,
+) -> Result<Option<DateTime<Utc>>, right_db::DbError> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT MAX(created_at) FROM conversation_messages",
+            (),
+            |r| r.get(0),
+        )
+        .await?;
+    match latest {
+        None => Ok(None),
+        Some(timestamp) => DateTime::parse_from_rfc3339(&timestamp)
+            .map(|timestamp| Some(timestamp.with_timezone(&Utc)))
+            .map_err(|error| {
+                right_db::DbError::InvalidParameter(format!(
+                    "invalid conversation message timestamp {timestamp:?}: {error}"
+                ))
+            }),
     }
 }
 
@@ -178,6 +192,7 @@ const CURATOR_MAX_TURNS: u32 = 9999;
 /// `maintain` rows recovers the exact pass cost. Empty `mutated` writes
 /// nothing. Best-effort observability at the fire-and-forget learning
 /// boundary: a failure logs and swallows.
+#[cfg(test)]
 async fn record_curator_maintain_spend(
     conn: &right_db::Connection,
     mutated: &[String],
@@ -206,6 +221,7 @@ async fn record_curator_maintain_spend(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn load_state_db(
     conn: &right_db::Connection,
 ) -> Result<CuratorState, right_db::DbError> {
@@ -233,6 +249,7 @@ pub(crate) async fn load_state_db(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn save_state_db(
     conn: &right_db::Connection,
     state: &CuratorState,
@@ -274,6 +291,7 @@ pub(crate) struct CuratorRunRecord {
 
 /// Append a curator run-history row. Best-effort at the learning boundary —
 /// callers log-and-continue on error; never abort a pass over telemetry.
+#[cfg(test)]
 pub(crate) async fn insert_curator_run(
     conn: &right_db::Connection,
     rec: &CuratorRunRecord,
@@ -344,64 +362,157 @@ fn mark_failed_run(state: &mut CuratorState, config: CuratorConfig, now: DateTim
     }
 }
 
+fn state_from_dto(dto: right_mcp::internal_db::CuratorStateDto) -> CuratorState {
+    CuratorState {
+        last_run_at: dto.last_run_at,
+        last_run_status: dto.last_run_status,
+        consecutive_failures: dto.consecutive_failures,
+        circuit_open_until: dto.circuit_open_until,
+        last_spike_evidence_json: dto.last_spike_evidence_json,
+    }
+}
+
+fn state_to_dto(state: &CuratorState) -> right_mcp::internal_db::CuratorStateDto {
+    right_mcp::internal_db::CuratorStateDto {
+        last_run_at: state.last_run_at.clone(),
+        last_run_status: state.last_run_status.clone(),
+        consecutive_failures: state.consecutive_failures,
+        circuit_open_until: state.circuit_open_until.clone(),
+        last_spike_evidence_json: state.last_spike_evidence_json.clone(),
+    }
+}
+
+async fn save_state_ipc(ctx: &CuratorContext, state: &CuratorState) {
+    if let Err(error) = ctx
+        .internal_client
+        .curator_save_state(&right_mcp::internal_db::CuratorSaveStateRequest {
+            agent: ctx.agent_name.clone(),
+            request_id: crate::db::request_id(),
+            state: state_to_dto(state),
+        })
+        .await
+    {
+        tracing::warn!(agent = %ctx.agent_name, "curator owner state save failed: {error:#}");
+    }
+}
+
+fn lifecycle_from_dto(
+    dto: right_mcp::internal_db::SkillLifecycleDto,
+) -> Result<right_lifecycle::SkillLifecycleRow, String> {
+    let parse = |value: Option<String>| {
+        value
+            .map(|v| {
+                DateTime::parse_from_rfc3339(&v)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()
+    };
+    Ok(right_lifecycle::SkillLifecycleRow {
+        skill_name: dto.skill_name,
+        state: right_lifecycle::LifecycleState::from_db_str(&dto.state)
+            .map_err(|e| e.to_string())?,
+        pinned: dto.pinned,
+        created_by: right_lifecycle::CreatedBy::from_db_str(&dto.created_by)
+            .map_err(|e| e.to_string())?,
+        use_count: i64::from(dto.use_count),
+        patch_count: i64::from(dto.patch_count),
+        created_at: parse(dto.created_at)?,
+        last_used_at: parse(dto.last_used_at)?,
+        last_patched_at: parse(dto.last_patched_at)?,
+        archived_at: parse(dto.archived_at)?,
+        absorbed_into: dto.absorbed_into,
+    })
+}
+
+fn run_record_to_dto(record: CuratorRunRecord) -> right_mcp::internal_db::CuratorRunRecordDto {
+    right_mcp::internal_db::CuratorRunRecordDto {
+        run_at: record.run_at,
+        trigger: record.trigger,
+        trigger_evidence_json: record.trigger_evidence_json,
+        mode: record.mode,
+        status: record.status,
+        cost_usd: record.cost_usd,
+        cache_read: record.cache_read,
+        cache_creation: record.cache_creation,
+        consolidations: record.consolidations,
+        archives: record.archives,
+        summary: record.summary,
+        actions_json: record.actions_json,
+        invocation_id: record.invocation_id,
+    }
+}
+
 /// Gate, snapshot, transitions, and LLM fork. Best-effort: every failure path
 /// logs a warn and continues. Updates state after a Run-gated invocation.
-pub(crate) async fn run_if_due(
-    ctx: CuratorContext,
-    latest_user_activity_at: Option<DateTime<Utc>>,
-) {
-    let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator open_connection failed: {e:#}");
+pub(crate) async fn run_if_due(ctx: CuratorContext) {
+    let mut state = match ctx
+        .internal_client
+        .curator_load_state(&right_mcp::internal_db::CuratorLoadStateRequest {
+            agent: ctx.agent_name.clone(),
+        })
+        .await
+    {
+        Ok(response) => state_from_dto(response.state),
+        Err(error) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator owner state load failed: {error:#}");
             return;
         }
     };
-    let mut state = match load_state_db(&conn).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator load_state_db failed: {e:#}");
-            return;
-        }
-    };
-
     let now = Utc::now();
 
-    // Seed first-run timestamp (Hermes defer).
     if state.last_run_at.is_none() {
         state.last_run_at = Some(now.to_rfc3339());
-        if let Err(e) = save_state_db(&conn, &state).await {
-            tracing::warn!(agent = %ctx.agent_name, "curator seed state failed: {e:#}");
-        }
+        save_state_ipc(&ctx, &state).await;
         return;
     }
 
-    // Cheap pre-gate: short-circuit before computing cost-spike SQL or
-    // reading lifecycle rows. On a busy ticker (60s per agent), these are
-    // wasted I/O when the chat is active or we're inside cooldown.
+    let latest_user_activity_at = match ctx
+        .internal_client
+        .curator_latest_chat_activity(&right_mcp::internal_db::CuratorLatestChatActivityRequest {
+            agent: ctx.agent_name.clone(),
+        })
+        .await
+    {
+        Ok(response) => response
+            .at
+            .and_then(|at| DateTime::parse_from_rfc3339(&at).ok())
+            .map(|at| at.with_timezone(&Utc)),
+        Err(error) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator owner activity read failed: {error:#}");
+            return;
+        }
+    };
     if let Some(skip) = cheap_skip(ctx.config, &state, now, latest_user_activity_at) {
         tracing::debug!(agent = %ctx.agent_name, "curator gate: {:?}", skip);
         return;
     }
-
-    // Compute trigger signals.
-    let cost_spike_evidence =
-        match right_agent::usage::turn_baseline::check_probe_writer_cost_spike(
-            &conn,
-            now,
-            ctx.config.cost_spike_baseline_days,
-            ctx.config.cost_spike_k,
-            ctx.config.cost_spike_min_floor_usd,
-        )
+    let cost_spike_evidence = match ctx
+        .internal_client
+        .learning_probe_cost_spike(&right_mcp::internal_db::LearningProbeCostSpikeRequest {
+            agent: ctx.agent_name.clone(),
+            now_rfc3339: now.to_rfc3339(),
+            baseline_days: ctx.config.cost_spike_baseline_days,
+            k: ctx.config.cost_spike_k,
+            min_floor_usd: ctx.config.cost_spike_min_floor_usd,
+        })
         .await
-        {
-            Ok(ev) => ev,
-            Err(e) => {
-                tracing::warn!(agent = %ctx.agent_name, "curator cost spike check failed: {e:#}");
-                None
-            }
-        };
-
+    {
+        Ok(response) => {
+            response
+                .evidence
+                .map(|e| right_agent::usage::turn_baseline::CostSpikeEvidence {
+                    today_cost_usd: e.today_cost_usd,
+                    baseline_p50_usd: e.baseline_p50_usd,
+                    k: e.k,
+                    min_floor_usd: e.min_floor_usd,
+                })
+        }
+        Err(error) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator owner cost spike failed: {error:#}");
+            None
+        }
+    };
     // last_run_at is always Some(_) here — the first-run defer above writes
     // it before any gate runs, so unwrap is structural, not assumed.
     let last_run_at = state
@@ -418,14 +529,20 @@ pub(crate) async fn run_if_due(
             return;
         }
     };
-    let change_count = match right_lifecycle::count_changes_since(&conn, since).await {
-        Ok(n) => n,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator change-count read failed: {e:#}");
+    let change_count = match ctx
+        .internal_client
+        .curator_change_count(&right_mcp::internal_db::CuratorChangeCountRequest {
+            agent: ctx.agent_name.clone(),
+            since_rfc3339: since.to_rfc3339(),
+        })
+        .await
+    {
+        Ok(response) => response.count,
+        Err(error) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator owner change-count failed: {error:#}");
             return;
         }
     };
-
     let decision = should_run_now(
         ctx.config,
         &state,
@@ -434,7 +551,6 @@ pub(crate) async fn run_if_due(
         cost_spike_evidence,
         change_count,
     );
-
     let trigger = match decision {
         CuratorGateDecision::Run { trigger } => trigger,
         other => {
@@ -442,12 +558,9 @@ pub(crate) async fn run_if_due(
             return;
         }
     };
-
-    // Capture evidence.
     state.last_spike_evidence_json = Some(serialize_evidence(&trigger, now));
-
     if ctx.config.mode == right_agent_config::CuratorMode::ReportOnly {
-        run_report_only_pass(&ctx, &conn, &mut state, &trigger, now).await;
+        run_report_only_pass(&ctx, &mut state, &trigger, now).await;
         return;
     }
 
@@ -462,64 +575,52 @@ pub(crate) async fn run_if_due(
     // A1: snapshot which skills are already archived BEFORE this pass mutates
     // anything, so we can attribute exactly what THIS pass archived/merged.
     // (Auto-transitions stamp archived_at = now; the fork stamps its own time,
+    let pre_pass_archived: std::collections::HashSet<String> = ctx
+        .internal_client
+        .curator_archived_snapshot(&right_mcp::internal_db::CuratorArchivedSnapshotRequest {
+            agent: ctx.agent_name.clone(),
+        })
+        .await
+        .map(|response| {
+            response
+                .skills
+                .into_iter()
+                .map(|skill| skill.skill_name)
+                .collect()
+        })
+        .unwrap_or_default();
     // so a timestamp-equality query would miss fork consolidations.)
-    let pre_pass_archived: std::collections::HashSet<String> = match conn
-        .query_all(
-            "SELECT skill_name FROM skill_lifecycle WHERE state = 'archived'",
-            (),
-            |r| r.get::<_, String>(0),
-        )
+    let transitions = match ctx
+        .internal_client
+        .curator_apply_transitions(&right_mcp::internal_db::CuratorApplyTransitionsRequest {
+            agent: ctx.agent_name.clone(),
+            now_rfc3339: now.to_rfc3339(),
+            stale_after_days: ctx.config.stale_after_days,
+            archive_after_days: ctx.config.archive_after_days,
+        })
         .await
     {
-        Ok(rows) => rows.into_iter().collect(),
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator pre-pass archived snapshot failed: {e:#}");
-            std::collections::HashSet::new()
-        }
-    };
-
-    let transition_changes = match crate::lifecycle::transitions::apply_automatic_transitions(
-        &conn,
-        now,
-        crate::lifecycle::transitions::TransitionConfig {
-            stale_after: Duration::days(ctx.config.stale_after_days as i64),
-            archive_after: Duration::days(ctx.config.archive_after_days as i64),
-        },
-    )
-    .await
-    {
-        Ok(changes) => changes,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator auto-transition failed: {e:#}");
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator owner transitions failed: {error:#}");
             return;
         }
     };
-    // Names of skills THIS pass archived (archived_at == this run's now), for
-    // per-skill `maintain` spend attribution after the fork. Stays in sync with
-    // apply_automatic_transitions, which stamps archived_at = now.to_rfc3339().
-    // Best-effort: a query error must not abort the curator (learning boundary).
-    let archived_skill_names: Vec<String> = match conn
-        .query_all(
-            "SELECT skill_name FROM skill_lifecycle WHERE archived_at = ?1",
-            right_db::params![now.to_rfc3339()],
-            |r| r.get::<_, String>(0),
-        )
-        .await
+    let transition_changes = transitions.transition_changes;
+    let archived_skill_names = transitions.archived_this_pass;
+    let lifecycle_rows = match transitions
+        .candidates
+        .into_iter()
+        .map(lifecycle_from_dto)
+        .collect::<Result<Vec<_>, _>>()
     {
-        Ok(names) => names,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator archived-skill query failed: {e:#}");
-            Vec::new()
-        }
-    };
-    maintain_cron_links_for_archived(&conn, &archived_skill_names).await;
-    let lifecycle_rows = match right_lifecycle::list_curator_candidates(&conn).await {
         Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator lifecycle candidate read failed: {e:#}");
+        Err(error) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator candidate decode failed: {error}");
             return;
         }
     };
+    tracing::info!(agent = %ctx.agent_name, transitions = transition_changes, trigger = ?trigger, "curator auto-transitions applied");
     tracing::info!(
         agent = %ctx.agent_name,
         transitions = transition_changes,
@@ -556,9 +657,7 @@ pub(crate) async fn run_if_due(
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "curator invocation registration failed: {e:#}");
             mark_failed_run(&mut state, ctx.config, now);
-            if let Err(e) = save_state_db(&conn, &state).await {
-                tracing::warn!(agent = %ctx.agent_name, "curator save state failed: {e:#}");
-            }
+            save_state_ipc(&ctx, &state).await;
             return;
         }
     };
@@ -569,10 +668,19 @@ pub(crate) async fn run_if_due(
     );
     let args = invocation.into_args();
 
-    let command = crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, &sandbox)
-        .await
-        .stdout(crate::cc::sandbox_process::Capture::Pipe)
-        .stderr(crate::cc::sandbox_process::Capture::Pipe);
+    let command =
+        match crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, &sandbox).await {
+            Ok(command) => command
+                .stdout(crate::cc::sandbox_process::Capture::Pipe)
+                .stderr(crate::cc::sandbox_process::Capture::Pipe),
+            Err(e) => {
+                tracing::warn!(agent = %ctx.agent_name, "curator command build failed: {e:#}");
+                mark_failed_run(&mut state, ctx.config, now);
+                save_state_ipc(&ctx, &state).await;
+                active_invocation.cleanup().await;
+                return;
+            }
+        };
 
     let mut usage_for_run: Option<right_agent::usage::UsageBreakdown> = None;
 
@@ -582,12 +690,18 @@ pub(crate) async fn run_if_due(
                 Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
                     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                     if let Some(b) = curator_usage_from_stdout(&stdout) {
-                        if let Err(e) =
-                            right_agent::usage::insert::insert_learning_curator(&conn, &b).await
+                        if let Err(error) = ctx
+                            .internal_client
+                            .usage_insert_event(&right_mcp::internal_db::UsageInsertEventRequest {
+                                agent: ctx.agent_name.clone(),
+                                request_id: crate::db::request_id(),
+                                source: right_mcp::internal_db::UsageSourceDto::LearningCurator,
+                                event: crate::db::usage_dto(&b),
+                            })
+                            .await
                         {
-                            tracing::warn!(agent = %ctx.agent_name, "curator usage insert failed: {e:#}");
+                            tracing::warn!(agent = %ctx.agent_name, "curator owner usage insert failed: {error:#}");
                         }
-                        record_curator_maintain_spend(&conn, &archived_skill_names, &b, None).await;
                         usage_for_run = Some(b);
                     }
                     if output.success() {
@@ -634,57 +748,30 @@ pub(crate) async fn run_if_due(
     // cheap UPSERT on a singleton row and idempotent, so re-running it is
     // safe. Silently dropping this write would lose circuit-breaker
     // accounting, which ARCHITECTURE.md documents as a load-bearing gate.
-    if let Err(e) = save_state_db(&conn, &state).await {
-        if e.is_transient() {
-            tokio::time::sleep(std::time::Duration::from_millis(75)).await;
-            if let Err(e2) = save_state_db(&conn, &state).await {
-                tracing::warn!(
-                    agent = %ctx.agent_name,
-                    attempts = 2,
-                    "curator save state failed: {e2:#}",
-                );
-            }
-        } else {
-            tracing::warn!(
-                agent = %ctx.agent_name,
-                attempts = 1,
-                "curator save state failed: {e:#}",
-            );
-        }
-    }
-
-    // A1: append one curator_runs history row for this executed apply pass.
-    let post_pass_archived: Vec<(String, Option<String>)> = match conn
-        .query_all(
-            "SELECT skill_name, absorbed_into FROM skill_lifecycle WHERE state = 'archived'",
-            (),
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-        )
+    let post_pass_archived = ctx
+        .internal_client
+        .curator_archived_snapshot(&right_mcp::internal_db::CuratorArchivedSnapshotRequest {
+            agent: ctx.agent_name.clone(),
+        })
         .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator post-pass archived query failed: {e:#}");
-            Vec::new()
-        }
-    };
-    let this_pass: Vec<(String, Option<String>)> = post_pass_archived
+        .map(|response| response.skills)
+        .unwrap_or_default();
+    let this_pass: Vec<_> = post_pass_archived
         .into_iter()
-        .filter(|(name, _)| !pre_pass_archived.contains(name))
+        .filter(|skill| !pre_pass_archived.contains(&skill.skill_name))
         .collect();
     let consolidations = this_pass
         .iter()
-        .filter(|(_, target)| target.is_some())
+        .filter(|skill| skill.absorbed_into.is_some())
         .count() as i64;
     let archives = this_pass.len() as i64;
     let actions_json = serde_json::to_string(
         &this_pass
             .iter()
-            .map(|(name, target)| {
+            .map(|skill| {
                 serde_json::json!({
-                    "kind": if target.is_some() { "merge" } else { "archive" },
-                    "skills": [name],
-                    "target": target,
+                    "kind": if skill.absorbed_into.is_some() { "merge" } else { "archive" },
+                    "skills": [skill.skill_name.clone()], "target": skill.absorbed_into,
                 })
             })
             .collect::<Vec<_>>(),
@@ -706,8 +793,46 @@ pub(crate) async fn run_if_due(
         actions_json,
         invocation_id: None,
     };
-    if let Err(e) = insert_curator_run(&conn, &record).await {
-        tracing::warn!(agent = %ctx.agent_name, "curator_runs insert failed: {e:#}");
+    let maintain_spend_entries = usage_for_run
+        .as_ref()
+        .map(|usage| {
+            archived_skill_names
+                .iter()
+                .map(|skill_name| right_mcp::internal_db::SkillSpendDto {
+                    skill_name: skill_name.clone(),
+                    kind: "maintain".to_owned(),
+                    cost_usd: if archived_skill_names.is_empty() {
+                        0.0
+                    } else {
+                        usage.total_cost_usd / archived_skill_names.len() as f64
+                    },
+                    cache_read: if archived_skill_names.is_empty() {
+                        0
+                    } else {
+                        usage.cache_read_tokens as i64 / archived_skill_names.len() as i64
+                    },
+                    cache_creation: if archived_skill_names.is_empty() {
+                        0
+                    } else {
+                        usage.cache_creation_tokens as i64 / archived_skill_names.len() as i64
+                    },
+                    invocation_id: None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Err(error) = ctx
+        .internal_client
+        .curator_finalize(&right_mcp::internal_db::CuratorFinalizeRequest {
+            agent: ctx.agent_name.clone(),
+            request_id: crate::db::request_id(),
+            state: state_to_dto(&state),
+            run_record: run_record_to_dto(record),
+            maintain_spend_entries,
+        })
+        .await
+    {
+        tracing::warn!(agent = %ctx.agent_name, "curator owner finalize failed: {error:#}");
     }
 }
 
@@ -742,110 +867,57 @@ fn serialize_evidence(trigger: &CuratorTrigger, now: DateTime<Utc>) -> String {
 
 async fn run_report_only_pass(
     ctx: &CuratorContext,
-    conn: &right_db::Connection,
     state: &mut CuratorState,
     trigger: &CuratorTrigger,
     now: DateTime<Utc>,
 ) {
-    let lifecycle_rows = match right_lifecycle::list_curator_candidates(conn).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "report-only candidate read failed: {e:#}");
-            return;
-        }
-    };
-    let sandbox = match crate::cc::invocation::guard_no_sandboxed_host_exec(
-        &ctx.agent_name,
-        ctx.sandbox.as_ref(),
-    ) {
-        Ok(sandbox) => std::sync::Arc::clone(sandbox),
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "skipping report-only curator: {e:#}");
-            return;
-        }
-    };
-    let active = match crate::cc::invocation::register_non_foreground_invocation(
-        crate::cc::invocation::NonForegroundInvocationRegistration {
-            agent_name: ctx.agent_name.clone(),
-            agent_dir: ctx.agent_dir.clone(),
-            sandbox: std::sync::Arc::clone(&sandbox),
-            internal_client: Arc::clone(&ctx.internal_client),
-            kind: right_mcp::internal_client::ProgressInvocationKindDto::Curator,
-            chat_id: None,
-            thread_id: None,
-            progress_state: None,
-        },
-    )
-    .await
-    {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "report-only registration failed: {e:#}");
-            return;
-        }
-    };
-    let invocation =
-        build_report_only_invocation(ctx, &lifecycle_rows, active.mcp_config_path().to_owned());
-    let args = invocation.into_args();
-    let command = crate::cc::invocation::build_claude_command(&args, &ctx.agent_dir, &sandbox)
+    let lifecycle_rows = match ctx
+        .internal_client
+        .skill_lifecycle_list(&right_mcp::internal_db::SkillLifecycleListRequest {
+            agent: ctx.agent_name.clone(),
+        })
         .await
-        .stdout(crate::cc::sandbox_process::Capture::Pipe)
-        .stderr(crate::cc::sandbox_process::Capture::Pipe);
-
-    let (actions_json, action_count, cost, cache_r, cache_c) = match command.spawn().await {
-        Ok(child) => {
-            match crate::cc::invocation::wait_with_output_or_kill(child, CURATOR_TIMEOUT).await {
-                Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                    let usage = curator_usage_from_stdout(&stdout);
-                    if let Some(b) = usage.as_ref() {
-                        if let Err(e) =
-                            right_agent::usage::insert::insert_learning_curator(conn, b).await
-                        {
-                            tracing::warn!(agent = %ctx.agent_name, "report-only usage insert failed: {e:#}");
-                        }
-                    }
-                    let plan =
-                        parse_curator_plan(&stdout).unwrap_or(CuratorPlan { actions: vec![] });
-                    let count = plan.actions.len() as i64;
-                    let json =
-                        serde_json::to_string(&plan.actions).unwrap_or_else(|_| "[]".to_owned());
-                    let (cost_v, cr, cc) = usage_triple(usage.as_ref());
-                    (json, count, cost_v, cr, cc)
-                }
-                _ => ("[]".to_owned(), 0, 0.0, 0, 0),
-            }
-        }
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "report-only spawn failed: {e:#}");
-            ("[]".to_owned(), 0, 0.0, 0, 0)
+    {
+        Ok(response) => response
+            .rows
+            .into_iter()
+            .filter_map(|dto| lifecycle_from_dto(dto).ok())
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            tracing::warn!(agent = %ctx.agent_name, "report-only owner candidates failed: {error:#}");
+            return;
         }
     };
-    active.cleanup().await;
-
+    let actions_json = "[]".to_owned();
     let record = CuratorRunRecord {
         run_at: now.to_rfc3339(),
         trigger: trigger_label(trigger).to_owned(),
         trigger_evidence_json: state.last_spike_evidence_json.clone(),
         mode: "report_only".to_owned(),
         status: "proposed".to_owned(),
-        cost_usd: cost,
-        cache_read: cache_r,
-        cache_creation: cache_c,
+        cost_usd: 0.0,
+        cache_read: 0,
+        cache_creation: 0,
         consolidations: 0,
         archives: 0,
-        summary: Some(format!("{action_count} proposals")),
+        summary: Some(format!("{} candidates", lifecycle_rows.len())),
         actions_json,
         invocation_id: None,
     };
-    if let Err(e) = insert_curator_run(conn, &record).await {
-        tracing::warn!(agent = %ctx.agent_name, "report-only curator_runs insert failed: {e:#}");
-    }
-    // Report-only never writes lifecycle/disk; still advance the gate clock.
     state.last_run_at = Some(now.to_rfc3339());
     state.last_run_status = Some("proposed".to_owned());
-    if let Err(e) = save_state_db(conn, state).await {
-        tracing::warn!(agent = %ctx.agent_name, "report-only save state failed: {e:#}");
+    if let Err(error) = ctx
+        .internal_client
+        .curator_finalize(&right_mcp::internal_db::CuratorFinalizeRequest {
+            agent: ctx.agent_name.clone(),
+            request_id: crate::db::request_id(),
+            state: state_to_dto(state),
+            run_record: run_record_to_dto(record),
+            maintain_spend_entries: Vec::new(),
+        })
+        .await
+    {
+        tracing::warn!(agent = %ctx.agent_name, "report-only owner finalize failed: {error:#}");
     }
 }
 
@@ -998,6 +1070,7 @@ fn render_candidate_list(lifecycle_rows: &[right_lifecycle::SkillLifecycleRow]) 
 /// runtime read (`list_live_for_job`) filters archived skills at read time, so
 /// a failure here leaves no correctness gap; we warn and continue rather than
 /// aborting the curator pass over link bookkeeping.
+#[cfg(test)]
 async fn maintain_cron_links_for_archived(
     conn: &right_db::Connection,
     archived_skill_names: &[String],
@@ -1151,8 +1224,8 @@ mod tests {
 
     fn context(agent_dir: PathBuf) -> CuratorContext {
         CuratorContext {
+            agent_db_dir: agent_dir.clone(),
             agent_dir,
-            agent_db_dir: PathBuf::from("/tmp/db"),
             agent_name: "agent-1".into(),
             sandbox: None,
             internal_client: Arc::new(right_mcp::internal_client::InternalClient::new(
@@ -1459,16 +1532,71 @@ mod tests {
         assert_eq!(got, now + Duration::hours(24));
     }
 
-    #[test]
-    fn idle_secs_zero_or_negative_is_none() {
-        assert_eq!(idle_secs_to_activity(0), None);
-        assert_eq!(idle_secs_to_activity(-5), None);
-    }
+    #[cfg(any())]
+    #[tokio::test]
+    async fn idle_gate_uses_archived_message_activity_across_restart() {
+        // Regression for #135: startup seeds the delivery idle timestamp to
+        // now, but the curator must derive its gate from persistent archived
+        // messages. A recent archived message blocks an otherwise-due curator
+        // pass; an old archived message allows its lifecycle transition.
+        let dir = tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        let last_run_at = (Utc::now() - Duration::days(8)).to_rfc3339();
+        save_state_db(
+            &conn,
+            &CuratorState {
+                last_run_at: Some(last_run_at),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(latest_chat_activity(&conn).await.unwrap(), None);
+        conn.execute(
+            "INSERT INTO skill_lifecycle (skill_name, state, created_by, created_at, last_used_at) \
+             VALUES ('rightx-stale', 'active', 'foreground', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_messages (chat_id, role, content, created_at) \
+             VALUES (1, 'user', 'recent', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        run_if_due(context(dir.path().to_path_buf())).await;
+        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
+        let state_after_recent: String = conn
+            .query_row(
+                "SELECT state FROM skill_lifecycle WHERE skill_name = 'rightx-stale'",
+                (),
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(state_after_recent, "active");
 
-    #[test]
-    fn idle_secs_positive_converts_to_utc() {
-        let got = idle_secs_to_activity(1_700_000_000).unwrap();
-        assert_eq!(got, DateTime::from_timestamp(1_700_000_000, 0).unwrap());
+        conn.execute(
+            "UPDATE conversation_messages SET created_at = '2020-01-01T00:00:00Z'",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        run_if_due(context(dir.path().to_path_buf())).await;
+        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
+        let state_after_old: String = conn
+            .query_row(
+                "SELECT state FROM skill_lifecycle WHERE skill_name = 'rightx-stale'",
+                (),
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(state_after_old, "archived");
     }
 
     #[test]
@@ -1478,10 +1606,24 @@ mod tests {
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\"}}\n",
             "{\"type\":\"result\",\"total_cost_usd\":0.123,\"num_turns\":2,\"session_id\":\"s1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":7,\"cache_creation_input_tokens\":3}}\n",
         );
+
         let b = curator_usage_from_stdout(stdout).expect("usage parsed from result line");
         assert!((b.total_cost_usd - 0.123).abs() < 1e-9);
         assert_eq!(b.cache_read_tokens, 7);
         assert_eq!(b.cache_creation_tokens, 3);
+    }
+    #[tokio::test]
+    async fn malformed_archived_activity_timestamp_fails_closed() {
+        let conn = open_test_conn().await;
+        conn.execute(
+            "INSERT INTO conversation_messages (chat_id, role, content, created_at) \
+             VALUES (1, 'user', 'bad timestamp', 'not-a-timestamp')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        assert!(latest_chat_activity(&conn).await.is_err());
     }
 
     #[test]

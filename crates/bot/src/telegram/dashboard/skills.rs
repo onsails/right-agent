@@ -138,16 +138,20 @@ pub(super) async fn pin_skill_response(
     // Cheap local checks first, so a request that is wrong on its own terms
     // (unknown or non-curator-managed row) still answers precisely while the
     // sandbox is down.
-    let agent_dir = state.agent_dir.clone();
     let skill_name = skill_name.to_owned();
-    let conn = right_db::open_connection(&agent_dir, false).await?;
-    let row = right_lifecycle::get(&conn, &skill_name)
-        .await?
+    let row = state
+        .internal_client
+        .skill_lifecycle_get(&right_mcp::internal_db::SkillLifecycleGetRequest {
+            agent: state.agent_name.clone(),
+            skill_name: skill_name.clone(),
+        })
+        .await
+        .map_err(|error| {
+            PinSkillError::DbOpen(right_db::DbError::InvalidParameter(format!("{error:#}")))
+        })?
+        .row
         .ok_or(PinSkillError::LifecycleMissing)?;
-    if !matches!(
-        row.created_by,
-        right_lifecycle::CreatedBy::ProbeWriter | right_lifecycle::CreatedBy::Curator
-    ) {
+    if !matches!(row.created_by.as_str(), "probe_writer" | "curator") {
         return Err(PinSkillError::NotCuratorManaged);
     }
     // Guard against pinning an orphan lifecycle row whose SKILL.md was deleted
@@ -160,7 +164,17 @@ pub(super) async fn pin_skill_response(
         .ok_or_else(|| PinSkillError::Sandbox(SANDBOX_UNREACHABLE_DETAIL.to_owned()))?;
     probe_sandbox_skill_package(&sandbox, &skill_name).await?;
 
-    right_lifecycle::set_pinned(&conn, &skill_name, pinned).await?;
+    state
+        .internal_client
+        .skill_pin(&right_mcp::internal_db::SkillPinRequest {
+            agent: state.agent_name.clone(),
+            skill_name: skill_name.clone(),
+            pinned,
+        })
+        .await
+        .map_err(|error| {
+            PinSkillError::DbOpen(right_db::DbError::InvalidParameter(format!("{error:#}")))
+        })?;
     Ok(PinSkillResponse { skill_name, pinned })
 }
 
@@ -351,72 +365,78 @@ fn push_skill_summary(
 }
 
 async fn try_enrich_skills_response(state: &DashboardState, response: &mut SkillsResponse) {
-    match lifecycle_rows_by_name(state.agent_dir.clone()).await {
-        Ok(lifecycle_rows) => {
-            enrich_group(&mut response.groups.core, &lifecycle_rows);
-            enrich_group(&mut response.groups.learned, &lifecycle_rows);
-            enrich_group(&mut response.groups.other, &lifecycle_rows);
-        }
-        Err(error) => {
-            tracing::warn!(
-                agent = %state.agent_name,
-                "dashboard skill lifecycle enrichment skipped: {error:#}",
-            );
-        }
+    let lifecycle = state
+        .internal_client
+        .skill_lifecycle_list(&right_mcp::internal_db::SkillLifecycleListRequest {
+            agent: state.agent_name.clone(),
+        })
+        .await;
+    if let Ok(rows) = lifecycle {
+        let rows: BTreeMap<_, _> = rows
+            .rows
+            .into_iter()
+            .map(|row| (row.skill_name.clone(), row))
+            .collect();
+        enrich_group(&mut response.groups.core, &rows);
+        enrich_group(&mut response.groups.learned, &rows);
+        enrich_group(&mut response.groups.other, &rows);
     }
-    match spend_by_skill(state.agent_dir.clone()).await {
-        Ok(spend) => {
-            enrich_group_spend(&mut response.groups.core, &spend);
-            enrich_group_spend(&mut response.groups.learned, &spend);
-            enrich_group_spend(&mut response.groups.other, &spend);
-        }
-        Err(error) => {
-            tracing::warn!(
-                agent = %state.agent_name,
-                "dashboard skill spend enrichment skipped: {error:#}",
-            );
-        }
+    if let Ok(spend) = state
+        .internal_client
+        .skill_spend_by_skill(&right_mcp::internal_db::SkillSpendBySkillRequest {
+            agent: state.agent_name.clone(),
+        })
+        .await
+    {
+        enrich_group_spend(&mut response.groups.core, &spend.rows);
+        enrich_group_spend(&mut response.groups.learned, &spend.rows);
+        enrich_group_spend(&mut response.groups.other, &spend.rows);
     }
 }
 
 async fn try_enrich_skill_summary(state: &DashboardState, skill: &mut SkillSummary) {
-    match lifecycle_rows_by_name(state.agent_dir.clone()).await {
-        Ok(lifecycle_rows) => {
-            if let Some(row) = lifecycle_rows.get(&skill.name) {
-                skill.apply_lifecycle(row);
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                agent = %state.agent_name,
-                skill = %skill.name,
-                "dashboard skill lifecycle enrichment skipped: {error:#}",
-            );
-        }
+    if let Ok(response) = state
+        .internal_client
+        .skill_lifecycle_get(&right_mcp::internal_db::SkillLifecycleGetRequest {
+            agent: state.agent_name.clone(),
+            skill_name: skill.name.clone(),
+        })
+        .await
+        && let Some(row) = response.row
+    {
+        apply_lifecycle_dto(skill, &row);
     }
-    match spend_by_skill(state.agent_dir.clone()).await {
-        Ok(spend) => {
-            if let Some(agg) = spend.get(&skill.name) {
-                skill.apply_spend(agg);
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                agent = %state.agent_name,
-                skill = %skill.name,
-                "dashboard skill spend enrichment skipped: {error:#}",
-            );
-        }
+    if let Ok(spend) = state
+        .internal_client
+        .skill_spend_by_skill(&right_mcp::internal_db::SkillSpendBySkillRequest {
+            agent: state.agent_name.clone(),
+        })
+        .await
+        && let Some(agg) = spend.rows.get(&skill.name)
+    {
+        skill.apply_spend(agg);
     }
+}
+
+fn apply_lifecycle_dto(skill: &mut SkillSummary, row: &right_mcp::internal_db::SkillLifecycleDto) {
+    skill.state = serde_json::from_value(serde_json::Value::String(row.state.clone())).ok();
+    skill.pinned = row.pinned;
+    skill.created_by =
+        serde_json::from_value(serde_json::Value::String(row.created_by.clone())).ok();
+    skill.use_count = i64::from(row.use_count);
+    skill.patch_count = i64::from(row.patch_count);
+    skill.created_at = row.created_at.clone();
+    skill.last_used_at = row.last_used_at.clone();
+    skill.last_patched_at = row.last_patched_at.clone();
 }
 
 fn enrich_group(
     skills: &mut [SkillSummary],
-    lifecycle_rows: &BTreeMap<String, right_lifecycle::SkillLifecycleRow>,
+    lifecycle_rows: &BTreeMap<String, right_mcp::internal_db::SkillLifecycleDto>,
 ) {
     for skill in skills {
         if let Some(row) = lifecycle_rows.get(&skill.name) {
-            skill.apply_lifecycle(row);
+            apply_lifecycle_dto(skill, row);
         }
     }
 }
@@ -430,27 +450,6 @@ fn enrich_group_spend(
             skill.apply_spend(agg);
         }
     }
-}
-
-async fn lifecycle_rows_by_name(
-    agent_dir: PathBuf,
-) -> Result<BTreeMap<String, right_lifecycle::SkillLifecycleRow>, SkillLifecycleReadError> {
-    let conn = right_db::open_connection_readonly(agent_dir).await?;
-    let rows = right_lifecycle::list(&conn).await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| (row.skill_name.clone(), row))
-        .collect())
-}
-
-async fn spend_by_skill(
-    agent_dir: PathBuf,
-) -> Result<
-    std::collections::HashMap<String, right_dashboard::api_types::SkillSpendAgg>,
-    SkillLifecycleReadError,
-> {
-    let conn = right_db::open_connection_readonly(agent_dir).await?;
-    Ok(right_dashboard::read_model::learning::skill_spend_by_skill(&conn).await?)
 }
 
 // The former `script_constants_tests` module asserted these scripts carried no
