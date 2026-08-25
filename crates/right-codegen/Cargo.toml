@@ -11,7 +11,6 @@ miette = { workspace = true }
 minijinja = { workspace = true }
 right-config = { path = "../right-config", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
-right-db = { path = "../right-db", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
 right-platform-knobs = { path = "../right-platform-knobs", version = "*" }
 right-runtime-state = { path = "../right-runtime-state", version = "*" }
@@ -25,5 +24,7 @@ which = { workspace = true }
 
 [dev-dependencies]
 sha2 = { workspace = true }
+right-db = { path = "../right-db", version = "*" }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+syn = { version = "3.0", features = ["full", "visit"] }
