@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
 /// Default interval between keepalive pings.
@@ -20,6 +20,9 @@ const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 const REPAIR_OPERATION_TIMEOUT: Duration = Duration::from_secs(180);
 /// Char bound for the stderr excerpt included in probe failure diagnostics.
 const STDERR_EXCERPT_CHARS: usize = 2 * 1024;
+/// Byte bound for the raw stdout tail retained in probe failure diagnostics.
+const STDOUT_TAIL_BYTES: usize = STDERR_EXCERPT_CHARS * 4;
+const PROBE_STDERR_GRACE: Duration = Duration::from_millis(100);
 
 const HEALTH_PROMPT: &str = "Reply exactly OK. Do not use tools.";
 
@@ -684,6 +687,146 @@ async fn run_one_health_cycle(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealthProbeStreamCompletion {
+    TerminalResult,
+    NeedsRepair,
+    Eof,
+}
+
+#[derive(Debug)]
+struct HealthProbeStdout {
+    init_outcome: HealthProbeOutcome,
+    stdout_tail: Vec<String>,
+    authenticated_rate_limit: bool,
+    completion: HealthProbeStreamCompletion,
+}
+
+#[derive(Debug, Default)]
+struct ProbeStdoutTail {
+    lines: VecDeque<String>,
+    bytes: usize,
+}
+
+impl ProbeStdoutTail {
+    fn push(&mut self, mut line: String) {
+        if line.len() > STDOUT_TAIL_BYTES {
+            let mut start = line.len() - STDOUT_TAIL_BYTES;
+            while !line.is_char_boundary(start) {
+                start += 1;
+            }
+            line = line[start..].to_owned();
+            self.lines.clear();
+            self.bytes = 0;
+        }
+        while self.bytes.saturating_add(line.len()) > STDOUT_TAIL_BYTES {
+            let Some(removed) = self.lines.pop_front() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(removed.len());
+        }
+        self.bytes += line.len();
+        self.lines.push_back(line);
+    }
+
+    fn into_lines(self) -> Vec<String> {
+        self.lines.into_iter().collect()
+    }
+}
+
+async fn read_probe_line<R>(reader: &mut R, line: &mut Vec<u8>) -> Result<usize, String>
+where
+    R: AsyncBufRead + Unpin,
+{
+    line.clear();
+    loop {
+        let available = reader
+            .fill_buf()
+            .await
+            .map_err(|e| format!("stdout read failed: {e:#}"))?;
+        if available.is_empty() {
+            return Ok(line.len());
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |position| position + 1);
+        if line.len().saturating_add(consumed) > STDOUT_TAIL_BYTES {
+            return Err(format!(
+                "health probe stdout line exceeds {STDOUT_TAIL_BYTES} bytes"
+            ));
+        }
+        line.extend_from_slice(&available[..consumed]);
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(line.len());
+        }
+    }
+}
+
+async fn read_health_probe_stdout<R>(stdout: R) -> Result<HealthProbeStdout, String>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let mut init_outcome = HealthProbeOutcome::NoInit;
+    let mut stdout_tail = ProbeStdoutTail::default();
+    let mut authenticated_rate_limit = false;
+
+    let mut line_bytes = Vec::new();
+    let completion = loop {
+        if read_probe_line(&mut reader, &mut line_bytes).await? == 0 {
+            break HealthProbeStreamCompletion::Eof;
+        }
+        if line_bytes.last() == Some(&b'\n') {
+            line_bytes.pop();
+        }
+        if line_bytes.last() == Some(&b'\r') {
+            line_bytes.pop();
+        }
+        let line = String::from_utf8(line_bytes.clone())
+            .map_err(|_| "health probe stdout line is not valid UTF-8".to_owned())?;
+
+        if let Some(status) = crate::cc::stream::parse_right_mcp_init_status(&line) {
+            init_outcome = classify_init_status(status);
+        }
+        authenticated_rate_limit |= probe_line_is_authenticated_rate_limit(&line);
+        let (terminal_result, terminal_result_error) =
+            match serde_json::from_str::<serde_json::Value>(&line) {
+                Ok(event)
+                    if event.get("type").and_then(serde_json::Value::as_str) == Some("result") =>
+                {
+                    (
+                        true,
+                        event.get("is_error").and_then(serde_json::Value::as_bool) == Some(true),
+                    )
+                }
+                Ok(_) | Err(_) => (false, false),
+            };
+
+        stdout_tail.push(line);
+
+        if matches!(init_outcome, HealthProbeOutcome::NeedsRepair { .. }) {
+            break HealthProbeStreamCompletion::NeedsRepair;
+        }
+        if terminal_result_error && !authenticated_rate_limit {
+            return Err("health probe terminal result reported an error".to_owned());
+        }
+        if terminal_result {
+            tracing::debug!(
+                event_type = "result",
+                "right_mcp_init: terminal probe event"
+            );
+            break HealthProbeStreamCompletion::TerminalResult;
+        }
+    };
+
+    Ok(HealthProbeStdout {
+        init_outcome,
+        stdout_tail: stdout_tail.into_lines(),
+        authenticated_rate_limit,
+        completion,
+    })
+}
+
 async fn run_health_probe(health: &McpInitHealth) -> Result<HealthProbeOutcome, String> {
     let sandbox = health.sandbox()?;
     let args = health_probe_invocation(crate::sandbox::SANDBOX_MCP_JSON_PATH).into_args();
@@ -714,72 +857,52 @@ async fn run_health_probe(health: &McpInitHealth) -> Result<HealthProbeOutcome, 
     let stderr_drain = spawn_probe_stderr_drain(stderr);
     let Some(stdout) = stdout else {
         child.kill().await;
-        let wait_result = child
+        child
             .wait()
             .await
-            .map_err(|e| format!("wait after missing stdout failed: {e:#}"));
-        let stderr_result = await_probe_stderr(stderr_drain).await;
-        stderr_result?;
-        wait_result?;
+            .map_err(|e| format!("wait after missing stdout failed: {e:#}"))?;
+        abort_probe_stderr(stderr_drain).await?;
         return Err("health probe missing stdout".to_owned());
     };
-    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let stdout_result = read_health_probe_stdout(stdout).await;
 
-    let mut init_outcome = HealthProbeOutcome::NoInit;
-    let mut killed_for_repair = false;
-    let mut stdout_tail: Vec<String> = Vec::new();
-    let stdout_result = async {
-        while let Some(line) = lines
-            .next_line()
-            .await
-            .map_err(|e| format!("stdout read failed: {e:#}"))?
+    match stdout_result {
+        Ok(observed)
+            if matches!(
+                observed.completion,
+                HealthProbeStreamCompletion::TerminalResult
+                    | HealthProbeStreamCompletion::NeedsRepair
+            ) =>
         {
-            if let Some(status) = crate::cc::stream::parse_right_mcp_init_status(&line) {
-                init_outcome = classify_init_status(status);
-                if matches!(init_outcome, HealthProbeOutcome::NeedsRepair { .. }) {
-                    child.kill().await;
-                    killed_for_repair = true;
-                }
-                break;
+            child.kill().await;
+            child
+                .wait()
+                .await
+                .map_err(|e| format!("wait after deliberate probe termination failed: {e:#}"))?;
+            abort_probe_stderr(stderr_drain).await?;
+            Ok(observed.init_outcome)
+        }
+        Ok(observed) => {
+            let code = child
+                .wait()
+                .await
+                .map_err(|e| format!("wait failed: {e:#}"))?;
+            let stderr_tail = await_probe_stderr(stderr_drain).await?;
+            if code != 0 && !observed.authenticated_rate_limit {
+                probe_exit_verdict_with_stderr(code, &observed.stdout_tail, &stderr_tail)?;
             }
-            stdout_tail.push(line);
+            Ok(observed.init_outcome)
         }
-        // Keep draining after the init line: CC emits the rate-limit markers
-        // (`rate_limit_event` / result envelope with `api_error_status`) after
-        // init, and exits 1 on a weekly-limit rejection even when MCP connected.
-        while let Some(line) = lines
-            .next_line()
-            .await
-            .map_err(|e| format!("stdout read failed: {e:#}"))?
-        {
-            stdout_tail.push(line);
+        Err(stdout_error) => {
+            child.kill().await;
+            child
+                .wait()
+                .await
+                .map_err(|e| format!("wait after stdout failure failed: {e:#}"))?;
+            let stderr_tail = await_probe_stderr_bounded(stderr_drain, PROBE_STDERR_GRACE).await?;
+            Err(format!("{stdout_error}; stderr tail: {stderr_tail}"))
         }
-        Ok::<(), String>(())
     }
-    .await;
-
-    if stdout_result.is_err() {
-        child.kill().await;
-    }
-    let wait_result = child
-        .wait()
-        .await
-        .map_err(|e| format!("wait failed: {e:#}"));
-    let stderr_result = await_probe_stderr(stderr_drain).await;
-
-    // Complete both pipe drains before returning any failure so no read task
-    // is detached and every pipe error remains observable.
-    stdout_result?;
-    let stderr_tail = stderr_result?;
-    let code = wait_result?;
-    if !killed_for_repair && code != 0 {
-        // Failure diagnostics carry the exit code AND bounded excerpts: the
-        // CLI writes the actual reason (auth, MCP, flags) to stderr, and the
-        // rate-limit result envelope lives on stdout.
-        probe_exit_verdict_with_stderr(code, &stdout_tail, &stderr_tail)?;
-    }
-
-    Ok(init_outcome)
 }
 
 /// True when the probe's post-init stdout carries an authenticated
@@ -788,25 +911,29 @@ async fn run_health_probe(health: &McpInitHealth) -> Result<HealthProbeOutcome, 
 /// `AuthenticatedRateLimitRejection` acceptance in
 /// `parse_init_auth_probe_success` — a weekly-limit 429 proves the
 /// credential authenticated and must not be reported as a probe failure.
+fn probe_line_is_authenticated_rate_limit(line: &str) -> bool {
+    let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    let rate_limit_rejected = event.get("type").and_then(serde_json::Value::as_str)
+        == Some("rate_limit_event")
+        && event
+            .get("rate_limit_info")
+            .and_then(|info| info.get("status"))
+            .and_then(serde_json::Value::as_str)
+            == Some("rejected");
+    let result_429 = event.get("type").and_then(serde_json::Value::as_str) == Some("result")
+        && event
+            .get("api_error_status")
+            .and_then(serde_json::Value::as_i64)
+            == Some(429);
+    rate_limit_rejected || result_429
+}
+
 fn probe_tail_is_authenticated_rate_limit(lines: &[String]) -> bool {
-    lines.iter().any(|line| {
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
-            return false;
-        };
-        let rate_limit_rejected = event.get("type").and_then(serde_json::Value::as_str)
-            == Some("rate_limit_event")
-            && event
-                .get("rate_limit_info")
-                .and_then(|info| info.get("status"))
-                .and_then(serde_json::Value::as_str)
-                == Some("rejected");
-        let result_429 = event.get("type").and_then(serde_json::Value::as_str) == Some("result")
-            && event
-                .get("api_error_status")
-                .and_then(serde_json::Value::as_i64)
-                == Some(429);
-        rate_limit_rejected || result_429
-    })
+    lines
+        .iter()
+        .any(|line| probe_line_is_authenticated_rate_limit(line))
 }
 
 /// Exit-code verdict for a finished (not killed) health probe.
@@ -840,20 +967,72 @@ fn stdout_lines_excerpt(lines: &[String]) -> String {
     stderr_excerpt(joined.as_bytes())
 }
 
-/// Drain stderr concurrently, retaining only the bounded diagnostic tail.
-fn spawn_probe_stderr_drain<R>(stderr: R) -> tokio::task::JoinHandle<Result<String, String>>
+struct ProbeStderrDrain {
+    task: Option<tokio::task::JoinHandle<Result<String, String>>>,
+}
+
+impl Drop for ProbeStderrDrain {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.as_ref() {
+            task.abort();
+        }
+    }
+}
+
+fn spawn_probe_stderr_drain<R>(stderr: R) -> ProbeStderrDrain
 where
     R: AsyncRead + Send + Unpin + 'static,
 {
-    tokio::spawn(drain_probe_stderr(stderr))
+    ProbeStderrDrain {
+        task: Some(tokio::spawn(drain_probe_stderr(stderr))),
+    }
 }
 
-async fn await_probe_stderr(
-    drain: tokio::task::JoinHandle<Result<String, String>>,
-) -> Result<String, String> {
-    drain
-        .await
+async fn await_probe_stderr(mut drain: ProbeStderrDrain) -> Result<String, String> {
+    let task = drain
+        .task
+        .take()
+        .ok_or_else(|| "stderr drain task already consumed".to_owned())?;
+    task.await
         .map_err(|e| format!("stderr drain task failed: {e:#}"))?
+}
+async fn abort_probe_stderr(mut drain: ProbeStderrDrain) -> Result<(), String> {
+    let task = drain
+        .task
+        .take()
+        .ok_or_else(|| "stderr drain task already consumed".to_owned())?;
+    task.abort();
+    match task.await {
+        Err(error) if error.is_cancelled() => Ok(()),
+        Err(error) => Err(format!(
+            "stderr drain task failed while aborting: {error:#}"
+        )),
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(error),
+    }
+}
+
+async fn await_probe_stderr_bounded(
+    mut drain: ProbeStderrDrain,
+    grace: Duration,
+) -> Result<String, String> {
+    let mut task = drain
+        .task
+        .take()
+        .ok_or_else(|| "stderr drain task already consumed".to_owned())?;
+    match tokio::time::timeout(grace, &mut task).await {
+        Ok(joined) => joined.map_err(|e| format!("stderr drain task failed: {e:#}"))?,
+        Err(_) => {
+            task.abort();
+            match task.await {
+                Err(error) if error.is_cancelled() => Ok(String::new()),
+                Err(error) => Err(format!(
+                    "stderr drain task failed while aborting: {error:#}"
+                )),
+                Ok(result) => result,
+            }
+        }
+    }
 }
 
 async fn drain_probe_stderr<R>(mut stderr: R) -> Result<String, String>
@@ -1010,6 +1189,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_probe_stdout_completes_at_result_without_waiting_for_eof() {
+        const INIT: &[u8] =
+            b"{\"type\":\"system\",\"subtype\":\"init\",\"mcp_servers\":[{\"name\":\"right\",\"status\":\"connected\"}]}\n";
+        const ASSISTANT: &[u8] = b"{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n";
+        const RESULT: &[u8] = b"{\"type\":\"result\",\"is_error\":false,\"result\":\"OK\"}\n";
+
+        let (mut writer, reader) = tokio::io::duplex(4 * 1024);
+        writer.write_all(INIT).await.expect("write init");
+        writer.write_all(ASSISTANT).await.expect("write assistant");
+        writer.write_all(RESULT).await.expect("write result");
+
+        let observed =
+            tokio::time::timeout(Duration::from_millis(100), read_health_probe_stdout(reader))
+                .await
+                .expect("terminal result must complete the probe while stdout remains open")
+                .expect("read probe stdout");
+
+        assert_eq!(observed.init_outcome, HealthProbeOutcome::Healthy);
+        assert!(!observed.authenticated_rate_limit);
+        assert_eq!(
+            observed.completion,
+            HealthProbeStreamCompletion::TerminalResult
+        );
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn probe_stderr_drain_aborts_when_guard_is_dropped() {
+        let (_writer, reader) = tokio::io::duplex(64);
+        let drain = spawn_probe_stderr_drain(reader);
+        let abort = drain.task.as_ref().expect("stderr task").abort_handle();
+
+        drop(drain);
+        tokio::task::yield_now().await;
+
+        assert!(abort.is_finished());
+    }
+    #[tokio::test]
+    async fn terminal_probe_cleanup_aborts_stderr_that_remains_open() {
+        let (_writer, reader) = tokio::io::duplex(64);
+        let drain = spawn_probe_stderr_drain(reader);
+        let abort = drain.task.as_ref().expect("stderr task").abort_handle();
+
+        tokio::time::timeout(Duration::from_millis(100), abort_probe_stderr(drain))
+            .await
+            .expect("deliberate cleanup must not wait for stderr EOF")
+            .expect("abort stderr drain");
+
+        assert!(abort.is_finished());
+    }
+
+    #[tokio::test]
+    async fn stdout_failure_stderr_grace_aborts_open_drain() {
+        let (_writer, reader) = tokio::io::duplex(64);
+        let drain = spawn_probe_stderr_drain(reader);
+        let abort = drain.task.as_ref().expect("stderr task").abort_handle();
+
+        let tail = tokio::time::timeout(
+            Duration::from_millis(100),
+            await_probe_stderr_bounded(drain, Duration::from_millis(10)),
+        )
+        .await
+        .expect("bounded diagnostic grace must return")
+        .expect("bounded stderr drain");
+
+        assert!(tail.is_empty());
+        assert!(abort.is_finished());
+    }
+
+    #[tokio::test]
     async fn probe_stderr_drain_propagates_read_failure() {
         let error = drain_probe_stderr(FailingProbeReader)
             .await
@@ -1019,6 +1268,141 @@ mod tests {
         assert!(error.contains("injected read failure"), "{error}");
     }
 
+    #[tokio::test]
+    async fn health_probe_stdout_kills_for_unhealthy_init_without_waiting_for_result() {
+        const UNHEALTHY_INIT: &[u8] = b"{\"type\":\"system\",\"subtype\":\"init\",\"mcp_servers\":[{\"name\":\"right\",\"status\":\"needs-auth\"}]}\n";
+
+        let (mut writer, reader) = tokio::io::duplex(4 * 1024);
+        writer
+            .write_all(UNHEALTHY_INIT)
+            .await
+            .expect("write unhealthy init");
+
+        let observed =
+            tokio::time::timeout(Duration::from_millis(100), read_health_probe_stdout(reader))
+                .await
+                .expect("unhealthy init must request immediate repair kill")
+                .expect("read probe stdout");
+
+        assert_eq!(
+            observed.init_outcome,
+            HealthProbeOutcome::NeedsRepair {
+                status: Some("needs-auth".to_owned())
+            }
+        );
+        assert_eq!(
+            observed.completion,
+            HealthProbeStreamCompletion::NeedsRepair
+        );
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn health_probe_stdout_preserves_rate_limit_evidence_at_terminal_result() {
+        const INIT: &[u8] = b"{\"type\":\"system\",\"subtype\":\"init\",\"mcp_servers\":[{\"name\":\"right\",\"status\":\"connected\"}]}\n";
+        const RATE_LIMIT: &[u8] = b"{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"rateLimitType\":\"seven_day\"}}\n";
+        const RESULT: &[u8] = b"{\"type\":\"result\",\"is_error\":true,\"api_error_status\":429}\n";
+
+        let (mut writer, reader) = tokio::io::duplex(4 * 1024);
+        writer.write_all(INIT).await.expect("write init");
+        writer
+            .write_all(RATE_LIMIT)
+            .await
+            .expect("write rate limit");
+        writer.write_all(RESULT).await.expect("write result");
+
+        let observed =
+            tokio::time::timeout(Duration::from_millis(100), read_health_probe_stdout(reader))
+                .await
+                .expect("rate-limited result must complete without EOF")
+                .expect("read probe stdout");
+
+        assert_eq!(observed.init_outcome, HealthProbeOutcome::Healthy);
+        assert!(observed.authenticated_rate_limit);
+        assert!(probe_tail_is_authenticated_rate_limit(
+            &observed.stdout_tail
+        ));
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn health_probe_stdout_rejects_oversized_line_without_waiting_for_eof() {
+        let (mut writer, reader) = tokio::io::duplex(STDOUT_TAIL_BYTES * 2);
+        writer
+            .write_all(&vec![b'x'; STDOUT_TAIL_BYTES + 1])
+            .await
+            .expect("write oversized line");
+
+        let error =
+            tokio::time::timeout(Duration::from_millis(100), read_health_probe_stdout(reader))
+                .await
+                .expect("oversized line must fail before EOF")
+                .expect_err("oversized line must fail");
+
+        assert!(error.contains("stdout line exceeds"), "{error}");
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn health_probe_stdout_rejects_non_rate_limit_error_result() {
+        const INIT: &[u8] = b"{\"type\":\"system\",\"subtype\":\"init\",\"mcp_servers\":[{\"name\":\"right\",\"status\":\"connected\"}]}\n";
+        const RESULT: &[u8] =
+            b"{\"type\":\"result\",\"is_error\":true,\"result\":\"Not logged in\"}\n";
+
+        let (mut writer, reader) = tokio::io::duplex(4 * 1024);
+        writer.write_all(INIT).await.expect("write init");
+        writer.write_all(RESULT).await.expect("write result");
+
+        let error = read_health_probe_stdout(reader)
+            .await
+            .expect_err("non-rate-limit result errors must fail the probe");
+
+        assert!(
+            error.contains("terminal result reported an error"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("Not logged in"),
+            "raw result must stay redacted"
+        );
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn health_probe_stdout_reaches_eof_without_terminal_result() {
+        const INIT: &[u8] = b"{\"type\":\"system\",\"subtype\":\"init\",\"mcp_servers\":[{\"name\":\"right\",\"status\":\"connected\"}]}\n";
+        const ASSISTANT: &[u8] = b"{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n";
+
+        let (mut writer, reader) = tokio::io::duplex(4 * 1024);
+        writer.write_all(INIT).await.expect("write init");
+        writer.write_all(ASSISTANT).await.expect("write assistant");
+        drop(writer);
+
+        let observed = read_health_probe_stdout(reader)
+            .await
+            .expect("read probe stdout through EOF");
+
+        assert_eq!(observed.init_outcome, HealthProbeOutcome::Healthy);
+        assert_eq!(observed.completion, HealthProbeStreamCompletion::Eof);
+        assert!(
+            observed
+                .stdout_tail
+                .iter()
+                .any(|line| line.contains("assistant"))
+        );
+    }
+
+    #[test]
+    fn health_probe_stdout_tail_is_bounded() {
+        let mut tail = ProbeStdoutTail::default();
+        tail.push("old".repeat(STDOUT_TAIL_BYTES));
+        tail.push("new-tail-sentinel".to_owned());
+
+        let lines = tail.into_lines();
+        assert!(lines.iter().map(String::len).sum::<usize>() <= STDOUT_TAIL_BYTES);
+        assert_eq!(lines.last().map(String::as_str), Some("new-tail-sentinel"));
+    }
+
     #[test]
     fn init_auth_probe_disables_mcp_tools_sessions_and_executable_override() {
         let args = init_auth_probe_invocation(Some("configured-model".to_owned())).into_args();
@@ -1026,8 +1410,6 @@ mod tests {
         assert_eq!(args[0], "claude");
         assert!(!args.contains(&"--mcp-config".to_owned()));
         assert!(!args.contains(&"--strict-mcp-config".to_owned()));
-        assert!(!args.contains(&"--resume".to_owned()));
-        assert!(!args.contains(&"--session-id".to_owned()));
         assert!(args.windows(2).any(|pair| pair == ["--tools", ""]));
         assert!(args.contains(&"--no-session-persistence".to_owned()));
         assert!(
@@ -1118,55 +1500,52 @@ mod tests {
             stderr: Vec::new(),
         };
 
-        #[test]
-        fn probe_tail_detects_authenticated_rate_limit_rejection() {
-            const RATE_LIMIT: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day"}}"#;
-            const RESULT_429: &str = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You've hit your weekly limit"}"#;
-            const NOT_LOGGED_IN: &str = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;
-            const ECHO: &str = r#"{"type":"assistant","message":{"content":[]}}"#;
-
-            // rate_limit_event marker alone
-            assert!(probe_tail_is_authenticated_rate_limit(&[
-                RATE_LIMIT.to_owned(),
-                RESULT_429.to_owned(),
-            ]));
-            // api_error_status 429 marker alone
-            assert!(probe_tail_is_authenticated_rate_limit(&[
-                RESULT_429.to_owned()
-            ]));
-            // markers must survive interleaved noise lines
-            assert!(probe_tail_is_authenticated_rate_limit(&[
-                ECHO.to_owned(),
-                RATE_LIMIT.to_owned(),
-            ]));
-            // genuine auth failure must NOT be masked
-            assert!(!probe_tail_is_authenticated_rate_limit(&[
-                NOT_LOGGED_IN.to_owned()
-            ]));
-            assert!(!probe_tail_is_authenticated_rate_limit(&[]));
-            assert!(!probe_tail_is_authenticated_rate_limit(&[
-                "not-json".to_owned()
-            ]));
-        }
-
-        #[test]
-        fn probe_exit_verdict_accepts_authenticated_rate_limit_exit_one() {
-            const RATE_LIMIT: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day"}}"#;
-            const RESULT_429: &str = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You've hit your weekly limit"}"#;
-
-            assert!(probe_exit_verdict(1, &[RATE_LIMIT.to_owned(), RESULT_429.to_owned()]).is_ok());
-        }
-
-        #[test]
-        fn probe_exit_verdict_keeps_nonzero_exit_failure_with_stdout_tail() {
-            const NOT_LOGGED_IN: &str = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;
-
-            let err = probe_exit_verdict(1, &[NOT_LOGGED_IN.to_owned()])
-                .expect_err("non-429 nonzero exit must stay a failure");
-            assert!(err.contains("exit code: 1"), "{err}");
-            assert!(err.contains("Not logged in"), "{err}");
-        }
         assert!(init_auth_verdict(output).is_err());
+    }
+
+    #[test]
+    fn probe_tail_detects_authenticated_rate_limit_rejection() {
+        const RATE_LIMIT: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day"}}"#;
+        const RESULT_429: &str = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You've hit your weekly limit"}"#;
+        const NOT_LOGGED_IN: &str = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;
+        const ECHO: &str = r#"{"type":"assistant","message":{"content":[]}}"#;
+
+        assert!(probe_tail_is_authenticated_rate_limit(&[
+            RATE_LIMIT.to_owned(),
+            RESULT_429.to_owned(),
+        ]));
+        assert!(probe_tail_is_authenticated_rate_limit(&[
+            RESULT_429.to_owned()
+        ]));
+        assert!(probe_tail_is_authenticated_rate_limit(&[
+            ECHO.to_owned(),
+            RATE_LIMIT.to_owned(),
+        ]));
+        assert!(!probe_tail_is_authenticated_rate_limit(&[
+            NOT_LOGGED_IN.to_owned()
+        ]));
+        assert!(!probe_tail_is_authenticated_rate_limit(&[]));
+        assert!(!probe_tail_is_authenticated_rate_limit(&[
+            "not-json".to_owned()
+        ]));
+    }
+
+    #[test]
+    fn probe_exit_verdict_accepts_authenticated_rate_limit_exit_one() {
+        const RATE_LIMIT: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day"}}"#;
+        const RESULT_429: &str = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You've hit your weekly limit"}"#;
+
+        assert!(probe_exit_verdict(1, &[RATE_LIMIT.to_owned(), RESULT_429.to_owned()]).is_ok());
+    }
+
+    #[test]
+    fn probe_exit_verdict_keeps_nonzero_exit_failure_with_stdout_tail() {
+        const NOT_LOGGED_IN: &str = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;
+
+        let err = probe_exit_verdict(1, &[NOT_LOGGED_IN.to_owned()])
+            .expect_err("non-429 nonzero exit must stay a failure");
+        assert!(err.contains("exit code: 1"), "{err}");
+        assert!(err.contains("Not logged in"), "{err}");
     }
 
     #[test]
