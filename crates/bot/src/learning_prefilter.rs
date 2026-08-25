@@ -45,29 +45,6 @@ pub(crate) const PREFILTER_SCHEMA_JSON: &str = r#"{
   "required": ["decision", "reason"]
 }"#;
 
-/// Sum today's spend across learning sources from `usage_events`. Used by the
-/// worker to gate the prefilter+probe-writer pipeline against the daily budget.
-pub(crate) async fn today_spend_usd(
-    conn: &right_db::Connection,
-    now_utc: &str,
-) -> Result<f64, right_db::DbError> {
-    let date_part = now_utc.split_once('T').map(|(d, _)| d).unwrap_or(now_utc);
-    let today_start = format!("{date_part}T00:00:00Z");
-    let placeholders = std::iter::repeat_n("?", right_agent::usage::LEARNING_SOURCES.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT COALESCE(SUM(total_cost_usd), 0.0) FROM usage_events \
-         WHERE ts >= ?1 AND source IN ({placeholders})"
-    );
-    let mut params = right_db::params::ParamsBuilder::new();
-    params.push(today_start.as_str())?;
-    for s in right_agent::usage::LEARNING_SOURCES {
-        params.push(s)?;
-    }
-    conn.query_row(&sql, params, |r| r.get::<_, f64>(0)).await
-}
-
 /// Compose the prompt that goes to Haiku.
 pub(crate) fn build_prompt(
     anchor: &ProbeAnchor,
@@ -475,7 +452,7 @@ fn prefilter_failure_diagnostics(
 }
 
 /// Bundle of inputs needed to run one prefilter invocation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct PrefilterContext {
     pub agent_dir: PathBuf,
     pub agent_db_dir: PathBuf,
@@ -488,36 +465,82 @@ pub(crate) struct PrefilterContext {
     pub baseline_window_days: u32,
     /// Minimum sample size for the baseline to be `Available`.
     pub baseline_min_sample: u32,
+    pub internal_client: std::sync::Arc<right_mcp::internal_client::InternalClient>,
+}
+
+fn baseline_f64(
+    dto: right_mcp::internal_db::BaselineMetricDto,
+) -> right_agent::usage::turn_baseline::BaselineMetric<f64> {
+    match dto {
+        right_mcp::internal_db::BaselineMetricDto::Insufficient { sample_size } => {
+            right_agent::usage::turn_baseline::BaselineMetric::Insufficient { sample_size }
+        }
+        right_mcp::internal_db::BaselineMetricDto::Available { p50, p90, p99 } => {
+            right_agent::usage::turn_baseline::BaselineMetric::Available { p50, p90, p99 }
+        }
+    }
+}
+
+fn baselines_from_dto(
+    dto: right_mcp::internal_db::TurnBaselinesDto,
+) -> right_agent::usage::turn_baseline::TurnBaselines {
+    use right_agent::usage::turn_baseline::BaselineMetric;
+    let integer_metric = |metric: right_mcp::internal_db::BaselineMetricDto| match metric {
+        right_mcp::internal_db::BaselineMetricDto::Insufficient { sample_size } => {
+            BaselineMetric::Insufficient { sample_size }
+        }
+        right_mcp::internal_db::BaselineMetricDto::Available { p50, p90, p99 } => {
+            BaselineMetric::Available {
+                p50: p50 as u64,
+                p90: p90 as u64,
+                p99: p99 as u64,
+            }
+        }
+    };
+    let turns = match dto.num_turns {
+        right_mcp::internal_db::BaselineMetricDto::Insufficient { sample_size } => {
+            BaselineMetric::Insufficient { sample_size }
+        }
+        right_mcp::internal_db::BaselineMetricDto::Available { p50, p90, p99 } => {
+            BaselineMetric::Available {
+                p50: p50 as u32,
+                p90: p90 as u32,
+                p99: p99 as u32,
+            }
+        }
+    };
+    right_agent::usage::turn_baseline::TurnBaselines {
+        sample_size: dto.sample_size,
+        elapsed_sample_size: dto.elapsed_sample_size,
+        window_days: dto.window_days,
+        cost_usd: baseline_f64(dto.cost_usd),
+        num_turns: turns,
+        wall_elapsed_ms: integer_metric(dto.wall_elapsed_ms),
+    }
 }
 
 /// Run the Haiku prefilter on an anchor. Logs warns on any failure, returns Skip.
 pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> PrefilterDecision {
     use crate::cc::invocation::{ClaudeInvocation, OutputFormat, build_claude_command};
 
-    let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "prefilter open_connection failed: {e:#}");
-            return PrefilterDecision::Skip {
-                reason: "db open failed".into(),
-            };
-        }
-    };
-    let baselines = match right_agent::usage::turn_baseline::compute(
-        &conn,
-        ctx.baseline_window_days,
-        ctx.baseline_min_sample,
-    )
-    .await
+    let response = match ctx
+        .internal_client
+        .learning_turn_baselines(&right_mcp::internal_db::LearningTurnBaselinesRequest {
+            agent: ctx.agent_name.clone(),
+            window_days: ctx.baseline_window_days,
+            min_sample: ctx.baseline_min_sample,
+        })
+        .await
     {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "prefilter baseline compute failed: {e:#}");
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(agent = %ctx.agent_name, "prefilter owner baseline query failed: {error:#}");
             return PrefilterDecision::Skip {
                 reason: "baseline compute failed".into(),
             };
         }
     };
+    let baselines = baselines_from_dto(response.baselines);
 
     let Some(sandbox) = ctx.sandbox.clone() else {
         tracing::warn!(agent = %ctx.agent_name, "skipping prefilter: sandbox unavailable");
@@ -643,17 +666,21 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
 
-    // Record usage event. Zero-signal results still cost money and must be visible.
-    if let Some(b) = crate::cc::stream::parse_usage_full(&stdout)
-        && let Err(e) = right_agent::usage::insert::insert_learning_prefilter(
-            &conn,
-            &b,
-            ctx.chat_id,
-            ctx.thread_id,
-        )
-        .await
+    if let Some(breakdown) = crate::cc::stream::parse_usage_full(&stdout)
+        && let Err(error) = ctx
+            .internal_client
+            .usage_insert_event(&right_mcp::internal_db::UsageInsertEventRequest {
+                agent: ctx.agent_name.clone(),
+                request_id: crate::db::request_id(),
+                source: right_mcp::internal_db::UsageSourceDto::LearningPrefilter {
+                    chat_id: ctx.chat_id,
+                    thread_id: ctx.thread_id,
+                },
+                event: crate::db::usage_dto(&breakdown),
+            })
+            .await
     {
-        tracing::warn!(agent = %ctx.agent_name, "prefilter usage insert failed: {e:#}");
+        tracing::warn!(agent = %ctx.agent_name, "prefilter owner usage insert failed: {error:#}");
     }
 
     let decision = parse_output(&stdout);

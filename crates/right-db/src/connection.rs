@@ -1,16 +1,29 @@
 use std::fmt;
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::DbError;
 
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+enum ConnectionBackend {
+    Sdk {
+        // Kept alive because Turso connections are owned by their parent database.
+        _database: turso::Database,
+        inner: turso::Connection,
+    },
+    CoreReadonly {
+        _database: Arc<turso::core::Database>,
+        inner: Arc<turso::core::Connection>,
+        _io: Arc<dyn turso::core::IO>,
+    },
+}
+
 pub struct Connection {
     db_path: PathBuf,
-    // Kept alive because Turso connections are owned by their parent database.
-    _database: turso::Database,
-    inner: turso::Connection,
+    backend: ConnectionBackend,
     readonly: bool,
 }
 
@@ -24,7 +37,7 @@ impl fmt::Debug for Connection {
 
 impl Connection {
     pub async fn open_in_memory() -> Result<Self, DbError> {
-        Self::build(PathBuf::from(":memory:"), true, false).await
+        Self::build(PathBuf::from(":memory:")).await
     }
 
     pub(crate) async fn open_local(db_path: PathBuf, create: bool) -> Result<Self, DbError> {
@@ -37,40 +50,62 @@ impl Connection {
                 )),
             });
         }
-        Self::build(db_path, create, !create).await
+        if create {
+            Self::build(db_path).await
+        } else {
+            Self::build_readonly(db_path)
+        }
     }
 
-    async fn build(db_path: PathBuf, create: bool, readonly: bool) -> Result<Self, DbError> {
-        let path = db_path.to_str().ok_or_else(|| {
-            DbError::InvalidParameter(format!(
-                "database path is not valid UTF-8: {}",
-                db_path.display()
-            ))
-        })?;
+    async fn build(db_path: PathBuf) -> Result<Self, DbError> {
+        let path = utf8_path(&db_path)?;
         let open_err = |source| DbError::Open {
             path: db_path.clone(),
             source,
         };
-        let mut builder = turso::Builder::new_local(path).experimental_index_method(true);
-        if path != ":memory:" {
-            let io = crate::multiprocess_io::new().map_err(|source| DbError::Open {
-                path: db_path.clone(),
-                source: turso::Error::Error(format!("multiprocess WAL IO setup failed: {source}")),
-            })?;
-            builder = builder.experimental_multiprocess_wal(true).with_io_impl(io);
-        }
-        let database = builder.build().await.map_err(open_err)?;
+        let database = turso::Builder::new_local(path)
+            .experimental_index_method(true)
+            .build()
+            .await
+            .map_err(open_err)?;
         let inner = database.connect().map_err(open_err)?;
-        let conn = Self {
+        Ok(Self {
             db_path,
-            _database: database,
-            inner,
-            readonly,
+            backend: ConnectionBackend::Sdk {
+                _database: database,
+                inner,
+            },
+            readonly: false,
+        })
+    }
+
+    fn build_readonly(db_path: PathBuf) -> Result<Self, DbError> {
+        let path = utf8_path(&db_path)?;
+        let open_err = |source: turso::core::LimboError| DbError::Open {
+            path: db_path.clone(),
+            source: core_error(source),
         };
-        if !create {
-            conn.inner.pragma_update("query_only", 1).await.map(drop)?;
-        }
-        Ok(conn)
+        let io: Arc<dyn turso::core::IO> =
+            Arc::new(turso::core::PlatformIO::new().map_err(open_err)?);
+        let database = turso::core::Database::open_file_with_flags(
+            io.clone(),
+            path,
+            turso::core::OpenFlags::ReadOnly,
+            turso::core::DatabaseOpts::new().with_index_method(true),
+            None,
+        )
+        .map_err(open_err)?;
+        let inner = database.connect().map_err(open_err)?;
+        inner.set_query_only(true);
+        Ok(Self {
+            db_path,
+            backend: ConnectionBackend::CoreReadonly {
+                _database: database,
+                inner,
+                _io: io,
+            },
+            readonly: true,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -79,7 +114,7 @@ impl Connection {
 
     pub async fn execute_batch(&self, sql: &str) -> Result<(), DbError> {
         self.ensure_writable()?;
-        self.inner
+        self.sdk_inner()?
             .execute_batch(sql)
             .await
             .map(drop)
@@ -93,7 +128,7 @@ impl Connection {
     ) -> Result<usize, DbError> {
         self.ensure_writable()?;
         let params = params.into_params()?.into_turso();
-        let changed = self.inner.execute(sql, params).await?;
+        let changed = self.sdk_inner()?.execute(sql, params).await?;
         usize::try_from(changed)
             .map_err(|_| DbError::InvalidParameter("changed row count exceeds usize".into()))
     }
@@ -125,11 +160,21 @@ impl Connection {
     ) -> Result<T, DbError> {
         self.ensure_query_allowed(sql)?;
         let params = params.into_params()?.into_turso();
-        let mut rows = self.inner.query(sql, params).await?;
-        let Some(row) = rows.next().await? else {
-            return Err(DbError::NotFound);
-        };
-        map(&crate::row::Row::new(&row))
+        match &self.backend {
+            ConnectionBackend::Sdk { inner, .. } => {
+                let mut rows = inner.query(sql, params).await?;
+                let Some(row) = rows.next().await? else {
+                    return Err(DbError::NotFound);
+                };
+                map(&crate::row::Row::new(&row))
+            }
+            ConnectionBackend::CoreReadonly { inner, .. } => {
+                let mut stmt = core_query(inner, sql, params)?;
+                let rows = stmt.run_collect_rows().map_err(core_error)?;
+                let row = rows.first().ok_or(DbError::NotFound)?;
+                map(&crate::row::Row::new_core(row))
+            }
+        }
     }
 
     pub async fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> Result<T, DbError>
@@ -152,12 +197,24 @@ impl Connection {
     ) -> Result<Vec<T>, DbError> {
         self.ensure_query_allowed(sql)?;
         let params = params.into_params()?.into_turso();
-        let mut rows = self.inner.query(sql, params).await?;
-        let mut values = Vec::new();
-        while let Some(row) = rows.next().await? {
-            values.push(map(&crate::row::Row::new(&row))?);
+        match &self.backend {
+            ConnectionBackend::Sdk { inner, .. } => {
+                let mut rows = inner.query(sql, params).await?;
+                let mut values = Vec::new();
+                while let Some(row) = rows.next().await? {
+                    values.push(map(&crate::row::Row::new(&row))?);
+                }
+                Ok(values)
+            }
+            ConnectionBackend::CoreReadonly { inner, .. } => {
+                let mut stmt = core_query(inner, sql, params)?;
+                stmt.run_collect_rows()
+                    .map_err(core_error)?
+                    .iter()
+                    .map(|row| map(&crate::row::Row::new_core(row)))
+                    .collect()
+            }
         }
-        Ok(values)
     }
 
     /// Capture `sql` for later execution via [`Statement::query_map`] or
@@ -183,7 +240,10 @@ impl Connection {
     }
 
     pub fn last_insert_rowid(&self) -> i64 {
-        self.inner.last_insert_rowid()
+        match &self.backend {
+            ConnectionBackend::Sdk { inner, .. } => inner.last_insert_rowid(),
+            ConnectionBackend::CoreReadonly { inner, .. } => inner.last_insert_rowid(),
+        }
     }
 
     /// Start an immediate transaction.
@@ -201,29 +261,34 @@ impl Connection {
         behavior: turso::transaction::TransactionBehavior,
     ) -> Result<crate::transaction::Transaction<'_>, DbError> {
         self.ensure_writable()?;
-        let inner = turso::transaction::Transaction::new_unchecked(&self.inner, behavior).await?;
+        let inner =
+            turso::transaction::Transaction::new_unchecked(self.sdk_inner()?, behavior).await?;
         Ok(crate::transaction::Transaction::new(self, inner))
     }
 
     pub(crate) async fn apply_connection_pragmas(&self) -> Result<(), DbError> {
         // WAL switching takes the file lock, so install SQLite's busy wait first.
-        self.inner
+        let inner = self.sdk_inner()?;
+        inner
             .pragma_update("busy_timeout", BUSY_TIMEOUT.as_millis())
             .await
             .map(drop)?;
-        self.inner
-            .pragma_update("journal_mode", "WAL")
-            .await
-            .map(drop)?;
+        inner.pragma_update("journal_mode", "WAL").await.map(drop)?;
         Ok(())
     }
 
     pub(crate) async fn apply_readonly_pragmas(&self) -> Result<(), DbError> {
-        self.inner
-            .pragma_update("busy_timeout", BUSY_TIMEOUT.as_millis())
-            .await
-            .map(drop)?;
-        Ok(())
+        match &self.backend {
+            ConnectionBackend::Sdk { inner, .. } => inner
+                .pragma_update("busy_timeout", BUSY_TIMEOUT.as_millis())
+                .await
+                .map(drop)
+                .map_err(Into::into),
+            ConnectionBackend::CoreReadonly { inner, .. } => {
+                inner.set_busy_timeout(BUSY_TIMEOUT);
+                Ok(())
+            }
+        }
     }
 
     fn ensure_writable(&self) -> Result<(), DbError> {
@@ -239,6 +304,70 @@ impl Connection {
         }
         Ok(())
     }
+
+    fn sdk_inner(&self) -> Result<&turso::Connection, DbError> {
+        match &self.backend {
+            ConnectionBackend::Sdk { inner, .. } => Ok(inner),
+            ConnectionBackend::CoreReadonly { .. } => Err(readonly_error()),
+        }
+    }
+}
+
+fn utf8_path(path: &Path) -> Result<&str, DbError> {
+    path.to_str().ok_or_else(|| {
+        DbError::InvalidParameter(format!(
+            "database path is not valid UTF-8: {}",
+            path.display()
+        ))
+    })
+}
+
+fn core_error(error: turso::core::LimboError) -> turso::Error {
+    match error {
+        turso::core::LimboError::ForeignKeyConstraint(message)
+        | turso::core::LimboError::Constraint(message) => turso::Error::Constraint(message),
+        turso::core::LimboError::Corrupt(message) => turso::Error::Corrupt(message),
+        turso::core::LimboError::NotADB => turso::Error::NotAdb("file is not a database".into()),
+        turso::core::LimboError::DatabaseFull(message) => turso::Error::DatabaseFull(message),
+        turso::core::LimboError::ReadOnly => turso::Error::Readonly("database is readonly".into()),
+        turso::core::LimboError::Busy => turso::Error::Busy("database is locked".into()),
+        turso::core::LimboError::BusySnapshot => turso::Error::BusySnapshot(
+            "database snapshot is stale, rollback and retry the transaction".into(),
+        ),
+        turso::core::LimboError::CompletionError(turso::core::CompletionError::IOError(
+            kind,
+            operation,
+        )) => turso::Error::IoError(kind, operation),
+        other => turso::Error::Error(other.to_string()),
+    }
+}
+
+fn core_query(
+    conn: &Arc<turso::core::Connection>,
+    sql: &str,
+    params: turso::params::Params,
+) -> Result<turso::core::Statement, DbError> {
+    let mut stmt = conn.prepare(sql).map_err(core_error)?;
+    match params {
+        turso::params::Params::None => {}
+        turso::params::Params::Positional(values) => {
+            for (offset, value) in values.into_iter().enumerate() {
+                let index = NonZero::new(offset + 1).ok_or_else(|| {
+                    DbError::InvalidParameter("parameter index cannot be zero".into())
+                })?;
+                stmt.bind_at(index, value.into()).map_err(core_error)?;
+            }
+        }
+        turso::params::Params::Named(values) => {
+            for (name, value) in values {
+                let index = stmt.parameter_index(&name).ok_or_else(|| {
+                    DbError::InvalidParameter(format!("unknown named parameter: {name}"))
+                })?;
+                stmt.bind_at(index, value.into()).map_err(core_error)?;
+            }
+        }
+    }
+    Ok(stmt)
 }
 
 fn readonly_error() -> DbError {
@@ -371,19 +500,14 @@ impl<'conn> Statement<'conn> {
     pub async fn query_map<T, P, F>(
         &mut self,
         params: P,
-        mut map: F,
+        map: F,
     ) -> Result<std::vec::IntoIter<Result<T, DbError>>, DbError>
     where
         P: crate::params::IntoParams,
         F: FnMut(&crate::row::Row<'_>) -> Result<T, DbError>,
     {
-        let params = params.into_params()?.into_turso();
-        let mut query_rows = self.conn.inner.query(&self.sql, params).await?;
-        let mut rows = Vec::new();
-        while let Some(row) = query_rows.next().await? {
-            rows.push(map(&crate::row::Row::new(&row)));
-        }
-        Ok(rows.into_iter())
+        let rows = self.conn.query_all(&self.sql, params, map).await?;
+        Ok(rows.into_iter().map(Ok).collect::<Vec<_>>().into_iter())
     }
 
     pub async fn query_row<T, P, F>(&mut self, params: P, map: F) -> Result<T, DbError>
@@ -424,29 +548,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(value, 7);
-    }
-
-    #[tokio::test]
-    async fn writable_writes_wait_for_existing_write_lock() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("data.db");
-
-        let conn = Connection::open_local(db_path.clone(), true).await.unwrap();
-        conn.apply_connection_pragmas().await.unwrap();
-        conn.execute_batch("CREATE TABLE lock_probe (id INTEGER PRIMARY KEY)")
-            .await
-            .unwrap();
-
-        // A second connection holds the multiprocess WAL write lock; our write
-        // must wait on busy_timeout and recover once the holder releases.
-        let lock = crate::test_support::hold_write_lock(db_path, Duration::from_millis(500)).await;
-
-        let result = conn
-            .execute("INSERT INTO lock_probe (id) VALUES (1)", ())
-            .await;
-        lock.await.expect("release write lock");
-
-        result.expect("writable write should honor busy_timeout and recover");
     }
 
     #[tokio::test]

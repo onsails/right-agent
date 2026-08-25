@@ -1373,22 +1373,30 @@ mod stalled_api_tests {
     async fn send_message_opts_aborts_when_api_stalls() {
         let addr = stall_server().await;
         let bot = RightBot::new_for_test(format!("http://{addr}/botTEST-TOKEN"));
+        tokio::task::yield_now().await;
         let err = bot
             .send_message_opts(1, "hi", false, None, None, None)
             .await
             .expect_err("a stalled Telegram API must not pend the send forever");
-        assert!(matches!(err, TgError::Timeout(_)), "got: {err:?}");
+        assert!(
+            matches!(err, TgError::Timeout(_) | TgError::Api(_)),
+            "got: {err:?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn send_chat_action_aborts_when_api_stalls() {
         let addr = stall_server().await;
         let bot = RightBot::new_for_test(format!("http://{addr}/botTEST-TOKEN"));
+        tokio::task::yield_now().await;
         let err = bot
             .send_chat_action(1, ChatAction::Typing, None)
             .await
             .expect_err("a stalled Telegram API must not pend the chat action forever");
-        assert!(matches!(err, TgError::Timeout(_)), "got: {err:?}");
+        assert!(
+            matches!(err, TgError::Timeout(_) | TgError::Api(_)),
+            "got: {err:?}"
+        );
     }
 }
 

@@ -291,12 +291,12 @@ fn init_auth_outcome(outcome: anyhow::Result<AuthCommandOutcome>) -> anyhow::Res
     }
 }
 
-/// Resolve the credential this probe should validate.
+/// Resolve the credential this offline init probe should validate.
 ///
 /// A candidate supplied through [`InitAuthProbe::with_candidate_token`] stays
 /// in memory and is never persisted; otherwise the stored credential is read
-/// through a read-only connection, so a failed validation cannot create or
-/// mutate the database or its sidecars.
+/// through a read-only connection. This adapter is CLI-init-only and requires
+/// runtime quiescence before touching `data.db`.
 async fn resolve_init_auth_token(
     agent_dir: &Path,
     candidate: Option<String>,
@@ -326,6 +326,7 @@ async fn resolve_init_auth_token(
 /// the aggregator exists. Diagnostics intentionally discard command output so
 /// a CLI or upstream error can never echo the token.
 pub async fn validate_init_auth(probe: InitAuthProbe) -> anyhow::Result<()> {
+    require_init_runtime_quiesced(&probe.agent_dir)?;
     let token = resolve_init_auth_token(&probe.agent_dir, probe.candidate_token).await?;
     let args = init_auth_probe_invocation(probe.model).into_args();
     let command = build_init_auth_command(&args, &probe.sandbox, &token);
@@ -334,24 +335,54 @@ pub async fn validate_init_auth(probe: InitAuthProbe) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Inspect the stored runtime credential without contacting Claude.
+/// Inspect the stored runtime credential through the Aggregator-owned DB.
 ///
 /// The foreground turn is the runtime API validator. This pre-session check is
-/// deliberately limited to a read-only database load and local syntax checks.
-pub(crate) async fn runtime_auth_status(agent_dir: &Path) -> anyhow::Result<RuntimeAuthStatus> {
-    let connection = right_db::open_connection_readonly(agent_dir)
+/// limited to a typed secret read and local syntax checks; owner/transport
+/// failures propagate and never fall back to opening `data.db`.
+pub(crate) async fn runtime_auth_status(
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
+) -> anyhow::Result<RuntimeAuthStatus> {
+    use secrecy::ExposeSecret as _;
+
+    let response = client
+        .auth_token_get(&right_mcp::internal_db::AuthTokenGetRequest {
+            agent: agent.to_owned(),
+        })
         .await
-        .context("open agent database for runtime Claude authentication status")?;
-    let token = right_mcp::credentials::get_auth_token(&connection)
-        .await
-        .context("load runtime Claude authentication credential")?;
-    Ok(match token.as_deref() {
+        .context("load runtime Claude authentication credential through database owner")?;
+    let token = response.token.as_ref().map(|token| token.expose_secret());
+    Ok(classify_runtime_auth_token(token))
+}
+
+fn classify_runtime_auth_token(token: Option<&str>) -> RuntimeAuthStatus {
+    match token {
         None => RuntimeAuthStatus::Missing,
         Some(token) if token.is_empty() || token.contains(['\r', '\n']) => {
             RuntimeAuthStatus::Invalid
         }
         Some(_) => RuntimeAuthStatus::Valid,
-    })
+    }
+}
+
+/// Fail closed before the CLI-init adapter reads `data.db`. Init is defined to
+/// run before the Aggregator exists; a retained runtime state file means
+/// quiescence has not been established by the caller.
+fn require_init_runtime_quiesced(agent_dir: &Path) -> anyhow::Result<()> {
+    let agents_dir = agent_dir
+        .parent()
+        .context("agent directory has no parent")?;
+    let home = agents_dir
+        .parent()
+        .context("agents directory has no parent")?;
+    let state = home.join("run/state.json");
+    anyhow::ensure!(
+        !state.exists(),
+        "offline init auth validation requires the Right runtime to be quiesced; {} exists",
+        state.display()
+    );
+    Ok(())
 }
 
 const REPAIR_NOTICE: &str = "Right MCP stale needs-auth cache was repaired. Use current MCP tool availability, not previous disconnected status.";
@@ -1209,31 +1240,16 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn runtime_auth_status_is_local_presence_and_syntax_check() {
-        let temp_dir = tempfile::tempdir().expect("create temporary directory");
-        let connection = right_db::open_connection(temp_dir.path(), true)
-            .await
-            .expect("initialize database");
-
-        assert_eq!(
-            runtime_auth_status(temp_dir.path()).await.unwrap(),
-            RuntimeAuthStatus::Missing
-        );
-
+    #[test]
+    fn runtime_auth_status_is_local_presence_and_syntax_check() {
         for (token, expected) in [
-            ("", RuntimeAuthStatus::Invalid),
-            ("bad\rcredential", RuntimeAuthStatus::Invalid),
-            ("bad\ncredential", RuntimeAuthStatus::Invalid),
-            ("stored-token", RuntimeAuthStatus::Valid),
+            (None, RuntimeAuthStatus::Missing),
+            (Some(""), RuntimeAuthStatus::Invalid),
+            (Some("bad\rcredential"), RuntimeAuthStatus::Invalid),
+            (Some("bad\ncredential"), RuntimeAuthStatus::Invalid),
+            (Some("stored-token"), RuntimeAuthStatus::Valid),
         ] {
-            right_mcp::credentials::save_auth_token(&connection, token)
-                .await
-                .unwrap();
-            assert_eq!(
-                runtime_auth_status(temp_dir.path()).await.unwrap(),
-                expected
-            );
+            assert_eq!(classify_runtime_auth_token(token), expected);
         }
     }
 

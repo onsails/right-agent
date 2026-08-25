@@ -313,11 +313,17 @@ pub(crate) async fn repair_null_reply(
 /// Fetch the per-agent notice token used to wrap trusted SYSTEM_NOTICE prompts,
 /// so the agent can verify SYSTEM_NOTICE markers.
 async fn fetch_notice_token(agent_dir: &std::path::Path) -> Result<String, ReflectionError> {
-    let conn = right_db::open_connection(agent_dir, false)
-        .await
+    use secrecy::ExposeSecret as _;
+
+    let (client, agent) = crate::db::client_for_agent_dir(agent_dir)
         .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
-    right_mcp::credentials::get_or_create_notice_token(&conn)
+    client
+        .notice_token_get_or_create(&right_mcp::internal_db::NoticeTokenGetOrCreateRequest {
+            agent,
+            request_id: crate::db::request_id(),
+        })
         .await
+        .map(|response| response.token.expose_secret().to_owned())
         .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))
 }
 
@@ -514,25 +520,33 @@ async fn run_notice_resume(
     let (reply_output, _session_id) = crate::cc::worker_reply::parse_reply_output(&result_line)
         .map_err(ReflectionError::Parse)?;
 
-    // Account usage (best-effort — log but don't fail reflection on usage insert error).
+    // Account usage best-effort through the owner.
     if let Some(breakdown) = crate::cc::stream::parse_usage_full(&result_line) {
-        match right_db::open_connection(&ctx.agent_dir, false).await {
-            Ok(conn) => {
-                let res = match &ctx.parent_source {
-                    ParentSource::Worker { chat_id, thread_id } => {
-                        insert_reflection_worker(&conn, &breakdown, *chat_id, *thread_id).await
-                    }
-                    ParentSource::Cron { job_name } => {
-                        insert_reflection_cron(&conn, &breakdown, job_name).await
-                    }
-                };
-                if let Err(e) = res {
-                    tracing::warn!("reflection usage insert failed: {:#}", e);
+        let (client, agent) = crate::db::client_for_agent_dir(&ctx.agent_dir)
+            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
+        let source = match &ctx.parent_source {
+            ParentSource::Worker { chat_id, thread_id } => {
+                right_mcp::internal_db::UsageSourceDto::ReflectionWorker {
+                    chat_id: *chat_id,
+                    thread_id: *thread_id,
                 }
             }
-            Err(e) => {
-                tracing::warn!("reflection usage DB open failed: {:#}", e);
+            ParentSource::Cron { job_name } => {
+                right_mcp::internal_db::UsageSourceDto::ReflectionCron {
+                    job_name: job_name.clone(),
+                }
             }
+        };
+        if let Err(error) = client
+            .usage_insert_event(&right_mcp::internal_db::UsageInsertEventRequest {
+                agent,
+                request_id: crate::db::request_id(),
+                source,
+                event: crate::db::usage_dto(&breakdown),
+            })
+            .await
+        {
+            tracing::warn!("reflection usage owner insert failed: {error:#}");
         }
     }
 

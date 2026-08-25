@@ -3,8 +3,6 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use right_db::OptionalExtension as _;
-
 use crate::cc::markdown_utils::strip_html_tags;
 use crate::telegram::handler::IdleTimestamp;
 
@@ -22,172 +20,82 @@ pub(crate) struct PendingAsyncResult {
     pub force_notify: bool,
 }
 
-/// Query the oldest undelivered async result with a non-null delivery_json.
-#[cfg(test)]
-pub(crate) async fn fetch_pending(
-    conn: &right_db::Connection,
-) -> Result<Option<PendingAsyncResult>, right_db::DbError> {
-    Ok(fetch_pending_batch(conn, 1).await?.into_iter().next())
-}
-
-async fn fetch_pending_batch(
-    conn: &right_db::Connection,
-    limit: usize,
-) -> Result<Vec<PendingAsyncResult>, right_db::DbError> {
-    let mut stmt = conn.prepare(
-        "SELECT id, kind, producer_ref, delivery_json, COALESCE(run_note, ''), status, \
-                NULLIF(target_chat_id, 0), target_thread_id, force_notify \
-         FROM async_runs \
-         WHERE delivery_required = 1 \
-           AND delivery_status IN ('pending', 'retryable') \
-           AND status IN ('success', 'failed') \
-           AND delivery_json IS NOT NULL \
-         ORDER BY finished_at ASC \
-         LIMIT ?1",
-    )?;
-    stmt.query_map(right_db::params![limit.max(1) as i64], pending_from_row)
-        .await?
-        .collect()
-}
-
-fn pending_from_row(row: &right_db::row::Row<'_>) -> Result<PendingAsyncResult, right_db::DbError> {
-    Ok(PendingAsyncResult {
-        id: row.get(0)?,
-        kind: row.get(1)?,
-        producer_ref: row.get(2)?,
-        delivery_json: row.get(3)?,
-        run_note: row.get(4)?,
-        status: row.get(5)?,
-        target_chat_id: row.get(6)?,
-        target_thread_id: row.get(7)?,
-        force_notify: row.get::<_, i64>(8)? != 0,
-    })
-}
-
-pub(crate) async fn fetch_next_pending(
-    conn: &right_db::Connection,
+async fn fetch_next_pending(
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
     delivered_in_memory: &HashSet<String>,
-) -> Result<Option<PendingAsyncResult>, right_db::DbError> {
+) -> Result<Option<PendingAsyncResult>, right_mcp::internal_db::InternalDbError> {
     let limit = PENDING_FETCH_BATCH_SIZE.max(delivered_in_memory.len().saturating_add(1));
-    let batch = fetch_pending_batch(conn, limit).await?;
-    let mut in_memory_ids = Vec::new();
-    for pending in batch {
+    let response = client
+        .delivery_fetch_pending(&right_mcp::internal_db::DeliveryFetchPendingRequest {
+            agent: agent.to_owned(),
+            limit: limit as u32,
+        })
+        .await?;
+    for dto in response.pending {
+        let pending = pending_from_dto(dto);
         if delivered_in_memory.contains(&pending.id) {
-            in_memory_ids.push(pending.id);
-            continue;
+            mark_delivery_outcome(client, agent, &pending.id, "delivered").await?;
+        } else {
+            return Ok(Some(pending));
         }
-        return Ok(Some(pending));
-    }
-
-    let mut mark_error = None;
-    for id in in_memory_ids {
-        if let Err(e) = mark_delivery_outcome(conn, &id, "delivered").await {
-            tracing::warn!(run_id = %id, "async delivery: retry mark delivered failed: {e:#}");
-            if mark_error.is_none() {
-                mark_error = Some(e);
-            }
-        }
-    }
-    if let Some(e) = mark_error {
-        return Err(e);
     }
     Ok(None)
+}
+
+fn pending_from_dto(dto: right_mcp::internal_db::PendingAsyncResultDto) -> PendingAsyncResult {
+    PendingAsyncResult {
+        id: dto.id,
+        kind: dto.kind,
+        producer_ref: dto.producer_ref,
+        delivery_json: dto.delivery_json,
+        run_note: dto.run_note,
+        status: dto.status,
+        target_chat_id: dto.target_chat_id,
+        target_thread_id: dto.target_thread_id,
+        force_notify: dto.force_notify,
+    }
 }
 
 /// Mark an async run delivery as complete with a given status.
 ///
 /// Single UPDATE sets both `delivery_status` and `delivered_at` atomically.
 async fn mark_delivery_outcome(
-    conn: &right_db::Connection,
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
     run_id: &str,
     status: &str,
-) -> Result<(), right_db::DbError> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let rows = conn
-        .execute(
-            "UPDATE async_runs \
-         SET delivery_status = ?1, delivered_at = ?2, updated_at = ?2 \
-        WHERE id = ?3",
-            right_db::params![status, now, run_id],
-        )
-        .await?;
-    if rows == 0 {
-        return Err(right_db::DbError::NotFound);
-    }
-    Ok(())
-}
-
-/// Deduplicate: for a given job, find the latest undelivered result and mark all
-/// older undelivered results as delivered. Returns (latest_result, skipped_count).
-pub(crate) async fn deduplicate_job(
-    conn: &right_db::Connection,
-    producer_ref: &str,
-) -> Result<Option<(PendingAsyncResult, u32)>, right_db::DbError> {
-    // The candidate's `force_notify` is the OR across all undelivered runs of
-    // this job, not just the latest row's value. Otherwise a forced run would
-    // lose its idle-gate bypass whenever a later non-forced scheduled run wins
-    // the `finished_at DESC` tie-break — the forced verification report the user
-    // explicitly requested would be silently held behind the idle gate.
-    let latest = conn
-        .query_row(
-            "SELECT id, kind, producer_ref, delivery_json, COALESCE(run_note, ''), status, \
-                    NULLIF(target_chat_id, 0), target_thread_id, \
-                    COALESCE(( \
-                        SELECT MAX(force_notify) FROM async_runs a2 \
-                        WHERE a2.kind = 'cron' \
-                          AND a2.producer_ref = ?1 \
-                          AND a2.delivery_required = 1 \
-                          AND a2.delivery_status IN ('pending', 'retryable') \
-                          AND a2.status IN ('success', 'failed') \
-                          AND a2.delivery_json IS NOT NULL \
-                    ), 0) \
-             FROM async_runs \
-             WHERE kind = 'cron' \
-               AND producer_ref = ?1 \
-               AND delivery_required = 1 \
-               AND delivery_status IN ('pending', 'retryable') \
-               AND status IN ('success', 'failed') \
-               AND delivery_json IS NOT NULL \
-             ORDER BY finished_at DESC \
-             LIMIT 1",
-            right_db::params![producer_ref],
-            pending_from_row,
-        )
+) -> Result<(), right_mcp::internal_db::InternalDbError> {
+    client
+        .delivery_mark_outcome(&right_mcp::internal_db::DeliveryMarkOutcomeRequest {
+            agent: agent.to_owned(),
+            request_id: crate::db::request_id(),
+            run_id: run_id.to_owned(),
+            status: status.to_owned(),
+        })
         .await
-        .optional()?;
-
-    let Some(latest) = latest else {
-        return Ok(None);
-    };
-
-    let now = chrono::Utc::now().to_rfc3339();
-    let count = conn
-        .execute(
-            "UPDATE async_runs \
-         SET delivered_at = ?1, delivery_status = 'superseded', updated_at = ?1 \
-         WHERE kind = 'cron' \
-           AND producer_ref = ?2 \
-           AND id != ?3 \
-           AND delivery_required = 1 \
-           AND delivery_status IN ('pending', 'retryable') \
-           AND status IN ('success', 'failed')",
-            right_db::params![now, producer_ref, &latest.id],
-        )
-        .await?;
-
-    Ok(Some((latest, count as u32)))
+        .map(drop)
 }
 
-pub(crate) async fn select_delivery_candidate(
-    conn: &right_db::Connection,
+async fn select_delivery_candidate(
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
     pending: PendingAsyncResult,
-) -> Result<Option<(PendingAsyncResult, u32)>, right_db::DbError> {
+) -> Result<Option<(PendingAsyncResult, u32)>, right_mcp::internal_db::InternalDbError> {
     if pending.kind == "cron"
         && let Some(producer_ref) = pending.producer_ref.as_deref()
     {
-        return deduplicate_job(conn, producer_ref).await;
+        let response = client
+            .delivery_deduplicate_job(&right_mcp::internal_db::DeliveryDeduplicateJobRequest {
+                agent: agent.to_owned(),
+                producer_ref: producer_ref.to_owned(),
+            })
+            .await?;
+        return Ok(response
+            .candidate
+            .map(pending_from_dto)
+            .map(|row| (row, response.superseded)));
     }
-
     Ok(Some((pending, 0)))
 }
 
@@ -474,9 +382,24 @@ fn pending_label(pending: &PendingAsyncResult) -> &str {
         .unwrap_or(pending.kind.as_str())
 }
 
+/// Resolve the active session root for a delivery target. Owner errors
+/// propagate as typed IPC errors: falling back to `None` here would fork
+/// the run's result into a fresh session and lose conversation continuity.
+async fn active_delivery_session_id(
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
+    chat_id: i64,
+    thread_id: i64,
+) -> Result<Option<String>, right_mcp::internal_db::InternalDbError> {
+    Ok(
+        crate::telegram::session::get_active_session(client, agent, chat_id, thread_id)
+            .await?
+            .map(|session| session.root_session_id),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_delivery_once(
-    conn: &mut right_db::Connection,
     state: &mut DeliveryLoopState,
     mode: DeliveryMode,
     agent_dir: &Path,
@@ -491,24 +414,21 @@ async fn run_delivery_once(
     session_locks: &crate::telegram::SessionLocks,
     debug: &Arc<std::sync::atomic::AtomicBool>,
     shutdown: DeliveryShutdownControl<'_>,
-) -> bool {
-    let pending = match fetch_next_pending(conn, &state.delivered_in_memory).await {
-        Ok(Some(p)) => p,
-        Ok(None) => return false,
-        Err(e) => {
-            tracing::error!("async delivery: fetch_next_pending failed: {e:#}");
-            return false;
-        }
-    };
-
-    let (to_deliver, skipped) = match select_delivery_candidate(conn, pending).await {
-        Ok(Some((result, s))) => (result, s),
-        Ok(None) => return false,
-        Err(e) => {
-            tracing::error!("async delivery: candidate selection failed: {e:#}");
-            return false;
-        }
-    };
+) -> Result<bool, right_mcp::internal_db::InternalDbError> {
+    // Owner read failures are typed and abort this delivery attempt: the poll
+    // loop (or the shutdown-flush deadline) is the designed retry boundary.
+    let pending =
+        match fetch_next_pending(internal_client, agent_name, &state.delivered_in_memory).await {
+            Ok(Some(pending)) => pending,
+            Ok(None) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+    let (to_deliver, skipped) =
+        match select_delivery_candidate(internal_client, agent_name, pending).await {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => return Ok(false),
+            Err(error) => return Err(error),
+        };
 
     // Idle gate runs against the row that will actually be delivered. For cron,
     // `select_delivery_candidate` may return a newer run than the one fetched
@@ -527,18 +447,18 @@ async fn run_delivery_once(
             wait_secs = wait,
             "async delivery: result pending, waiting for chat idle ({IDLE_THRESHOLD_SECS}s)"
         );
-        return false;
+        return Ok(false);
     }
 
     if state.delivered_in_memory.contains(&to_deliver.id) {
-        if mark_delivery_outcome(conn, &to_deliver.id, "delivered")
+        if mark_delivery_outcome(internal_client, agent_name, &to_deliver.id, "delivered")
             .await
             .is_ok()
         {
             state.delivered_in_memory.remove(&to_deliver.id);
         }
         tracing::debug!(run_id = %to_deliver.id, "skipping already-delivered run (in-memory dedup)");
-        return true;
+        return Ok(true);
     }
 
     let allowlist_snapshot = {
@@ -555,11 +475,14 @@ async fn run_delivery_once(
                     run_id = %to_deliver.id,
                     "async run has no target_chat_id; marking delivery no_target"
                 );
-                if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "no_target").await {
+                if let Err(e) =
+                    mark_delivery_outcome(internal_client, agent_name, &to_deliver.id, "no_target")
+                        .await
+                {
                     tracing::error!(run_id = %to_deliver.id, "mark no_target failed: {e:#}");
                     state.delivered_in_memory.insert(to_deliver.id.clone());
                 }
-                return true;
+                return Ok(true);
             }
             TargetClassification::Denied => {
                 tracing::warn!(
@@ -569,28 +492,28 @@ async fn run_delivery_once(
                     target_chat_id = ?to_deliver.target_chat_id,
                     "async delivery target chat is not in allowlist; skipping delivery"
                 );
-                if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "denied").await {
+                if let Err(e) =
+                    mark_delivery_outcome(internal_client, agent_name, &to_deliver.id, "denied")
+                        .await
+                {
                     tracing::error!(run_id = %to_deliver.id, "mark denied failed: {e:#}");
                     state.delivered_in_memory.insert(to_deliver.id.clone());
                 }
-                return true;
+                return Ok(true);
             }
             TargetClassification::Ready { chat_id, thread_id } => (chat_id, thread_id),
         };
 
-    let session_id = match crate::telegram::session::get_active_session(
-        conn,
+    // A session-lookup failure must abort this attempt: continuing with
+    // `None` would silently fork the run's result into a fresh session and
+    // lose conversation continuity. The row stays pending for the next poll.
+    let session_id = active_delivery_session_id(
+        internal_client,
+        agent_name,
         target_chat_id,
         target_thread_id.unwrap_or(0),
     )
-    .await
-    {
-        Ok(s) => s.map(|s| s.root_session_id),
-        Err(e) => {
-            tracing::error!("async delivery: session lookup failed: {e:#}");
-            None
-        }
-    };
+    .await?;
 
     let yaml = match format_async_yaml(&to_deliver, skipped) {
         Ok(y) => y,
@@ -601,11 +524,13 @@ async fn run_delivery_once(
                 run_id = %to_deliver.id,
                 "async delivery: delivery_json deserialization failed, marking delivery failed: {e:#}"
             );
-            if let Err(db_err) = mark_delivery_outcome(conn, &to_deliver.id, "failed").await {
+            if let Err(db_err) =
+                mark_delivery_outcome(internal_client, agent_name, &to_deliver.id, "failed").await
+            {
                 tracing::error!(run_id = %to_deliver.id, "mark failed for malformed delivery_json failed: {db_err:#}");
                 state.delivered_in_memory.insert(to_deliver.id.clone());
             }
-            return true;
+            return Ok(true);
         }
     };
     tracing::info!(
@@ -642,14 +567,17 @@ async fn run_delivery_once(
         Ok(report) => {
             if let Err(e) = ensure_delivery_send_report_non_empty(report) {
                 tracing::error!(run_id = %to_deliver.id, "async delivery returned empty send report: {e}");
-                return true;
+                return Ok(true);
             }
             // TODO(usage): delivery stream capture lives elsewhere — follow up.
             // deliver_through_session uses OutputFormat::Json (single JSON blob, not stream-json
             // NDJSON), so there is no "result" event line to feed parse_usage_full. Usage
             // tracking for delivery sessions requires either switching to stream-json output
             // or extracting cost from the non-streaming JSON response format.
-            if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "delivered").await {
+            if let Err(e) =
+                mark_delivery_outcome(internal_client, agent_name, &to_deliver.id, "delivered")
+                    .await
+            {
                 tracing::error!(run_id = %to_deliver.id, "delivery DB update failed: {e:#}");
                 state.delivered_in_memory.insert(to_deliver.id.clone());
             }
@@ -679,7 +607,7 @@ async fn run_delivery_once(
                     run_id = %to_deliver.id,
                     "async delivery interrupted by shutdown; leaving row pending"
                 );
-                return false;
+                return Ok(false);
             }
             if is_delivery_terminal_shutdown_send_error(&e) {
                 tracing::warn!(
@@ -688,12 +616,15 @@ async fn run_delivery_once(
                     run_id = %to_deliver.id,
                     "async delivery send outcome is unknown after shutdown deadline; marking terminal failed to avoid duplicate delivery"
                 );
-                if let Err(mark_err) = mark_delivery_outcome(conn, &to_deliver.id, "failed").await {
+                if let Err(mark_err) =
+                    mark_delivery_outcome(internal_client, agent_name, &to_deliver.id, "failed")
+                        .await
+                {
                     tracing::error!(run_id = %to_deliver.id, "terminal delivery-failure DB update failed: {mark_err:#}");
                     state.delivered_in_memory.insert(to_deliver.id.clone());
                 }
                 state.attempt_counts.remove(&to_deliver.id);
-                return true;
+                return Ok(true);
             }
             let attempts = state
                 .attempt_counts
@@ -715,7 +646,10 @@ async fn run_delivery_once(
                     run_id = %to_deliver.id,
                     "giving up after {MAX_DELIVERY_ATTEMPTS} attempts, marking as delivered"
                 );
-                if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "failed").await {
+                if let Err(e) =
+                    mark_delivery_outcome(internal_client, agent_name, &to_deliver.id, "failed")
+                        .await
+                {
                     tracing::error!(run_id = %to_deliver.id, "delivery-failure DB update failed: {e:#}");
                     state.delivered_in_memory.insert(to_deliver.id.clone());
                 }
@@ -724,7 +658,7 @@ async fn run_delivery_once(
         }
     }
 
-    true
+    Ok(true)
 }
 
 /// Main delivery loop. Runs as a tokio task.
@@ -745,14 +679,6 @@ pub(crate) async fn run_delivery_loop(
 ) {
     tracing::info!(agent = %agent_name, "async delivery loop started");
 
-    let mut conn = match right_db::open_connection(&agent_dir, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("async delivery: DB open failed: {e:#}");
-            return;
-        }
-    };
-
     let mut state = DeliveryLoopState::new();
 
     loop {
@@ -768,8 +694,9 @@ pub(crate) async fn run_delivery_loop(
         // recovery between polls retires the previous one.
         let sandbox = sandbox_runtime.current_sandbox();
 
-        run_delivery_once(
-            &mut conn,
+        // Owner IPC failures surface here; the poll loop is the designed
+        // retry boundary, so the next cycle tries again.
+        if let Err(error) = run_delivery_once(
             &mut state,
             DeliveryMode::Normal,
             &agent_dir,
@@ -788,7 +715,10 @@ pub(crate) async fn run_delivery_loop(
                 deadline: None,
             },
         )
-        .await;
+        .await
+        {
+            tracing::error!(agent = %agent_name, "async delivery poll failed: {error:#}");
+        }
     }
 }
 
@@ -919,13 +849,6 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
     session_locks: crate::telegram::SessionLocks,
     debug: Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let mut conn = match right_db::open_connection(&agent_dir, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("async delivery shutdown flush: DB open failed: {e:#}");
-            return;
-        }
-    };
     let mut state = DeliveryLoopState::new();
     let deadline = tokio::time::Instant::now() + ASYNC_DELIVERY_SHUTDOWN_TIMEOUT;
     loop {
@@ -934,8 +857,10 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
             return;
         }
         let sandbox = sandbox_runtime.current_sandbox();
-        let delivered = run_delivery_once(
-            &mut conn,
+        // Owner IPC failures abort the flush: without the owner we cannot
+        // read pending rows or mark outcomes, so spinning until the deadline
+        // would only delay shutdown.
+        let delivered = match run_delivery_once(
             &mut state,
             DeliveryMode::ShutdownFlush,
             &agent_dir,
@@ -954,7 +879,14 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
                 deadline: Some(deadline),
             },
         )
-        .await;
+        .await
+        {
+            Ok(delivered) => delivered,
+            Err(error) => {
+                tracing::error!(agent = %agent_name, "async delivery shutdown flush failed: {error:#}");
+                return;
+            }
+        };
         if !delivered {
             return;
         }
@@ -1307,1301 +1239,29 @@ async fn deliver_through_session(
 }
 
 #[cfg(test)]
-mod tests {
+mod owner_error_propagation_tests {
     use super::*;
 
-    #[test]
-    fn attachment_failure_fatal_only_when_no_body_sent() {
-        // No body content reached the user yet → retry is safe and required.
-        assert!(attachment_failure_is_fatal(0));
-        // Body content already delivered → retry would duplicate it, so the
-        // attachment failure must be tolerated, not fatal.
-        assert!(!attachment_failure_is_fatal(1));
-        assert!(!attachment_failure_is_fatal(3));
-    }
-
-    #[test]
-    fn attachments_only_with_header_keeps_attachment_failure_fatal() {
-        // Regression: an attachments-only delivery sends the one-line platform
-        // status header standalone before the attachment batch. That header send
-        // must NOT count as body content — otherwise an attachment failure would
-        // flip non-fatal and the user's payload would be dropped with no retry.
-        // The body-content count stays 0, so the failure remains fatal (requeue).
-        let body_messages_sent_after_header_only = 0usize;
-        assert!(attachment_failure_is_fatal(
-            body_messages_sent_after_header_only
+    /// An owner session-lookup failure must fail the delivery operation with
+    /// the typed IPC error. Falling back to `None` here would silently fork
+    /// the run's result into a fresh session and lose conversation
+    /// continuity while the audit trail looks like a normal delivery.
+    #[tokio::test]
+    async fn active_session_lookup_failure_propagates() {
+        let client = right_mcp::internal_client::InternalClient::new(std::path::PathBuf::from(
+            "/nonexistent-right-test-internal.sock",
         ));
-    }
-
-    #[tokio::test]
-    async fn delivery_mode_shutdown_flush_skips_idle_gate() {
-        assert!(should_wait_for_idle(DeliveryMode::Normal, 10));
-        assert!(!should_wait_for_idle(DeliveryMode::ShutdownFlush, 10));
-    }
-
-    #[test]
-    fn subprocess_deadline_merges_with_caller_control_and_preserves_diagnostic() {
-        let token = tokio_util::sync::CancellationToken::new();
-        let now = tokio::time::Instant::now();
-        let internal_deadline = now + DELIVERY_TIMEOUT;
-        let caller_deadline = now + std::time::Duration::from_secs(10);
-        let caller_control = DeliveryShutdownControl {
-            token: Some(&token),
-            deadline: Some(caller_deadline),
-        };
-
-        let caller_bounded = delivery_subprocess_control(caller_control, internal_deadline);
-        assert_eq!(caller_bounded.shutdown.deadline, Some(caller_deadline));
-        assert!(std::ptr::eq(caller_bounded.shutdown.token.unwrap(), &token));
-        assert_eq!(
-            caller_bounded.deadline_error,
-            DELIVERY_INTERRUPTED_BY_SHUTDOWN
-        );
-
-        let delivery_bounded = delivery_subprocess_control(
-            DeliveryShutdownControl {
-                token: Some(&token),
-                deadline: None,
-            },
-            internal_deadline,
-        );
-        assert_eq!(delivery_bounded.shutdown.deadline, Some(internal_deadline));
-        assert!(std::ptr::eq(
-            delivery_bounded.shutdown.token.unwrap(),
-            &token
-        ));
-        assert_eq!(delivery_bounded.deadline_error, DELIVERY_TIMEOUT_ERROR);
-
-        let later_caller = delivery_subprocess_control(
-            DeliveryShutdownControl {
-                token: None,
-                deadline: Some(internal_deadline + std::time::Duration::from_secs(1)),
-            },
-            internal_deadline,
-        );
-        assert_eq!(later_caller.shutdown.deadline, Some(internal_deadline));
-        assert_eq!(later_caller.deadline_error, DELIVERY_TIMEOUT_ERROR);
-    }
-
-    #[tokio::test]
-    async fn shutdown_deadline_bounds_single_delivery_attempt() {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(10);
-        let result = run_or_delivery_shutdown(
-            DeliveryShutdownControl {
-                token: None,
-                deadline: Some(deadline),
-            },
-            async {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                true
-            },
-        )
-        .await;
-
-        assert_eq!(
-            result.unwrap_err(),
-            DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()
-        );
-    }
-
-    #[tokio::test]
-    async fn delivery_shutdown_cancels_pending_future() {
-        let shutdown = tokio_util::sync::CancellationToken::new();
-        shutdown.cancel();
-
-        let result = run_or_delivery_shutdown(
-            DeliveryShutdownControl {
-                token: Some(&shutdown),
-                deadline: None,
-            },
-            async { true },
-        )
-        .await;
-
-        assert_eq!(
-            result.unwrap_err(),
-            DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()
-        );
-    }
-
-    #[tokio::test]
-    async fn delivery_without_shutdown_waits_for_future() {
-        let result = run_or_delivery_shutdown(
-            DeliveryShutdownControl {
-                token: None,
-                deadline: None,
-            },
-            async { true },
-        )
-        .await;
-
-        assert_eq!(result, Ok(true));
-    }
-
-    #[tokio::test]
-    async fn delivery_shutdown_interruption_is_not_retry_failure() {
-        assert!(is_delivery_shutdown_interruption(
-            DELIVERY_INTERRUPTED_BY_SHUTDOWN
-        ));
-        assert!(!is_delivery_shutdown_interruption(
-            "stdin write: broken pipe"
-        ));
-    }
-
-    #[tokio::test]
-    async fn shutdown_bounded_telegram_send_timeout_is_terminal_not_retryable() {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(10);
-        let result = run_telegram_request_with_shutdown(
-            DeliveryShutdownControl {
-                token: None,
-                deadline: Some(deadline),
-            },
-            false,
-            async {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                Ok::<_, String>(())
-            },
-        )
-        .await;
-
-        let error = result.unwrap_err();
-        assert!(is_delivery_terminal_shutdown_send_error(&error));
-        assert!(!is_delivery_shutdown_interruption(&error));
-    }
-
-    #[tokio::test]
-    async fn expired_shutdown_deadline_does_not_start_fresh_telegram_send() {
-        let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let was_polled = Arc::clone(&polled);
-        let deadline = tokio::time::Instant::now() - std::time::Duration::from_millis(1);
-
-        let result = run_telegram_request_with_shutdown(
-            DeliveryShutdownControl {
-                token: None,
-                deadline: Some(deadline),
-            },
-            false,
-            async move {
-                was_polled.store(true, std::sync::atomic::Ordering::SeqCst);
-                std::future::pending::<Result<(), String>>().await
-            },
-        )
-        .await;
-
-        assert_eq!(
-            result.unwrap_err(),
-            DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()
-        );
-        assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn cancelled_shutdown_after_prior_send_is_terminal_without_new_send_poll() {
-        let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let was_polled = Arc::clone(&polled);
-        let shutdown = tokio_util::sync::CancellationToken::new();
-        shutdown.cancel();
-
-        let result = run_telegram_request_with_shutdown(
-            DeliveryShutdownControl {
-                token: Some(&shutdown),
-                deadline: None,
-            },
-            true,
-            async move {
-                was_polled.store(true, std::sync::atomic::Ordering::SeqCst);
-                std::future::pending::<Result<(), String>>().await
-            },
-        )
-        .await;
-
-        assert!(is_delivery_terminal_shutdown_send_error(
-            &result.unwrap_err()
-        ));
-        assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
-    }
-
-    async fn setup_db() -> (tempfile::TempDir, right_db::Connection) {
-        let dir = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
-        (dir, conn)
-    }
-
-    #[derive(Clone, Copy)]
-    struct TestCronRun {
-        id: &'static str,
-        job_name: &'static str,
-        started_at: &'static str,
-        finished_at: Option<&'static str>,
-        status: &'static str,
-        log_path: &'static str,
-        run_note: Option<&'static str>,
-        delivery_json: Option<&'static str>,
-        delivered_at: Option<&'static str>,
-        delivery_status: Option<&'static str>,
-        delivery_required: Option<bool>,
-        target_chat_id: Option<i64>,
-        target_thread_id: Option<i64>,
-    }
-
-    impl Default for TestCronRun {
-        fn default() -> Self {
-            Self {
-                id: "run-1",
-                job_name: "job1",
-                started_at: "2026-01-01T00:00:00Z",
-                finished_at: Some("2026-01-01T00:01:00Z"),
-                status: "success",
-                log_path: "/log",
-                run_note: Some("sum"),
-                delivery_json: None,
-                delivered_at: None,
-                delivery_status: None,
-                delivery_required: None,
-                target_chat_id: None,
-                target_thread_id: None,
-            }
-        }
-    }
-
-    async fn insert_async_cron_run(conn: &right_db::Connection, run: TestCronRun) {
-        let delivery_required = run.delivery_required.unwrap_or(run.delivery_json.is_some());
-        let delivery_status =
-            run.delivery_status
-                .unwrap_or(if delivery_required { "pending" } else { "none" });
-        let updated_at = run.finished_at.unwrap_or(run.started_at);
-        conn.execute(
-            "INSERT INTO async_runs (
-                id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
-                status, started_at, finished_at, log_path, run_note, delivery_json,
-                delivery_required, delivery_status, delivered_at, created_at, updated_at
-             ) VALUES (
-                ?1, 'cron', ?2, ?1, ?3, ?4,
-                ?5, ?6, ?7, ?8, ?9, ?10,
-                ?11, ?12, ?13, ?6, ?14
-             )",
-            right_db::params![
-                run.id,
-                run.job_name,
-                run.target_chat_id.unwrap_or(0),
-                run.target_thread_id,
-                run.status,
-                run.started_at,
-                run.finished_at,
-                run.log_path,
-                run.run_note,
-                run.delivery_json,
-                if delivery_required { 1 } else { 0 },
-                delivery_status,
-                run.delivered_at,
-                updated_at,
-            ],
-        )
-        .await
-        .unwrap();
-    }
-
-    async fn insert_async_background_run(
-        conn: &right_db::Connection,
-        id: &str,
-        started_at: &str,
-        status: &str,
-        delivery_json: &str,
-        target_chat_id: i64,
-    ) {
-        let finished_at = (status == "success" || status == "failed").then_some(started_at);
-        conn.execute(
-            "INSERT INTO async_runs (
-                id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
-                status, started_at, finished_at, log_path, run_note, delivery_json,
-                delivery_required, delivery_status, delivered_at, created_at, updated_at
-             ) VALUES (
-                ?1, 'background', NULL, ?1, ?2, NULL,
-                ?3, ?4, ?5, '/log', 'summary', ?6,
-                1, 'pending', NULL, ?4, ?4
-             )",
-            right_db::params![
-                id,
-                target_chat_id,
-                status,
-                started_at,
-                finished_at,
-                delivery_json,
-            ],
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn fetch_pending_empty_db() {
-        let (_dir, conn) = setup_db().await;
-        assert!(fetch_pending(&conn).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn fetch_pending_returns_oldest() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                run_note: Some("sum1"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"first\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "b",
-                started_at: "2026-01-01T00:05:00Z",
-                finished_at: Some("2026-01-01T00:06:00Z"),
-                run_note: Some("sum2"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"second\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        let pending = fetch_pending(&conn).await.unwrap().unwrap();
-        assert_eq!(pending.id, "a", "should return oldest first");
-    }
-
-    #[tokio::test]
-    async fn fetch_next_pending_skips_in_memory_delivered_oldest() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                run_note: Some("sum1"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"first\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "b",
-                started_at: "2026-01-01T00:05:00Z",
-                finished_at: Some("2026-01-01T00:06:00Z"),
-                run_note: Some("sum2"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"second\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        let delivered_in_memory = HashSet::from(["a".to_string()]);
-
-        let pending = fetch_next_pending(&conn, &delivered_in_memory)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(pending.id, "b");
-    }
-
-    #[tokio::test]
-    async fn fetch_pending_skips_null_delivery() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                run_note: Some("silent"),
-                ..Default::default()
-            },
-        )
-        .await;
-        assert!(fetch_pending(&conn).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn fetch_pending_ignores_silent_delivery_decision() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "silent",
-                run_note: Some("no changes"),
-                delivery_json: Some("{\"kind\":\"silent\",\"reason\":\"No changes\"}"),
-                delivery_required: Some(false),
-                delivery_status: Some("none"),
-                ..Default::default()
-            },
-        )
-        .await;
-        assert!(fetch_pending(&conn).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn fetch_pending_skips_delivered() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"done\"}"),
-                delivered_at: Some("2026-01-01T00:10:00Z"),
-                delivery_status: Some("delivered"),
-                ..Default::default()
-            },
-        )
-        .await;
-        assert!(fetch_pending(&conn).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn fetch_pending_reads_async_runs_and_skips_none_delivery() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "silent",
-                delivery_json: Some("{\"kind\":\"silent\",\"reason\":\"quiet\"}"),
-                delivery_required: Some(false),
-                delivery_status: Some("none"),
-                ..Default::default()
-            },
-        )
-        .await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "pending",
-                started_at: "2026-01-01T00:05:00Z",
-                finished_at: Some("2026-01-01T00:06:00Z"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"deliver\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-
-        let pending = fetch_pending(&conn).await.unwrap().unwrap();
-        assert_eq!(pending.id, "pending");
-        assert_eq!(pending.kind, "cron");
-        assert_eq!(pending.producer_ref.as_deref(), Some("job1"));
-    }
-
-    #[tokio::test]
-    async fn deduplicate_keeps_latest_marks_older() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                run_note: Some("sum1"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"old\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "b",
-                started_at: "2026-01-01T00:05:00Z",
-                finished_at: Some("2026-01-01T00:06:00Z"),
-                run_note: Some("sum2"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"new\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        let (latest, skipped) = deduplicate_job(&conn, "job1").await.unwrap().unwrap();
-        assert_eq!(latest.id, "b");
-        assert_eq!(skipped, 1);
-        let delivered: Option<String> = conn
-            .query_row(
-                "SELECT delivered_at FROM async_runs WHERE id = 'a'",
-                [],
-                |r| r.get(0),
-            )
-            .await
-            .unwrap();
-        assert!(delivered.is_some());
-        let not_delivered: Option<String> = conn
-            .query_row(
-                "SELECT delivered_at FROM async_runs WHERE id = 'b'",
-                [],
-                |r| r.get(0),
-            )
-            .await
-            .unwrap();
-        assert!(not_delivered.is_none());
-    }
-
-    #[tokio::test]
-    async fn deduplicate_does_not_touch_other_jobs() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "b",
-                job_name: "job2",
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"y\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        let (latest, skipped) = deduplicate_job(&conn, "job1").await.unwrap().unwrap();
-        assert_eq!(latest.id, "a");
-        assert_eq!(skipped, 0);
-    }
-
-    #[tokio::test]
-    async fn deduplicate_sets_superseded_status() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                run_note: Some("sum1"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"old\"}"),
-                delivery_status: Some("pending"),
-                ..Default::default()
-            },
-        )
-        .await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "b",
-                started_at: "2026-01-01T00:05:00Z",
-                finished_at: Some("2026-01-01T00:06:00Z"),
-                run_note: Some("sum2"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"new\"}"),
-                delivery_status: Some("pending"),
-                ..Default::default()
-            },
-        )
-        .await;
-        let (latest, skipped) = deduplicate_job(&conn, "job1").await.unwrap().unwrap();
-        assert_eq!(latest.id, "b");
-        assert_eq!(skipped, 1);
-
-        let status: Option<String> = conn
-            .query_row(
-                "SELECT delivery_status FROM async_runs WHERE id = 'a'",
-                [],
-                |r| r.get(0),
-            )
-            .await
-            .unwrap();
-        assert_eq!(status.as_deref(), Some("superseded"));
-    }
-
-    #[tokio::test]
-    async fn format_async_yaml_basic_cron() {
-        let pending = PendingAsyncResult {
-            id: "abc".into(),
-            kind: "cron".into(),
-            producer_ref: Some("health-check".into()),
-            delivery_json: r#"{"kind":"notify","content":"BTC up 2%"}"#.into(),
-            run_note: "Checked 5 pairs".into(),
-            status: "success".into(),
-            target_chat_id: None,
-            target_thread_id: None,
-            force_notify: false,
-        };
-        let output = format_async_yaml(&pending, 2).unwrap();
-        // Instruction prefix assertions
-        assert!(output.starts_with("You are delivering a cron job result"));
-        assert!(output.contains("place it VERBATIM in your reply's `content` field"));
-        assert!(output.contains("Do NOT call `mcp__right__send_message`"));
-        assert!(output.contains("never repeat the content text in a caption"));
-        assert!(output.contains("Here is the YAML report of the cron job:"));
-        // YAML content assertions
-        assert!(output.contains("job: \"health-check\""));
-        assert!(output.contains("runs_total: 3"));
-        assert!(output.contains("skipped_runs: 2"));
-        assert!(output.contains("BTC up 2%"));
-        assert!(output.contains("Checked 5 pairs"));
-    }
-
-    #[tokio::test]
-    async fn format_async_yaml_no_skipped() {
-        let pending = PendingAsyncResult {
-            id: "abc".into(),
-            kind: "cron".into(),
-            producer_ref: Some("job1".into()),
-            delivery_json: r#"{"kind":"notify","content":"hello"}"#.into(),
-            run_note: "done".into(),
-            status: "success".into(),
-            target_chat_id: None,
-            target_thread_id: None,
-            force_notify: false,
-        };
-        let output = format_async_yaml(&pending, 0).unwrap();
-        assert!(output.starts_with("You are delivering a cron job result"));
-        assert!(output.contains("runs_total: 1"));
-        assert!(!output.contains("skipped_runs"));
-    }
-
-    #[tokio::test]
-    async fn format_async_yaml_uses_cron_failure_instruction_when_status_failed() {
-        let pending = PendingAsyncResult {
-            id: "r1".into(),
-            kind: "cron".into(),
-            producer_ref: Some("watcher".into()),
-            delivery_json: r#"{"kind":"notify","content":"Partial data fetched then hit budget"}"#
-                .into(),
-            run_note: "failed".into(),
-            status: "failed".into(),
-            target_chat_id: None,
-            target_thread_id: None,
-            force_notify: false,
-        };
-        let out = format_async_yaml(&pending, 0).unwrap();
-        assert!(out.contains("did not complete successfully"));
-        assert!(!out.contains("send it VERBATIM"));
-    }
-
-    #[tokio::test]
-    async fn format_async_yaml_uses_cron_success_instruction_when_status_success() {
-        let pending = PendingAsyncResult {
-            id: "r2".into(),
-            kind: "cron".into(),
-            producer_ref: Some("watcher".into()),
-            delivery_json: r#"{"kind":"notify","content":"BTC up 2%"}"#.into(),
-            run_note: "ok".into(),
-            status: "success".into(),
-            target_chat_id: None,
-            target_thread_id: None,
-            force_notify: false,
-        };
-        let out = format_async_yaml(&pending, 0).unwrap();
-        assert!(out.contains("VERBATIM"));
-    }
-
-    #[tokio::test]
-    async fn format_async_yaml_rejects_silent_delivery_json() {
-        let pending = PendingAsyncResult {
-            id: "r-silent".into(),
-            kind: "cron".into(),
-            producer_ref: Some("watcher".into()),
-            delivery_json: r#"{"kind":"silent","reason":"No changes"}"#.into(),
-            run_note: "quiet".into(),
-            status: "success".into(),
-            target_chat_id: None,
-            target_thread_id: None,
-            force_notify: false,
-        };
-        let err = format_async_yaml(&pending, 0).unwrap_err();
-        assert!(
-            err.to_string().contains("not a notify decision"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn format_async_yaml_background_includes_background_instruction_and_content() {
-        let pending = PendingAsyncResult {
-            id: "bg-1".into(),
-            kind: "background".into(),
-            producer_ref: None,
-            delivery_json: r#"{"kind":"notify","content":"Finished the answer in background"}"#
-                .into(),
-            run_note: "background summary".into(),
-            status: "success".into(),
-            target_chat_id: Some(-100),
-            target_thread_id: None,
-            force_notify: false,
-        };
-
-        let out = format_async_yaml(&pending, 0).unwrap();
-        assert!(out.starts_with("You are delivering a background task result"));
-        assert!(out.contains("background_result:"));
-        assert!(out.contains("label: \"background\""));
-        assert!(out.contains("Finished the answer in background"));
-        assert!(!out.contains("cron_result:"));
-    }
-
-    #[tokio::test]
-    async fn format_async_yaml_background_uses_failure_instruction_when_status_failed() {
-        let pending = PendingAsyncResult {
-            id: "bg-2".into(),
-            kind: "background".into(),
-            producer_ref: Some("custom-bg".into()),
-            delivery_json: r#"{"kind":"notify","content":"Background work failed"}"#.into(),
-            run_note: "background failed".into(),
-            status: "failed".into(),
-            target_chat_id: Some(-100),
-            target_thread_id: None,
-            force_notify: false,
-        };
-
-        let out = format_async_yaml(&pending, 0).unwrap();
-        assert!(out.contains("background task below did not complete successfully"));
-        assert!(out.contains("label: \"custom-bg\""));
-        assert!(out.contains("Background work failed"));
-    }
-
-    #[tokio::test]
-    async fn delivery_invocation_uses_configured_agent_model() {
-        let args = build_delivery_invocation_args(
-            "/sandbox/mcp.json".into(),
-            r#"{"type":"object"}"#.into(),
-            Some("claude-opus-4-8[1m]".into()),
-            Some("session-1".into()),
-            None,
-        );
-
-        let model_pos = args
-            .iter()
-            .position(|arg| arg == "--model")
-            .expect("configured model must be passed to Claude");
-        assert_eq!(args[model_pos + 1], "claude-opus-4-8[1m]");
-        assert!(
-            !args.iter().any(|arg| arg == "claude-haiku-4-5-20251001"),
-            "delivery must not override the configured agent model with Haiku"
-        );
-    }
-
-    #[tokio::test]
-    async fn fetch_pending_resolves_target_after_spec_deletion() {
-        // Reproduces the production bug: a one-shot spec auto-deletes after
-        // firing, but the run row still needs to know where to deliver.
-        let (_dir, conn) = setup_db().await;
-        let now = chrono::Utc::now().to_rfc3339();
-
-        // 1. Spec is created (recurring=0, one-shot).
-        conn.execute(
-            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, target_chat_id, target_thread_id, created_at, updated_at) \
-             VALUES ('one-shot', '*/5 * * * *', 'p', 1.0, 0, -4996137249, NULL, ?1, ?1)",
-            [&now],
-        ).await.unwrap();
-
-        // 2. Run row inserted with snapshot of target (what new execute_job does).
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "run-1",
-                job_name: "one-shot",
-                started_at: "2026-05-05T12:36:00Z",
-                finished_at: Some("2026-05-05T12:41:00Z"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
-                target_chat_id: Some(-4996137249),
-                ..Default::default()
-            },
-        )
-        .await;
-
-        // 3. Spec is auto-deleted (one-shot completion).
-        conn.execute("DELETE FROM cron_specs WHERE job_name = 'one-shot'", [])
-            .await
-            .unwrap();
-
-        // 4. Delivery loop fetches — must still find the target.
-        let pending = fetch_pending(&conn).await.unwrap().unwrap();
-        assert_eq!(pending.target_chat_id, Some(-4996137249));
-        assert_eq!(pending.target_thread_id, None);
-
-        // And dedup must agree.
-        let (latest, _skipped) = deduplicate_job(&conn, "one-shot").await.unwrap().unwrap();
-        assert_eq!(latest.target_chat_id, Some(-4996137249));
-    }
-
-    #[tokio::test]
-    async fn fetch_pending_carries_target_fields() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
-                target_chat_id: Some(-555),
-                target_thread_id: Some(9),
-                ..Default::default()
-            },
-        )
-        .await;
-        let pending = fetch_pending(&conn).await.unwrap().unwrap();
-        assert_eq!(pending.target_chat_id, Some(-555));
-        assert_eq!(pending.target_thread_id, Some(9));
-    }
-
-    #[tokio::test]
-    async fn fetch_pending_returns_none_target_when_run_has_none() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                job_name: "legacy",
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        let pending = fetch_pending(&conn).await.unwrap().unwrap();
-        assert!(pending.target_chat_id.is_none());
-        assert!(pending.target_thread_id.is_none());
-    }
-
-    #[tokio::test]
-    async fn null_target_classifies_as_no_target() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                job_name: "legacy",
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        let pending = fetch_pending(&conn).await.unwrap().unwrap();
-        let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[]));
-        assert!(
-            matches!(outcome, TargetClassification::NoTarget),
-            "got: {outcome:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn target_chat_id_zero_fetches_as_no_target() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "zero-target",
-                job_name: "targetless",
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
-                target_chat_id: Some(0),
-                ..Default::default()
-            },
-        )
-        .await;
-        let pending = fetch_pending(&conn).await.unwrap().unwrap();
-        assert_eq!(pending.target_chat_id, None);
-
-        let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[0]));
-        assert!(
-            matches!(outcome, TargetClassification::NoTarget),
-            "got: {outcome:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn target_not_in_allowlist_classifies_as_denied() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                job_name: "agenda",
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
-                target_chat_id: Some(-777),
-                ..Default::default()
-            },
-        )
-        .await;
-        let pending = fetch_pending(&conn).await.unwrap().unwrap();
-        let outcome = classify_pending_target(&pending, &fake_allowlist(&[100], &[-200]));
-        assert!(
-            matches!(outcome, TargetClassification::Denied),
-            "got: {outcome:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn target_in_allowlist_classifies_as_ready() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                job_name: "agenda",
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
-                target_chat_id: Some(-200),
-                target_thread_id: Some(5),
-                ..Default::default()
-            },
-        )
-        .await;
-        let pending = fetch_pending(&conn).await.unwrap().unwrap();
-        let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[-200]));
+        let result = active_delivery_session_id(&client, "alpha", 42, 0).await;
         assert!(
             matches!(
-                outcome,
-                TargetClassification::Ready {
-                    chat_id: -200,
-                    thread_id: Some(5)
-                }
+                result,
+                Err(right_mcp::internal_db::InternalDbError::Transport(_))
             ),
-            "got: {outcome:?}"
+            "lookup failure must propagate as typed transport error, got {result:?}"
         );
-    }
-
-    fn fake_allowlist(
-        users: &[i64],
-        groups: &[i64],
-    ) -> right_agent::agent::allowlist::AllowlistState {
-        use right_agent::agent::allowlist::{
-            AllowedGroup, AllowedUser, AllowlistState, GroupKind, ResponseMode,
-        };
-        let now = chrono::Utc::now();
-        let mut state = AllowlistState::default();
-        for &id in users {
-            state.add_user(AllowedUser {
-                id,
-                label: None,
-                added_by: None,
-                added_at: now,
-            });
-        }
-        for &id in groups {
-            state.add_group(AllowedGroup {
-                id,
-                label: None,
-                opened_by: None,
-                opened_at: now,
-                mode: ResponseMode::Addressed,
-                topics: Vec::new(),
-                kind: GroupKind::Group,
-            });
-        }
-        state
-    }
-
-    #[tokio::test]
-    async fn deduplicate_job_carries_target_fields() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "a",
-                run_note: Some("sum1"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
-                target_chat_id: Some(-100),
-                ..Default::default()
-            },
-        )
-        .await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "b",
-                started_at: "2026-01-01T00:05:00Z",
-                finished_at: Some("2026-01-01T00:06:00Z"),
-                run_note: Some("sum2"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"y\"}"),
-                target_chat_id: Some(-100),
-                ..Default::default()
-            },
-        )
-        .await;
-        let (latest, skipped) = deduplicate_job(&conn, "job1").await.unwrap().unwrap();
-        assert_eq!(latest.id, "b");
-        assert_eq!(skipped, 1);
-        assert_eq!(latest.target_chat_id, Some(-100));
-    }
-
-    #[tokio::test]
-    async fn select_delivery_candidate_does_not_deduplicate_background_rows() {
-        let (_dir, conn) = setup_db().await;
-        insert_async_background_run(
-            &conn,
-            "bg-old",
-            "2026-01-01T00:00:00Z",
-            "success",
-            "{\"kind\":\"notify\",\"content\":\"old\"}",
-            -100,
-        )
-        .await;
-        insert_async_background_run(
-            &conn,
-            "bg-new",
-            "2026-01-01T00:05:00Z",
-            "success",
-            "{\"kind\":\"notify\",\"content\":\"new\"}",
-            -100,
-        )
-        .await;
-
-        let pending = fetch_pending(&conn).await.unwrap().unwrap();
-        assert_eq!(pending.id, "bg-old");
-        let (selected, skipped) = select_delivery_candidate(&conn, pending)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(selected.id, "bg-old");
-        assert_eq!(skipped, 0);
-
-        let statuses = conn
-            .prepare("SELECT id, delivery_status FROM async_runs ORDER BY id")
-            .unwrap()
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .await
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(
-            statuses,
-            vec![
-                ("bg-new".to_string(), "pending".to_string()),
-                ("bg-old".to_string(), "pending".to_string()),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn empty_delivery_send_report_is_rejected() {
-        let report = DeliverySendReport {
-            text_messages_sent: 0,
-            attachment_batches_sent: 0,
-        };
-
-        let err = ensure_delivery_send_report_non_empty(report).unwrap_err();
-        assert!(err.contains("empty delivery reply"));
-    }
-
-    #[test]
-    fn force_notify_skips_idle_gate() {
-        // Non-forced, recently active chat → held.
-        assert!(should_hold_delivery(false, DeliveryMode::Normal, 10));
-        // Forced → never held, even when active.
-        assert!(!should_hold_delivery(true, DeliveryMode::Normal, 10));
-        // Idle long enough → not held regardless.
-        assert!(!should_hold_delivery(
-            false,
-            DeliveryMode::Normal,
-            IDLE_THRESHOLD_SECS + 1
-        ));
-    }
-
-    #[tokio::test]
-    async fn fetch_pending_reads_force_notify() {
-        let (_dir, conn) = setup_db().await;
-        conn.execute(
-            "INSERT INTO async_runs (
-                id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
-                status, started_at, finished_at, log_path, run_note, delivery_json,
-                delivery_required, delivery_status, force_notify, created_at, updated_at
-             ) VALUES (
-                'r-fn', 'cron', 'job', 'r-fn', 5, NULL,
-                'success', '2026-06-02T00:00:00Z', '2026-06-02T00:01:00Z', '/log', 'note',
-                '{\"kind\":\"notify\",\"content\":\"hi\"}',
-                1, 'pending', 1, '2026-06-02T00:00:00Z', '2026-06-02T00:01:00Z'
-             )",
-            right_db::params![],
-        )
-        .await
-        .unwrap();
-
-        let pending = fetch_pending(&conn).await.unwrap().unwrap();
-        assert_eq!(pending.id, "r-fn");
-        assert!(
-            pending.force_notify,
-            "force_notify must be read from the row"
-        );
-    }
-
-    #[tokio::test]
-    async fn dedup_surfaces_latest_force_notify() {
-        // Two cron runs for the same job: older non-forced, newer forced. The
-        // delivery loop fetches the oldest, but candidate selection (dedup) must
-        // surface the newer forced run so the idle gate reads its force_notify.
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "older",
-                job_name: "job",
-                started_at: "2026-06-02T00:00:00Z",
-                finished_at: Some("2026-06-02T00:01:00Z"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"old\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        // Newer forced run. insert_async_cron_run does not set force_notify, so
-        // stamp it directly after insert.
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "newer",
-                job_name: "job",
-                started_at: "2026-06-02T00:05:00Z",
-                finished_at: Some("2026-06-02T00:06:00Z"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"new\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        conn.execute(
-            "UPDATE async_runs SET force_notify = 1 WHERE id = 'newer'",
-            right_db::params![],
-        )
-        .await
-        .unwrap();
-
-        // Fetch returns the oldest (non-forced) row.
-        let delivered_in_memory = HashSet::new();
-        let pending = fetch_next_pending(&conn, &delivered_in_memory)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(pending.id, "older");
-        assert!(!pending.force_notify);
-
-        // Candidate selection surfaces the newer forced run.
-        let (to_deliver, _skipped) = select_delivery_candidate(&conn, pending)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(to_deliver.id, "newer");
-        assert!(
-            to_deliver.force_notify,
-            "candidate must carry the forced flag of the latest run"
-        );
-    }
-
-    #[tokio::test]
-    async fn dedup_carries_force_notify_from_older_displaced_run() {
-        // Inverse of the above: the OLDER run is forced, a NEWER non-forced
-        // scheduled run wins the finished_at tie-break. The candidate is the
-        // newer run (freshest content), but it must still carry force_notify so
-        // the user's forced verification request bypasses the idle gate.
-        let (_dir, conn) = setup_db().await;
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "older-forced",
-                job_name: "job",
-                started_at: "2026-06-02T00:00:00Z",
-                finished_at: Some("2026-06-02T00:01:00Z"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"old\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-        conn.execute(
-            "UPDATE async_runs SET force_notify = 1 WHERE id = 'older-forced'",
-            right_db::params![],
-        )
-        .await
-        .unwrap();
-        insert_async_cron_run(
-            &conn,
-            TestCronRun {
-                id: "newer-scheduled",
-                job_name: "job",
-                started_at: "2026-06-02T00:05:00Z",
-                finished_at: Some("2026-06-02T00:06:00Z"),
-                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"new\"}"),
-                ..Default::default()
-            },
-        )
-        .await;
-
-        let (to_deliver, _skipped) = deduplicate_job(&conn, "job").await.unwrap().unwrap();
-        assert_eq!(
-            to_deliver.id, "newer-scheduled",
-            "latest run wins on content"
-        );
-        assert!(
-            to_deliver.force_notify,
-            "force_notify must be OR'd across the group so the older forced run's bypass survives"
-        );
-    }
-
-    fn test_pending(
-        kind: &str,
-        status: &str,
-        job: Option<&str>,
-        force_notify: bool,
-    ) -> PendingAsyncResult {
-        PendingAsyncResult {
-            id: "x".into(),
-            kind: kind.into(),
-            producer_ref: job.map(|s| s.to_string()),
-            delivery_json: "{}".into(),
-            run_note: String::new(),
-            status: status.into(),
-            target_chat_id: Some(1),
-            target_thread_id: None,
-            force_notify,
-        }
-    }
-
-    #[test]
-    fn header_success_scheduled() {
-        let p = test_pending("cron", "success", Some("sources-update"), false);
-        assert_eq!(
-            render_delivery_header(&p),
-            "✓ <b>sources-update</b> · success"
-        );
-    }
-
-    #[test]
-    fn header_success_manual() {
-        let p = test_pending("cron", "success", Some("sources-update"), true);
-        assert_eq!(
-            render_delivery_header(&p),
-            "✓ <b>sources-update</b> · manual run · success"
-        );
-    }
-
-    #[test]
-    fn header_failed() {
-        let p = test_pending("cron", "failed", Some("sources-update"), false);
-        assert_eq!(
-            render_delivery_header(&p),
-            "✗ <b>sources-update</b> · failed"
-        );
-    }
-
-    #[test]
-    fn header_background_label_fallback() {
-        let p = test_pending("background", "success", None, false);
-        assert_eq!(
-            render_delivery_header(&p),
-            "✓ <b>background task</b> · success"
-        );
-    }
-
-    #[test]
-    fn header_background_slug_normalized() {
-        // Real background runs carry `producer_ref = Some("background")`; the raw
-        // slug must not surface — present "background task" instead.
-        let p = test_pending("background", "success", Some("background"), false);
-        assert_eq!(
-            render_delivery_header(&p),
-            "✓ <b>background task</b> · success"
-        );
-    }
-
-    #[test]
-    fn header_escapes_label() {
-        let p = test_pending("cron", "success", Some("a<b>&c"), false);
-        assert_eq!(
-            render_delivery_header(&p),
-            "✓ <b>a&lt;b&gt;&amp;c</b> · success"
-        );
-    }
-
-    #[test]
-    fn prepend_header_separates_with_blank_lines() {
-        let out = prepend_delivery_header("✓ <b>job</b> · success", "body text");
-        assert_eq!(out, "✓ <b>job</b> · success\n\nbody text");
-    }
-
-    #[test]
-    fn prepend_header_handles_empty_body() {
-        let out = prepend_delivery_header("✓ <b>job</b> · success", "");
-        assert_eq!(out, "✓ <b>job</b> · success");
     }
 }
+
+#[cfg(test)]
+#[path = "async_delivery_tests.rs"]
+mod tests;

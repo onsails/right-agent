@@ -15,8 +15,9 @@ use crate::aggregator::{
     AgentInfo, AgentTokenMap, ReconnectManagers, RefreshSenders, ToolDispatcher,
 };
 use right_mcp::internal_client::{
-    HttpHeaderInput, ProgressInvocationKindDto, ProgressRegisterRequest, ProgressRegisterResponse,
-    ProgressUnregisterRequest, ProgressUnregisterResponse,
+    DbReadyRequest, DbReadyResponse, DbReadyState, HttpHeaderInput, ProgressInvocationKindDto,
+    ProgressRegisterRequest, ProgressRegisterResponse, ProgressUnregisterRequest,
+    ProgressUnregisterResponse,
 };
 use right_mcp::refresh::{OAuthServerState, RefreshMessage};
 
@@ -24,7 +25,7 @@ use right_mcp::refresh::{OAuthServerState, RefreshMessage};
 // Request / Response types
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct McpAddRequest {
     pub agent: String,
     pub name: String,
@@ -145,45 +146,48 @@ struct ErrorResponse {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
+pub(crate) struct InternalRouterDeps {
+    pub(crate) dispatcher: Arc<ToolDispatcher>,
+    pub(crate) refresh_senders: RefreshSenders,
+    pub(crate) reconnect_managers: ReconnectManagers,
+    pub(crate) token_map: AgentTokenMap,
+    pub(crate) db_owners: crate::db_owner::DbOwnerRegistry,
+    pub(crate) token_map_path: PathBuf,
+    pub(crate) agents_dir: PathBuf,
+    pub(crate) providers: std::sync::Arc<right_providers::ProviderStore>,
+}
+
+#[derive(Clone)]
 pub(crate) struct InternalState {
     dispatcher: Arc<ToolDispatcher>,
     refresh_senders: RefreshSenders,
     reconnect_managers: ReconnectManagers,
     token_map: AgentTokenMap,
+    pub(crate) db_owners: crate::db_owner::DbOwnerRegistry,
     token_map_path: PathBuf,
     pub(crate) agents_dir: PathBuf,
     /// Right's provider credential store — the single authority for provider
     /// records and credentials, replacing the retired OpenShell provider
     /// gateway. Never exposes a credential value on a read path.
     pub(crate) providers: std::sync::Arc<right_providers::ProviderStore>,
+    reload_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     // Per-agent provider mutation serialization lives in ProviderStore. Its
     // advisory file lock is authoritative across processes; the in-process
     // mutex is only the cheap first queue for same-process callers.
 }
 
-#[cfg(test)]
 impl InternalState {
-    /// Test-only constructor: builds the same `InternalState` that
-    /// `internal_router` constructs, but returns it directly so tests can
-    /// invoke per-handler helpers (e.g. `provider_lock`) without going
-    /// through the axum router.
-    pub(crate) fn new_for_test(
-        dispatcher: Arc<ToolDispatcher>,
-        refresh_senders: RefreshSenders,
-        reconnect_managers: ReconnectManagers,
-        token_map: AgentTokenMap,
-        token_map_path: PathBuf,
-        agents_dir: PathBuf,
-        providers: right_providers::ProviderStore,
-    ) -> Self {
+    pub(crate) fn new(deps: InternalRouterDeps) -> Self {
         Self {
-            dispatcher,
-            refresh_senders,
-            reconnect_managers,
-            token_map,
-            token_map_path,
-            agents_dir,
-            providers: std::sync::Arc::new(providers),
+            dispatcher: deps.dispatcher,
+            refresh_senders: deps.refresh_senders,
+            reconnect_managers: deps.reconnect_managers,
+            db_owners: deps.db_owners,
+            token_map: deps.token_map,
+            token_map_path: deps.token_map_path,
+            agents_dir: deps.agents_dir,
+            providers: deps.providers,
+            reload_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
@@ -202,28 +206,39 @@ pub(crate) async fn open_provider_store(
     Ok(std::sync::Arc::new(store))
 }
 
-pub(crate) fn internal_router(
-    dispatcher: Arc<ToolDispatcher>,
-    refresh_senders: RefreshSenders,
-    reconnect_managers: ReconnectManagers,
-    token_map: AgentTokenMap,
-    token_map_path: PathBuf,
-    agents_dir: PathBuf,
-    providers: std::sync::Arc<right_providers::ProviderStore>,
-) -> Router {
-    let state = InternalState {
-        dispatcher,
-        refresh_senders,
-        reconnect_managers,
-        token_map,
-        token_map_path,
-        agents_dir,
-        providers,
+async fn cancel_mcp_refresh(
+    state: &InternalState,
+    agent: &str,
+    server: &str,
+) -> Result<(), axum::response::Response> {
+    let Some(sender) = state.refresh_senders.get(agent).map(|entry| entry.clone()) else {
+        return Ok(());
     };
+    let (completion, completed) = tokio::sync::oneshot::channel();
+    sender
+        .send(RefreshMessage::RemoveServerAndWait {
+            server_name: server.to_owned(),
+            completion,
+        })
+        .await
+        .map_err(|error| {
+            internal_error(format!("cancel MCP refresh for '{server}': {error:#}")).into_response()
+        })?;
+    completed.await.map_err(|error| {
+        internal_error(format!(
+            "await MCP refresh cancellation for '{server}': {error:#}"
+        ))
+        .into_response()
+    })
+}
+
+pub(crate) fn internal_router(deps: InternalRouterDeps) -> Router {
+    let state = InternalState::new(deps);
     Router::new()
         .route("/mcp-add", post(handle_mcp_add))
         .route("/mcp-remove", post(handle_mcp_remove))
         .route("/mcp-set-headers", post(handle_mcp_set_headers))
+        .route("/db/ready", post(handle_db_ready))
         .route("/set-token", post(handle_set_token))
         .route("/mcp-list", post(handle_mcp_list))
         .route("/mcp-instructions", post(handle_mcp_instructions))
@@ -266,6 +281,7 @@ pub(crate) fn internal_router(
             "/provider-unshare",
             post(crate::internal_api_providers::handle_provider_unshare),
         )
+        .merge(crate::internal_api_db::router())
         .with_state(state)
 }
 
@@ -363,19 +379,19 @@ fn oauth_reconnect_http_client() -> reqwest::Client {
 async fn reconnect_after_oauth_update(
     server_name: &str,
     handle: Arc<ProxyBackend>,
-) -> Result<(), right_mcp::proxy::ProxyError> {
+) -> Result<Option<String>, right_mcp::proxy::ProxyError> {
     let mut last_error = None;
 
     for attempt in 1..=OAUTH_RECONNECT_MAX_ATTEMPTS {
         let client = oauth_reconnect_http_client();
-        match handle.connect(client).await {
-            Ok(_) => {
+        match handle.connect_staged(client).await {
+            Ok(instructions) => {
                 tracing::info!(
                     server = %server_name,
                     attempt,
                     "reconnected after OAuth token update",
                 );
-                return Ok(());
+                return Ok(instructions);
             }
             Err(e) => {
                 let detail = format!("{e:#}");
@@ -405,10 +421,51 @@ async fn reconnect_after_oauth_update(
 // Handlers
 // ---------------------------------------------------------------------------
 
+async fn handle_db_ready(
+    State(state): State<InternalState>,
+    Json(request): Json<DbReadyRequest>,
+) -> Json<DbReadyResponse> {
+    let state = match state.db_owners.state(&request.agent).await {
+        Some(crate::db_owner::DbOwnerState::Starting) => DbReadyState::Starting,
+        Some(crate::db_owner::DbOwnerState::Ready) => DbReadyState::Ready,
+        Some(crate::db_owner::DbOwnerState::Draining) => DbReadyState::Draining,
+        Some(crate::db_owner::DbOwnerState::Failed) => DbReadyState::Failed,
+        None => DbReadyState::Unavailable,
+    };
+    Json(DbReadyResponse {
+        agent: request.agent,
+        ready: state == DbReadyState::Ready,
+        state,
+    })
+}
+
+async fn database_owner(
+    state: &InternalState,
+    agent: &str,
+) -> Result<Arc<crate::db_owner::AgentDbOwner>, axum::response::Response> {
+    state.db_owners.get(agent).await.map_err(|error| {
+        tracing::error!(agent, error = %format!("{error:#}"), "database owner unavailable");
+        internal_error("database owner unavailable").into_response()
+    })
+}
+
 async fn handle_mcp_add(
     State(state): State<InternalState>,
     Json(req): Json<McpAddRequest>,
 ) -> axum::response::Response {
+    let owner = match state.db_owners.get(&req.agent).await {
+        Ok(owner) => owner,
+        Err(crate::db_owner::DbOwnerError::NotFound { .. }) => {
+            return not_found(format!("agent '{}' not found", req.agent)).into_response();
+        }
+        Err(error) => {
+            return internal_error(format!("database owner unavailable: {error:#}"))
+                .into_response();
+        }
+    };
+    let persistence: Arc<dyn right_mcp::persistence::McpPersistence> = Arc::new(
+        crate::mcp_persistence::OwnerMcpPersistence::new(Arc::clone(&owner)),
+    );
     let dispatcher = &state.dispatcher;
     // Validate name
     if let Err(e) = credentials::validate_server_name(&req.name) {
@@ -428,7 +485,6 @@ async fn handle_mcp_add(
         return validation_error("headers auth requires at least one header").into_response();
     }
 
-    // Determine AuthMethod from request fields
     let auth_method = AuthMethod::from_db_with_headers(
         req.auth_type.as_deref(),
         req.auth_header.as_deref(),
@@ -439,77 +495,48 @@ async fn handle_mcp_add(
     } else {
         req.auth_token.clone()
     };
+    if let Err(response) = cancel_mcp_refresh(&state, &req.agent, &req.name).await {
+        return response;
+    }
+    let persisted_auth = if req.auth_type.as_deref() == Some("headers") {
+        credentials::McpServerAuth::Headers(header_secrets)
+    } else if let Some(auth_type) = req.auth_type.clone() {
+        credentials::McpServerAuth::Legacy {
+            auth_type,
+            auth_header: req.auth_header.clone(),
+            auth_token: req.auth_token.clone(),
+        }
+    } else {
+        credentials::McpServerAuth::None
+    };
+    let _mutation_guard = owner.lock_mcp_mutation(&req.name).await;
     let http_warning = plain_http_warning(&req.url);
 
-    // Get backend, agent_dir, and proxies from DashMap, then drop the guard before DB await.
-    let (right, agent_dir, proxies_lock) = {
+    // Get agent directory and proxies, then drop the registry guard before DB await.
+    let proxies_lock = {
         let Some(registry) = dispatcher.agents.get(&req.agent) else {
             return not_found(format!("agent '{}' not found", req.agent)).into_response();
         };
-        (
-            registry.right.clone(),
-            registry.agent_dir.clone(),
-            Arc::clone(&registry.proxies),
-        )
+        Arc::clone(&registry.proxies)
     };
-    let conn = match right.get_conn(&req.agent).await {
-        Ok(c) => c,
-        Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
-    };
-
-    {
-        let existed_before = match credentials::db_server_exists(&conn, &req.name).await {
-            Ok(exists) => exists,
-            Err(e) => return internal_error(format!("db_server_exists: {e:#}")).into_response(),
-        };
-        if let Err(e) = credentials::db_add_server(&conn, &req.name, &req.url).await {
-            return internal_error(format!("db_add_server: {e:#}")).into_response();
-        }
-        // Persist auth fields for the selected mode. On failure, roll back only
-        // if this request created the row; an upsert over an existing server
-        // must not delete the previous registration.
-        let auth_result: Result<(), (String, CredentialError)> =
-            if req.auth_type.as_deref() == Some("headers") {
-                credentials::db_set_http_headers(&conn, &req.name, &header_secrets)
-                    .await
-                    .map_err(|e| ("db_set_http_headers".to_string(), e))
-            } else if let Some(ref auth_type_str) = req.auth_type {
-                credentials::db_set_auth(
-                    &conn,
-                    &req.name,
-                    auth_type_str,
-                    req.auth_header.as_deref(),
-                    auth_token.as_deref(),
-                )
-                .await
-                .map_err(|e| ("db_set_auth".to_string(), e))
-            } else {
-                credentials::db_clear_auth(&conn, &req.name)
-                    .await
-                    .map_err(|e| ("db_clear_auth".to_string(), e))
-            };
-        if let Err((label, e)) = auth_result {
-            if !existed_before {
-                // Best-effort rollback of the just-inserted mcp_servers row.
-                match credentials::db_remove_server(&conn, &req.name).await {
-                    Ok(()) | Err(CredentialError::ServerNotFound(_)) => {}
-                    Err(db_err) => {
-                        tracing::warn!(
-                            server = %req.name,
-                            "rollback db_remove_server after {label} failure failed: {db_err:#}"
-                        );
-                    }
-                }
-            }
-            return internal_error(format!("{label}: {e:#}")).into_response();
-        }
+    if let Some(manager) = state.reconnect_managers.get(&req.agent) {
+        manager.lock().await.cancel(&req.name);
     }
+    let previous = match owner
+        .replace_mcp_server(req.name.clone(), req.url.clone(), persisted_auth)
+        .await
+    {
+        Ok(previous) => previous,
+        Err(error) => {
+            return internal_error(format!("MCP persistence failed: {error:#}")).into_response();
+        }
+    };
 
     // Create ProxyBackend with the resolved auth method and optional token
     let token = Arc::new(tokio::sync::RwLock::new(auth_token.clone()));
     let backend = ProxyBackend::new(
         req.name.clone(),
-        agent_dir,
+        persistence,
         req.url.clone(),
         token,
         auth_method,
@@ -546,21 +573,39 @@ async fn handle_mcp_add(
     .build()
     {
         Ok(client) => client,
-        Err(e) => {
-            return internal_error(format!("reqwest client build: {e:#}")).into_response();
+        Err(error) => {
+            let original = format!("reqwest client build: {error:#}");
+            return rollback_mcp_add(
+                &owner,
+                &req.name,
+                previous,
+                original,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+            .await;
         }
     };
-    match handle.connect(connect_client).await {
-        Ok(_instructions) => {
+    match handle.connect_staged(connect_client).await {
+        Ok(instructions) => {
+            if let Err(error) = owner
+                .update_mcp_instructions(req.name.clone(), instructions)
+                .await
+            {
+                return rollback_mcp_add(
+                    &owner,
+                    &req.name,
+                    previous,
+                    format!("persist replacement instructions: {error:#}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                .await;
+            }
             tracing::info!(server = %req.name, "mcp-add: upstream connection successful");
-            let tools_count = handle.try_tools().map(|t| t.len()).unwrap_or(0);
-
-            // Insert into proxies map (proxies_lock extracted from initial DashMap lookup)
+            let tools_count = handle.try_tools().map(|tools| tools.len()).unwrap_or(0);
             {
                 let mut proxies = proxies_lock.write().await;
                 proxies.insert(req.name.clone(), Arc::clone(&handle));
             }
-
             (
                 StatusCode::OK,
                 Json(McpAddResponse {
@@ -571,24 +616,49 @@ async fn handle_mcp_add(
             )
                 .into_response()
         }
-        Err(e) => {
-            // Remove from SQLite on connection failure (reuse conn from initial lookup)
-            {
-                let conn = &conn;
-                match credentials::db_remove_server(&conn, &req.name).await {
-                    Ok(()) | Err(CredentialError::ServerNotFound(_)) => {}
-                    Err(db_err) => {
-                        tracing::warn!("rollback db_remove_server failed: {db_err:#}");
-                    }
-                }
-            }
-
-            tracing::warn!(server = %req.name, err = %format!("{e:#}"), "mcp-add: upstream connection failed");
-            error_response(
+        Err(error) => {
+            let safe_error = right_mcp::proxy::redact_query_strings(&format!("{error:#}"));
+            tracing::warn!(
+                server = %req.name,
+                err = %safe_error,
+                "mcp-add: upstream connection failed"
+            );
+            rollback_mcp_add(
+                &owner,
+                &req.name,
+                previous,
+                format!("connection failed: {safe_error}"),
                 StatusCode::BAD_GATEWAY,
-                format!("connection failed: {e:#}"),
-                None,
             )
+            .await
+        }
+    }
+}
+
+async fn rollback_mcp_add(
+    owner: &Arc<crate::db_owner::AgentDbOwner>,
+    server_name: &str,
+    previous: Option<credentials::McpServerSnapshot>,
+    original_error: String,
+    original_status: StatusCode,
+) -> axum::response::Response {
+    let original_error = right_mcp::proxy::redact_query_strings(&original_error);
+    match owner
+        .rollback_mcp_server_replacement(server_name.to_owned(), previous)
+        .await
+    {
+        Ok(()) => error_response(original_status, original_error, None).into_response(),
+        Err(rollback_error) => {
+            let rollback_detail = format!("{rollback_error:#}");
+            tracing::error!(
+                server = %server_name,
+                original_error = %original_error,
+                rollback_error = %rollback_detail,
+                "mcp-add failed and durable rollback failed"
+            );
+            internal_error(format!(
+                "{original_error}; rollback failed: {rollback_detail}"
+            ))
             .into_response()
         }
     }
@@ -608,17 +678,24 @@ async fn handle_mcp_remove(
     }
 
     // Clone proxies Arc and backend, then drop the DashMap guard before DB await.
-    let (proxies_lock, right) = {
+    let proxies_lock = {
         let Some(registry) = dispatcher.agents.get(&req.agent) else {
             return not_found(format!("agent '{}' not found", req.agent)).into_response();
         };
-        (Arc::clone(&registry.proxies), registry.right.clone())
+        Arc::clone(&registry.proxies)
     };
-    let conn = match right.get_conn(&req.agent).await {
-        Ok(c) => c,
-        Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
+    let owner = match database_owner(&state, &req.agent).await {
+        Ok(owner) => owner,
+        Err(response) => return response,
     };
 
+    if let Some(manager) = state.reconnect_managers.get(&req.agent) {
+        manager.lock().await.cancel(&req.name);
+    }
+    if let Err(response) = cancel_mcp_refresh(&state, &req.agent, &req.name).await {
+        return response;
+    }
+    let _mutation_guard = owner.lock_mcp_mutation(&req.name).await;
     // Remove from proxies (in-memory).
     let removed_from_proxies = {
         let mut proxies = proxies_lock.write().await;
@@ -628,11 +705,22 @@ async fn handle_mcp_remove(
     // Remove from SQLite regardless of in-memory presence. DB rows can
     // outlive the in-memory map (e.g. after an aggregator restart where the
     // proxy failed to reconnect), and leaving them orphans the dashboard.
-    let removed_from_db = {
-        match credentials::db_remove_server(&conn, &req.name).await {
-            Ok(()) => true,
-            Err(CredentialError::ServerNotFound(_)) => false,
-            Err(e) => return internal_error(format!("db_remove_server: {e:#}")).into_response(),
+    let server_name = req.name.clone();
+    let removed_from_db = match owner
+        .local_operation(move |conn| {
+            Box::pin(async move {
+                match credentials::db_remove_server(conn, &server_name).await {
+                    Ok(()) => Ok(true),
+                    Err(CredentialError::ServerNotFound(_)) => Ok(false),
+                    Err(error) => Err(error.into()),
+                }
+            })
+        })
+        .await
+    {
+        Ok(removed) => removed,
+        Err(error) => {
+            return internal_error(format!("db_remove_server: {error:#}")).into_response();
         }
     };
 
@@ -663,16 +751,23 @@ async fn handle_mcp_set_headers(
         return validation_error("headers auth requires at least one header").into_response();
     }
 
-    let (right, proxies_lock) = {
+    let proxies_lock = {
         let Some(registry) = state.dispatcher.agents.get(&req.agent) else {
             return not_found(format!("agent '{}' not found", req.agent)).into_response();
         };
-        (registry.right.clone(), Arc::clone(&registry.proxies))
+        Arc::clone(&registry.proxies)
     };
-    let conn = match right.get_conn(&req.agent).await {
-        Ok(c) => c,
-        Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
+    let owner = match database_owner(&state, &req.agent).await {
+        Ok(owner) => owner,
+        Err(response) => return response,
     };
+    if let Some(manager) = state.reconnect_managers.get(&req.agent) {
+        manager.lock().await.cancel(&req.name);
+    }
+    if let Err(response) = cancel_mcp_refresh(&state, &req.agent, &req.name).await {
+        return response;
+    }
+    let _mutation_guard = owner.lock_mcp_mutation(&req.name).await;
 
     let existing = {
         let proxies = proxies_lock.read().await;
@@ -699,23 +794,26 @@ async fn handle_mcp_set_headers(
     };
 
     // Persist next — a credential write does not depend on upstream reachability.
+    let server_name = req.name.clone();
+    let persisted_headers = header_secrets.clone();
+    if let Err(error) = owner
+        .local_operation(move |conn| {
+            Box::pin(async move {
+                credentials::db_set_http_headers(conn, &server_name, &persisted_headers)
+                    .await
+                    .map_err(Into::into)
+            })
+        })
+        .await
     {
-        let conn = &conn;
-        if let Err(e) = credentials::db_set_http_headers(&conn, &req.name, &header_secrets).await {
-            return match e {
-                CredentialError::ServerNotFound(_) => {
-                    not_found(format!("server '{}' not found", req.name)).into_response()
-                }
-                _ => internal_error(format!("db_set_http_headers: {e:#}")).into_response(),
-            };
-        }
+        return internal_error(format!("db_set_http_headers: {error:#}")).into_response();
     }
 
     // Swap in a fresh backend carrying the new headers. It starts Unreachable;
     // the reconciler re-probes it (with the new headers) until it connects.
     let replacement = Arc::new(ProxyBackend::new(
         req.name.clone(),
-        existing.agent_dir().to_path_buf(),
+        existing.persistence(),
         existing.url().to_string(),
         Arc::new(tokio::sync::RwLock::new(None)),
         AuthMethod::Headers(header_secrets),
@@ -812,6 +910,10 @@ async fn handle_set_token(
         };
         Arc::clone(&registry.proxies)
     };
+    let owner = match database_owner(&state, &req.agent).await {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
 
     // Find proxy handle
     let handle = {
@@ -836,6 +938,10 @@ async fn handle_set_token(
         return validation_error("OAuth token endpoint must be a public HTTP(S) URL")
             .into_response();
     }
+    if let Err(response) = cancel_mcp_refresh(&state, &req.agent, &req.server).await {
+        return response;
+    }
+    let _mutation_guard = owner.lock_mcp_mutation(&req.server).await;
 
     // Update the token in the shared Arc<RwLock<Option<String>>>
     {
@@ -847,30 +953,38 @@ async fn handle_set_token(
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(req.expires_in as i64);
     let expires_at_str = expires_at.to_rfc3339();
     {
-        let right = {
-            let Some(registry) = dispatcher.agents.get(&req.agent) else {
-                return not_found("agent_not_found").into_response();
-            };
-            registry.right.clone()
-        };
-        let conn = match right.get_conn(&req.agent).await {
-            Ok(c) => c,
-            Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
-        };
-        if let Err(e) = right_mcp::credentials::db_set_oauth_state(
-            &conn,
-            &req.server,
-            &req.access_token,
-            Some(&req.refresh_token),
-            &req.token_endpoint,
-            &req.client_id,
-            req.client_secret.as_deref(),
-            &expires_at_str,
-            &oauth_resource,
-        )
-        .await
+        if !dispatcher.agents.contains_key(&req.agent) {
+            return not_found("agent_not_found").into_response();
+        }
+        let server = req.server.clone();
+        let access = req.access_token.clone();
+        let refresh = req.refresh_token.clone();
+        let endpoint = req.token_endpoint.clone();
+        let client_id = req.client_id.clone();
+        let client_secret = req.client_secret.clone();
+        let expires = expires_at_str.clone();
+        let resource = oauth_resource.clone();
+        if let Err(error) = owner
+            .local_operation(move |conn| {
+                Box::pin(async move {
+                    right_mcp::credentials::db_set_oauth_state(
+                        conn,
+                        &server,
+                        &access,
+                        Some(&refresh),
+                        &endpoint,
+                        &client_id,
+                        client_secret.as_deref(),
+                        &expires,
+                        &resource,
+                    )
+                    .await
+                    .map_err(Into::into)
+                })
+            })
+            .await
         {
-            return internal_error(format!("db_set_oauth_state: {e:#}")).into_response();
+            return internal_error(format!("db_set_oauth_state: {error:#}")).into_response();
         }
     }
 
@@ -909,26 +1023,35 @@ async fn handle_set_token(
         }
     }
 
-    if let Err(e) = reconnect_after_oauth_update(&req.server, Arc::clone(&handle)).await {
-        let detail = format!("{e:#}");
-        let is_auth_error = right_mcp::proxy::is_upstream_auth_error(&detail);
-        if is_auth_error {
-            handle.set_status(BackendStatus::NeedsAuth).await;
+    match reconnect_after_oauth_update(&req.server, Arc::clone(&handle)).await {
+        Ok(instructions) => {
+            if let Err(error) = owner
+                .update_mcp_instructions(req.server.clone(), instructions)
+                .await
+            {
+                return internal_error(format!("persist OAuth reconnect instructions: {error:#}"))
+                    .into_response();
+            }
+        }
+        Err(error) => {
+            let detail = right_mcp::proxy::redact_query_strings(&format!("{error:#}"));
+            if right_mcp::proxy::is_upstream_auth_error(&detail) {
+                handle.set_status(BackendStatus::NeedsAuth).await;
+                return error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "mcp_reconnect_needs_auth",
+                    Some(detail),
+                )
+                .into_response();
+            }
+            handle.set_status(BackendStatus::Unreachable).await;
             return error_response(
-                StatusCode::UNAUTHORIZED,
-                "mcp_reconnect_needs_auth",
+                StatusCode::BAD_GATEWAY,
+                "mcp_reconnect_failed",
                 Some(detail),
             )
             .into_response();
         }
-
-        handle.set_status(BackendStatus::Unreachable).await;
-        return error_response(
-            StatusCode::BAD_GATEWAY,
-            "mcp_reconnect_failed",
-            Some(detail),
-        )
-        .into_response();
     }
 
     (
@@ -946,12 +1069,11 @@ async fn handle_mcp_list(
     Json(req): Json<McpListRequest>,
 ) -> axum::response::Response {
     let dispatcher = &state.dispatcher;
-    let (right, proxies_lock, right_tool_count) = {
+    let (proxies_lock, right_tool_count) = {
         let Some(registry) = dispatcher.agents.get(&req.agent) else {
             return not_found(format!("agent '{}' not found", req.agent)).into_response();
         };
         (
-            registry.right.clone(),
             Arc::clone(&registry.proxies),
             registry.right.tools_list().len(),
         )
@@ -973,40 +1095,40 @@ async fn handle_mcp_list(
     });
 
     // SQLite preserves "oauth" as auth_type; AuthMethod enum has no OAuth variant.
-    let conn = match right.get_conn(&req.agent).await {
-        Ok(c) => c,
-        Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
+    let owner = match database_owner(&state, &req.agent).await {
+        Ok(owner) => owner,
+        Err(response) => return response,
     };
-    let (db_auth_types, db_header_names): (
-        std::collections::HashMap<String, Option<String>>,
-        std::collections::HashMap<String, Vec<String>>,
-    ) = {
-        let server_entries = match credentials::db_list_servers(&conn).await {
-            Ok(s) => s,
-            Err(e) => return internal_error(format!("db_list_servers: {e:#}")).into_response(),
-        };
-        let auth_types = server_entries
-            .iter()
-            .map(|s| (s.name.clone(), s.auth_type.clone()))
-            .collect();
-        let mut header_names: std::collections::HashMap<String, Vec<String>> = server_entries
-            .iter()
-            .filter(|s| s.auth_type.as_deref() == Some("headers"))
-            .map(|s| (s.name.clone(), Vec::new()))
-            .collect();
-        let all_headers = match credentials::db_list_all_http_header_names(&conn).await {
-            Ok(rows) => rows,
-            Err(e) => {
-                return internal_error(format!("db_list_all_http_header_names: {e:#}"))
-                    .into_response();
-            }
-        };
-        for (server_name, header_name) in all_headers {
-            if let Some(list) = header_names.get_mut(&server_name) {
-                list.push(display_header_name(header_name));
-            }
+    let (db_auth_types, db_header_names) = match owner
+        .local_operation(|conn| {
+            Box::pin(async move {
+                let server_entries = credentials::db_list_servers(conn).await?;
+                let auth_types: std::collections::HashMap<String, Option<String>> = server_entries
+                    .iter()
+                    .map(|server| (server.name.clone(), server.auth_type.clone()))
+                    .collect();
+                let mut header_names: std::collections::HashMap<String, Vec<String>> =
+                    server_entries
+                        .iter()
+                        .filter(|server| server.auth_type.as_deref() == Some("headers"))
+                        .map(|server| (server.name.clone(), Vec::new()))
+                        .collect();
+                for (server_name, header_name) in
+                    credentials::db_list_all_http_header_names(conn).await?
+                {
+                    if let Some(list) = header_names.get_mut(&server_name) {
+                        list.push(display_header_name(header_name));
+                    }
+                }
+                Ok((auth_types, header_names))
+            })
+        })
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return internal_error(format!("MCP list persistence: {error:#}")).into_response();
         }
-        (auth_types, header_names)
     };
 
     // External proxy backends
@@ -1039,23 +1161,23 @@ async fn handle_mcp_instructions(
     Json(req): Json<McpInstructionsRequest>,
 ) -> axum::response::Response {
     let dispatcher = &state.dispatcher;
-    let right = {
-        let Some(registry) = dispatcher.agents.get(&req.agent) else {
-            return not_found(format!("agent '{}' not found", req.agent)).into_response();
-        };
-        registry.right.clone()
+    if !dispatcher.agents.contains_key(&req.agent) {
+        return not_found(format!("agent '{}' not found", req.agent)).into_response();
+    }
+    let owner = match database_owner(&state, &req.agent).await {
+        Ok(owner) => owner,
+        Err(response) => return response,
     };
-    let conn = match right.get_conn(&req.agent).await {
-        Ok(c) => c,
-        Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
+    let servers = match owner
+        .local_operation(|conn| {
+            Box::pin(async move { credentials::db_list_servers(conn).await.map_err(Into::into) })
+        })
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return internal_error(format!("db_list_servers: {error:#}")).into_response(),
     };
 
-    let servers = {
-        match credentials::db_list_servers(&conn).await {
-            Ok(s) => s,
-            Err(e) => return internal_error(format!("db_list_servers: {e:#}")).into_response(),
-        }
-    };
     let content = right_codegen::generate_mcp_instructions_md(&servers);
 
     Json(McpInstructionsResponse {
@@ -1065,6 +1187,7 @@ async fn handle_mcp_instructions(
 }
 
 async fn handle_reload(State(state): State<InternalState>) -> axum::response::Response {
+    let _reload_guard = state.reload_lock.lock().await;
     // 1. Read token map from disk
     let content = match tokio::fs::read_to_string(&state.token_map_path).await {
         Ok(c) => c,
@@ -1118,22 +1241,68 @@ async fn handle_reload(State(state): State<InternalState>) -> axum::response::Re
             continue;
         }
 
-        // The reload path shares the running server's store: it is the single
-        // authority for provider records, so a second handle would be a second
-        // truth.
-        let right = crate::right_backend::RightBackend::new(
-            state.agents_dir.clone(),
-            Some(state.providers.clone()),
-        );
-        let registry = crate::aggregator::BackendRegistry {
-            right,
-            proxies: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            agent_dir: agent_dir.clone(),
-            hindsight: None,
+        // Build the complete runtime while it is unpublished. Only after every
+        // restore and task setup succeeds do all routing maps become visible.
+        let http_client = match crate::runtime_builder::build_http_client() {
+            Ok(client) => client,
+            Err(error) => {
+                return internal_error(format!("build reload HTTP client: {error:#}"))
+                    .into_response();
+            }
         };
-        state.dispatcher.agents.insert(agent_name.clone(), registry);
-
-        // Add to in-memory token map
+        let runtime = match crate::runtime_builder::build_agent_runtime(
+            agent_name,
+            agent_dir.clone(),
+            &state.agents_dir,
+            Arc::clone(&state.providers),
+            http_client,
+        )
+        .await
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return internal_error(format!("build runtime for reload: {error:#}"))
+                    .into_response();
+            }
+        };
+        if let Err(error) = state
+            .db_owners
+            .insert_bundle(Arc::clone(&runtime.bundle))
+            .await
+        {
+            state.refresh_senders.remove(agent_name);
+            if let Some((_, manager)) = state.reconnect_managers.remove(agent_name) {
+                manager.into_inner().cancel_all();
+            }
+            state.dispatcher.agents.remove(agent_name);
+            state
+                .token_map
+                .write()
+                .await
+                .retain(|_, info| info.name != *agent_name);
+            if let Err(drain_error) = runtime
+                .bundle
+                .drain(std::time::Duration::from_secs(10))
+                .await
+            {
+                return internal_error(format!(
+                    "register runtime: {error:#}; cleanup failed: {drain_error:#}"
+                ))
+                .into_response();
+            }
+            return internal_error(format!("register runtime: {error:#}")).into_response();
+        }
+        state
+            .refresh_senders
+            .insert(agent_name.clone(), runtime.refresh_sender);
+        state.reconnect_managers.insert(
+            agent_name.clone(),
+            tokio::sync::Mutex::new(runtime.reconnect_manager),
+        );
+        state
+            .dispatcher
+            .agents
+            .insert(agent_name.clone(), runtime.registry);
         {
             let mut map = state.token_map.write().await;
             map.insert(
@@ -1144,6 +1313,7 @@ async fn handle_reload(State(state): State<InternalState>) -> axum::response::Re
                 },
             );
         }
+        runtime.bundle.publish();
 
         added.push(agent_name.clone());
         tracing::info!(agent = agent_name.as_str(), "reload: registered new agent");
@@ -1159,7 +1329,27 @@ async fn handle_reload(State(state): State<InternalState>) -> axum::response::Re
         .collect();
     for agent_name in current_agents {
         if !disk_entries.contains_key(&agent_name) {
+            let bundle = match state.db_owners.bundle(&agent_name).await {
+                Some(bundle) => bundle,
+                None => {
+                    return internal_error(format!(
+                        "remove database owner: runtime bundle for '{agent_name}' not found"
+                    ))
+                    .into_response();
+                }
+            };
+            bundle.owner.begin_draining();
+            if let Some((_, manager)) = state.reconnect_managers.remove(&agent_name) {
+                manager.into_inner().cancel_all();
+            }
+            state.refresh_senders.remove(&agent_name);
+            if let Err(error) = bundle.drain(std::time::Duration::from_secs(10)).await {
+                bundle.owner.mark_failed();
+                return internal_error(format!("database owner drain failed: {error:#}"))
+                    .into_response();
+            }
             state.dispatcher.agents.remove(&agent_name);
+            state.db_owners.remove(&agent_name).await;
             // Remove from token_map (token→AgentInfo where AgentInfo.name matches)
             {
                 let mut map = state.token_map.write().await;
@@ -1206,9 +1396,12 @@ mod tests {
         let agents_dir = tmp.join("agents");
         let agent_dir = agents_dir.join("test-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        right_db::open_db(&agent_dir, true).await.unwrap();
-
-        let right = RightBackend::new(agents_dir, None);
+        let owner = Arc::new(crate::db_owner::AgentDbOwner::starting(
+            "test-agent",
+            agent_dir.clone(),
+        ));
+        owner.open_and_migrate().await.unwrap();
+        let right = RightBackend::new(agents_dir, None).with_db_owner(owner);
         let registry = BackendRegistry {
             right,
             proxies: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -1225,8 +1418,8 @@ mod tests {
         tmp: &std::path::Path,
     ) -> (Router, Arc<ToolDispatcher>) {
         let dispatcher = make_test_dispatcher(tmp).await;
-        let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
-        let reconnect_managers: ReconnectManagers = Arc::new(std::collections::HashMap::new());
+        let refresh_senders: RefreshSenders = Arc::new(dashmap::DashMap::new());
+        let reconnect_managers: ReconnectManagers = Arc::new(dashmap::DashMap::new());
 
         let token_map_path = tmp.join("agent-tokens.json");
         if !token_map_path.exists() {
@@ -1236,6 +1429,7 @@ mod tests {
             )
             .unwrap();
         }
+
         let token_map: crate::aggregator::AgentTokenMap = {
             let mut map = std::collections::HashMap::new();
             map.insert(
@@ -1248,16 +1442,72 @@ mod tests {
             std::sync::Arc::new(tokio::sync::RwLock::new(map))
         };
 
-        let router = internal_router(
-            Arc::clone(&dispatcher),
+        let owners = crate::db_owner::DbOwnerRegistry::open_initial([(
+            "test-agent".to_owned(),
+            tmp.join("agents/test-agent"),
+        )])
+        .await
+        .unwrap();
+        owners.bundle("test-agent").await.unwrap().publish();
+
+        let router = internal_router(InternalRouterDeps {
+            dispatcher: Arc::clone(&dispatcher),
             refresh_senders,
             reconnect_managers,
             token_map,
+            db_owners: owners,
             token_map_path,
-            tmp.join("agents"),
-            open_provider_store(tmp).await.unwrap(),
-        );
+            agents_dir: tmp.join("agents"),
+            providers: open_provider_store(tmp).await.unwrap(),
+        });
         (router, dispatcher)
+    }
+    #[tokio::test]
+    async fn db_ready_reports_unavailable_and_ready_states() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        let owner_dir = agents_dir.join("test-agent");
+        std::fs::create_dir_all(&owner_dir).unwrap();
+
+        let owners = crate::db_owner::DbOwnerRegistry::new();
+        let owner = Arc::new(crate::db_owner::AgentDbOwner::starting(
+            "test-agent",
+            owner_dir,
+        ));
+        owners.insert_starting(Arc::clone(&owner)).await.unwrap();
+        owners.bundle("test-agent").await.unwrap().publish();
+
+        let dispatcher = Arc::new(ToolDispatcher {
+            agents: dashmap::DashMap::new(),
+        });
+        let token_map = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let app = internal_router(InternalRouterDeps {
+            dispatcher,
+            refresh_senders: Arc::new(dashmap::DashMap::new()),
+            reconnect_managers: Arc::new(dashmap::DashMap::new()),
+            token_map,
+            db_owners: owners,
+            token_map_path: tmp.path().join("agent-tokens.json"),
+            agents_dir,
+            providers: open_provider_store(tmp.path()).await.unwrap(),
+        });
+
+        let (status, body) = send_json(
+            app.clone(),
+            "/db/ready",
+            serde_json::json!({"agent": "test-agent"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"], "starting");
+        assert_eq!(body["ready"], false);
+
+        owner.open_and_migrate().await.unwrap();
+        let (status, body) =
+            send_json(app, "/db/ready", serde_json::json!({"agent": "test-agent"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"], "ready");
+        assert_eq!(body["ready"], true);
     }
 
     async fn make_test_router(tmp: &std::path::Path) -> Router {
@@ -1292,6 +1542,30 @@ mod tests {
                 let counter = Arc::clone(&counter);
                 async move {
                     counter.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/mcp")
+    }
+
+    async fn start_blocked_failing_mcp_server(
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> String {
+        let app = Router::new().route(
+            "/mcp",
+            axum::routing::any(move || {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                async move {
+                    started.notify_one();
+                    release.notified().await;
                     StatusCode::INTERNAL_SERVER_ERROR
                 }
             }),
@@ -1748,6 +2022,280 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_add_failed_replacement_restores_database_and_existing_proxy() {
+        setup_crypto();
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
+        let old_url = start_empty_mcp_server().await;
+
+        let (status, body) = send_json(
+            app.clone(),
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "nango",
+                "url": old_url,
+                "auth_type": "headers",
+                "headers": [
+                    { "name": "Authorization", "value": "Bearer old-secret" },
+                    { "name": "connection-id", "value": "old-connection" }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body={body}");
+
+        let proxies = Arc::clone(
+            &dispatcher
+                .agents
+                .get("test-agent")
+                .expect("test-agent registered")
+                .proxies,
+        );
+        let old_proxy = proxies
+            .read()
+            .await
+            .get("nango")
+            .cloned()
+            .expect("old proxy published");
+        assert_eq!(old_proxy.status().await, BackendStatus::Connected);
+
+        let owner = dispatcher
+            .agents
+            .get("test-agent")
+            .expect("test-agent registered")
+            .right
+            .mcp_persistence()
+            .expect("owner persistence");
+        drop(owner);
+        let conn = right_db::open_connection(&tmp.path().join("agents/test-agent"), false)
+            .await
+            .expect("test db connection");
+        conn.execute(
+            "UPDATE mcp_servers SET instructions = 'old instructions', auth_header = 'legacy-header', \
+             auth_token = 'old-access', refresh_token = 'old-refresh', \
+             token_endpoint = 'https://auth.example/token', client_id = 'old-client', \
+             client_secret = 'old-client-secret', expires_at = '2027-01-02T03:04:05Z', \
+             oauth_resource = 'https://old.example/resource' WHERE name = 'nango'",
+            [],
+        )
+        .await
+        .unwrap();
+        let old_record: Vec<Option<String>> = conn
+            .query_one(
+                "SELECT url, instructions, auth_type, auth_header, auth_token, refresh_token, \
+                 token_endpoint, client_id, client_secret, expires_at, oauth_resource, created_at \
+                 FROM mcp_servers WHERE name = 'nango'",
+                [],
+                |row| (0..12).map(|index| row.get(index)).collect(),
+            )
+            .await
+            .unwrap();
+        let old_headers: Vec<(String, String)> = conn
+            .query_all(
+                "SELECT header_name, header_value FROM mcp_http_headers \
+                 WHERE server_name = 'nango' ORDER BY header_name",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .await
+            .unwrap();
+
+        let failing_url = start_failing_mcp_server(Arc::new(AtomicUsize::new(0))).await;
+        let (status, body) = send_json(
+            app,
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "nango",
+                "url": failing_url,
+                "auth_type": "headers",
+                "headers": [{ "name": "Authorization", "value": "Bearer replacement-secret" }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "body={body}");
+        assert!(!body.to_string().contains("old-secret"));
+        assert!(!body.to_string().contains("replacement-secret"));
+
+        let restored_record: Vec<Option<String>> = conn
+            .query_one(
+                "SELECT url, instructions, auth_type, auth_header, auth_token, refresh_token, \
+                 token_endpoint, client_id, client_secret, expires_at, oauth_resource, created_at \
+                 FROM mcp_servers WHERE name = 'nango'",
+                [],
+                |row| (0..12).map(|index| row.get(index)).collect(),
+            )
+            .await
+            .unwrap();
+        let restored_headers: Vec<(String, String)> = conn
+            .query_all(
+                "SELECT header_name, header_value FROM mcp_http_headers \
+                 WHERE server_name = 'nango' ORDER BY header_name",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored_record, old_record);
+        assert_eq!(restored_headers, old_headers);
+
+        let routed_proxy = proxies
+            .read()
+            .await
+            .get("nango")
+            .cloned()
+            .expect("old proxy remains routed");
+        assert!(Arc::ptr_eq(&routed_proxy, &old_proxy));
+        assert_eq!(routed_proxy.url(), old_url);
+        assert_eq!(routed_proxy.status().await, BackendStatus::Connected);
+    }
+
+    #[tokio::test]
+    async fn mcp_add_serializes_overlapping_replacements() {
+        setup_crypto();
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
+        let old_url = start_empty_mcp_server().await;
+        let (status, body) = send_json(
+            app.clone(),
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "server",
+                "url": old_url
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body={body}");
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let failing_url =
+            start_blocked_failing_mcp_server(Arc::clone(&started), Arc::clone(&release)).await;
+        let first = tokio::spawn(send_json(
+            app.clone(),
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "server",
+                "url": failing_url
+            }),
+        ));
+        started.notified().await;
+
+        let final_url = start_empty_mcp_server().await;
+        let second = tokio::spawn(send_json(
+            app,
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "server",
+                "url": final_url
+            }),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !second.is_finished(),
+            "second replacement must wait for the first"
+        );
+        release.notify_one();
+
+        let (first_status, first_body) = first.await.unwrap();
+        assert_eq!(first_status, StatusCode::BAD_GATEWAY, "body={first_body}");
+        let (second_status, second_body) = second.await.unwrap();
+        assert_eq!(second_status, StatusCode::OK, "body={second_body}");
+
+        let conn = right_db::open_connection(&tmp.path().join("agents/test-agent"), false)
+            .await
+            .unwrap();
+        let url: String = conn
+            .query_one(
+                "SELECT url FROM mcp_servers WHERE name = 'server'",
+                [],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(url, final_url);
+        let proxies = Arc::clone(
+            &dispatcher
+                .agents
+                .get("test-agent")
+                .expect("test-agent registered")
+                .proxies,
+        );
+        let routed = proxies.read().await.get("server").cloned().unwrap();
+        assert_eq!(routed.url(), final_url);
+        assert_eq!(routed.status().await, BackendStatus::Connected);
+    }
+
+    #[tokio::test]
+    async fn mcp_add_failed_new_server_leaves_no_database_row_or_proxy() {
+        setup_crypto();
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
+        let failing_url = start_failing_mcp_server(Arc::new(AtomicUsize::new(0))).await;
+
+        let (status, body) = send_json(
+            app,
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "new-server",
+                "url": failing_url,
+                "auth_type": "headers",
+                "headers": [{ "name": "Authorization", "value": "Bearer new-secret" }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "body={body}");
+        assert!(!body.to_string().contains("new-secret"));
+
+        let conn = right_db::open_connection(&tmp.path().join("agents/test-agent"), false)
+            .await
+            .expect("test db connection");
+        assert!(
+            !credentials::db_server_exists(&conn, "new-server")
+                .await
+                .unwrap()
+        );
+        let proxies = Arc::clone(
+            &dispatcher
+                .agents
+                .get("test-agent")
+                .expect("test-agent registered")
+                .proxies,
+        );
+        assert!(!proxies.read().await.contains_key("new-server"));
+    }
+
+    #[tokio::test]
+    async fn mcp_add_rollback_failure_reports_original_and_rollback_context() {
+        let owner = Arc::new(crate::db_owner::AgentDbOwner::starting(
+            "test-agent",
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        ));
+        let response = rollback_mcp_add(
+            &owner,
+            "server",
+            None,
+            "connection failed: original failure".to_owned(),
+            StatusCode::BAD_GATEWAY,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains("connection failed: original failure"));
+        assert!(error.contains("rollback failed"));
+        assert!(error.contains("database owner"));
+    }
+
+    #[tokio::test]
     async fn mcp_set_headers_replaces_existing_header_names() {
         setup_crypto();
         let tmp = tempfile::tempdir().unwrap();
@@ -1977,22 +2525,14 @@ mod tests {
     #[tokio::test]
     async fn mcp_remove_purges_orphan_db_row_without_proxy() {
         let tmp = tempfile::tempdir().unwrap();
-        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
+        let (app, _dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
 
         // Pre-insert a DB row with no matching in-memory proxy. This simulates
         // an orphan left behind when the aggregator restarted but the proxy
         // failed to reconnect.
-        let conn = {
-            let registry = dispatcher
-                .agents
-                .get("test-agent")
-                .expect("test-agent registered");
-            registry
-                .right
-                .get_conn("test-agent")
-                .await
-                .expect("test db connection")
-        };
+        let conn = right_db::open_connection(&tmp.path().join("agents/test-agent"), false)
+            .await
+            .expect("test db connection");
         {
             credentials::db_add_server(&conn, "orphan", "https://example.com/mcp")
                 .await
@@ -2076,17 +2616,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
 
-        let (agent_dir, proxies, conn) = {
+        let (persistence, proxies, conn) = {
             let registry = dispatcher
                 .agents
                 .get("test-agent")
                 .expect("test-agent registered");
             (
-                registry.agent_dir.clone(),
+                registry.right.mcp_persistence().unwrap(),
                 Arc::clone(&registry.proxies),
-                registry
-                    .right
-                    .get_conn("test-agent")
+                right_db::open_connection(&tmp.path().join("agents/test-agent"), false)
                     .await
                     .expect("test db connection"),
             )
@@ -2103,7 +2641,7 @@ mod tests {
         let token = Arc::new(tokio::sync::RwLock::new(Some("old-token".to_string())));
         let backend = Arc::new(ProxyBackend::new(
             "composio".into(),
-            agent_dir,
+            persistence,
             "https://mcp.example.com/mcp".into(),
             Arc::clone(&token),
             AuthMethod::Bearer,
@@ -2145,17 +2683,15 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let mcp_url = start_failing_mcp_server(Arc::clone(&attempts)).await;
 
-        let (agent_dir, proxies, conn) = {
+        let (persistence, proxies, conn) = {
             let registry = dispatcher
                 .agents
                 .get("test-agent")
                 .expect("test-agent registered");
             (
-                registry.agent_dir.clone(),
+                registry.right.mcp_persistence().unwrap(),
                 Arc::clone(&registry.proxies),
-                registry
-                    .right
-                    .get_conn("test-agent")
+                right_db::open_connection(&tmp.path().join("agents/test-agent"), false)
                     .await
                     .expect("test db connection"),
             )
@@ -2172,7 +2708,7 @@ mod tests {
         let token = Arc::new(tokio::sync::RwLock::new(Some("old-token".to_string())));
         let backend = Arc::new(ProxyBackend::new(
             "composio".into(),
-            agent_dir,
+            persistence,
             mcp_url.clone(),
             Arc::clone(&token),
             AuthMethod::Bearer,
@@ -2233,7 +2769,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let app = make_test_router(tmp.path()).await;
 
-        let (status, _body) = send_json(
+        let (status, body) = send_json(
             app,
             "/mcp-add",
             serde_json::json!({
@@ -2244,7 +2780,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
     }
 
     #[tokio::test]
@@ -2346,18 +2882,19 @@ mod tests {
             );
             std::sync::Arc::new(tokio::sync::RwLock::new(map))
         };
-        let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
-        let reconnect_managers: ReconnectManagers = Arc::new(std::collections::HashMap::new());
+        let refresh_senders: RefreshSenders = Arc::new(dashmap::DashMap::new());
+        let reconnect_managers: ReconnectManagers = Arc::new(dashmap::DashMap::new());
 
-        let app = internal_router(
+        let app = internal_router(InternalRouterDeps {
             dispatcher,
             refresh_senders,
             reconnect_managers,
             token_map,
+            db_owners: crate::db_owner::DbOwnerRegistry::new(),
             token_map_path,
-            tmp.path().join("agents"),
-            open_provider_store(tmp.path()).await.unwrap(),
-        );
+            agents_dir: tmp.path().join("agents"),
+            providers: open_provider_store(tmp.path()).await.unwrap(),
+        });
 
         let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK);
@@ -2392,18 +2929,19 @@ mod tests {
             );
             std::sync::Arc::new(tokio::sync::RwLock::new(map))
         };
-        let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
-        let reconnect_managers: ReconnectManagers = Arc::new(std::collections::HashMap::new());
+        let refresh_senders: RefreshSenders = Arc::new(dashmap::DashMap::new());
+        let reconnect_managers: ReconnectManagers = Arc::new(dashmap::DashMap::new());
 
-        let app = internal_router(
+        let app = internal_router(InternalRouterDeps {
             dispatcher,
             refresh_senders,
             reconnect_managers,
-            token_map.clone(),
+            token_map: token_map.clone(),
+            db_owners: crate::db_owner::DbOwnerRegistry::new(),
             token_map_path,
-            agents_dir.clone(),
-            open_provider_store(tmp.path()).await.unwrap(),
-        );
+            agents_dir: agents_dir.clone(),
+            providers: open_provider_store(tmp.path()).await.unwrap(),
+        });
 
         let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK);
@@ -2450,18 +2988,19 @@ mod tests {
             std::sync::Arc::new(tokio::sync::RwLock::new(map))
         };
 
-        let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
-        let reconnect_managers: ReconnectManagers = Arc::new(std::collections::HashMap::new());
+        let refresh_senders: RefreshSenders = Arc::new(dashmap::DashMap::new());
+        let reconnect_managers: ReconnectManagers = Arc::new(dashmap::DashMap::new());
 
-        let app = internal_router(
-            dispatcher.clone(),
+        let app = internal_router(InternalRouterDeps {
+            dispatcher: dispatcher.clone(),
             refresh_senders,
             reconnect_managers,
-            token_map.clone(),
+            token_map: token_map.clone(),
+            db_owners: crate::db_owner::DbOwnerRegistry::new(),
             token_map_path,
-            agents_dir.clone(),
-            open_provider_store(tmp.path()).await.unwrap(),
-        );
+            agents_dir: agents_dir.clone(),
+            providers: open_provider_store(tmp.path()).await.unwrap(),
+        });
 
         let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;
         assert_eq!(status, StatusCode::OK);
@@ -2485,17 +3024,9 @@ mod tests {
 
         // Seed a DB row + an unreachable proxy backend directly: /mcp-add would
         // itself fail to connect to a dead upstream, so we bypass it.
-        let conn = {
-            let registry = dispatcher
-                .agents
-                .get("test-agent")
-                .expect("test-agent registered");
-            registry
-                .right
-                .get_conn("test-agent")
-                .await
-                .expect("test db connection")
-        };
+        let conn = right_db::open_connection(&tmp.path().join("agents/test-agent"), false)
+            .await
+            .expect("test db connection");
         let dead_url = "http://127.0.0.1:1/mcp".to_string();
         {
             credentials::db_add_server(&conn, "obsidian", &dead_url)
@@ -2507,7 +3038,13 @@ mod tests {
             let proxies = Arc::clone(&dispatcher.agents.get("test-agent").unwrap().proxies);
             let backend = Arc::new(ProxyBackend::new(
                 "obsidian".into(),
-                tmp.path().join("agents/test-agent"),
+                dispatcher
+                    .agents
+                    .get("test-agent")
+                    .unwrap()
+                    .right
+                    .mcp_persistence()
+                    .unwrap(),
                 dead_url.clone(),
                 Arc::new(tokio::sync::RwLock::new(None)),
                 AuthMethod::default(),
@@ -2565,17 +3102,9 @@ mod tests {
         let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
 
         let dead_url = "http://127.0.0.1:1/mcp".to_string();
-        let conn = {
-            let registry = dispatcher
-                .agents
-                .get("test-agent")
-                .expect("test-agent registered");
-            registry
-                .right
-                .get_conn("test-agent")
-                .await
-                .expect("test db connection")
-        };
+        let conn = right_db::open_connection(&tmp.path().join("agents/test-agent"), false)
+            .await
+            .expect("test db connection");
         {
             credentials::db_add_server(&conn, "obsidian", &dead_url)
                 .await
@@ -2583,7 +3112,13 @@ mod tests {
         }
         let backend = Arc::new(ProxyBackend::new(
             "obsidian".into(),
-            tmp.path().join("agents/test-agent"),
+            dispatcher
+                .agents
+                .get("test-agent")
+                .unwrap()
+                .right
+                .mcp_persistence()
+                .unwrap(),
             dead_url,
             Arc::new(tokio::sync::RwLock::new(None)),
             AuthMethod::default(),

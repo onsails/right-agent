@@ -16,9 +16,11 @@ hyper-util = { workspace = true }
 miette = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
+right-dashboard = { path = "../right-dashboard", version = "*" }
 right-db = { path = "../right-db", version = "*" }
 rmcp = { workspace = true }
 rustls = { workspace = true }
+secrecy = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -50,7 +50,6 @@ rcgen = "0.14"
 tokio = { version = "1.52", features = ["full"] }
 which = "8.0"
 turso = { version = "0.7", features = ["sync"] }
-turso_core = "0.7"
 rmcp ={ version = "1.7", default-features = false, features = ["client", "server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }
 futures = "0.3"
 http = "1.4"

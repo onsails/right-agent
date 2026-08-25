@@ -3,8 +3,11 @@
 // not others.
 #![allow(dead_code)]
 
+use std::sync::Arc;
+
 use right_memory::ResilientHindsight;
 use right_memory::hindsight::HindsightClient;
+use right_memory::retain_sink::InMemoryRetainQueue;
 
 pub mod mock {
     pub async fn always(status: u16, body: &str) -> (tokio::task::JoinHandle<()>, String) {
@@ -40,13 +43,12 @@ pub fn setup_crypto() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-pub async fn wrap(url: &str, source: &str) -> ResilientHindsight {
+pub async fn wrap(url: &str, source: &str) -> (ResilientHindsight, Arc<InMemoryRetainQueue>) {
     setup_crypto();
-    // `into_path()` is deprecated in current tempfile; use `.keep()`.
-    let dir = tempfile::tempdir().unwrap().keep();
-    let _ = right_db::open_connection(&dir, true).await.unwrap();
+    let queue = Arc::new(InMemoryRetainQueue::new());
     let client = HindsightClient::new("hs_x", "b", "high", 1024, Some(url));
-    ResilientHindsight::new(client, dir, source)
+    let wrapper = ResilientHindsight::new(client, queue.clone(), source);
+    (wrapper, queue)
 }
 
 pub mod switch {

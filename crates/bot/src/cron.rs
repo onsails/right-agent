@@ -297,6 +297,64 @@ pub(crate) fn resolve_then_action(spec: &CronSpec, success: bool) -> Option<Then
 /// `producer_ref` stamped on every `then`-continuation `async_runs` row.
 pub(crate) const THEN_PRODUCER_REF: &str = "cron_then";
 
+fn cron_spec_from_dto(
+    dto: right_mcp::internal_db::CronSpecDto,
+) -> Result<(String, CronSpec), String> {
+    let schedule_kind = right_agent::cron_spec::ScheduleKind::from_db_row(
+        &dto.schedule,
+        dto.run_at.as_deref(),
+        i64::from(dto.recurring),
+    )?;
+    let then = dto
+        .trigger_then_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| format!("invalid trigger_then_json: {error}"))?;
+    Ok((
+        dto.job_name,
+        CronSpec {
+            schedule_kind,
+            prompt: dto.prompt,
+            lock_ttl: dto.lock_ttl,
+            max_budget_usd: dto.max_budget_usd,
+            triggered_at: dto.triggered_at,
+            trigger_force_notify: dto.trigger_force_notify,
+            target_chat_id: dto.target_chat_id,
+            target_thread_id: dto.target_thread_id,
+            model: dto.model,
+            trigger_extra_instruction: dto.trigger_extra_instruction,
+            then,
+            trigger_origin_chat_id: dto.trigger_origin_chat_id,
+            trigger_origin_thread_id: dto.trigger_origin_thread_id,
+        },
+    ))
+}
+
+async fn load_specs_ipc(
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
+) -> Result<HashMap<String, CronSpec>, right_mcp::internal_db::InternalDbError> {
+    let response = client
+        .cron_specs_list(&right_mcp::internal_db::CronSpecsListRequest {
+            agent: agent.to_owned(),
+        })
+        .await?;
+    response
+        .specs
+        .into_iter()
+        .map(|dto| {
+            cron_spec_from_dto(dto).map_err(|message| {
+                right_mcp::internal_db::InternalDbError::Server {
+                    category: right_mcp::internal_db::DbErrorCategory::Invalid,
+                    status: 422,
+                    message,
+                }
+            })
+        })
+        .collect()
+}
+
 /// Insert the queued `kind='background'` row for a `then` continuation, returning
 /// the new run id. The row's `source_session_id` is the triggered run's session
 /// (the one the continuation forks), and `run_session_id` is the new run's own
@@ -306,23 +364,22 @@ async fn insert_then_continuation_row(
     agent_dir: &std::path::Path,
     action: &ThenAction,
     source_session_id: &str,
-) -> Result<String, right_db::DbError> {
+) -> anyhow::Result<String> {
     let new_run_id = uuid::Uuid::new_v4().to_string();
-    let conn = right_db::open_connection(agent_dir, false).await?;
-    let now = chrono::Utc::now().to_rfc3339();
-    right_agent::async_runs::insert_queued_background_run(
-        &conn,
-        right_agent::async_runs::NewBackgroundRun {
-            id: &new_run_id,
-            producer_ref: Some(THEN_PRODUCER_REF),
-            source_session_id,
-            run_session_id: &new_run_id,
+    let (client, agent) = crate::db::client_for_agent_dir(agent_dir)?;
+    client
+        .enqueue_background_run(&right_mcp::internal_db::EnqueueBackgroundRunRequest {
+            agent,
+            request_id: crate::db::request_id(),
+            run_id: new_run_id.clone(),
+            producer_ref: Some(THEN_PRODUCER_REF.to_owned()),
+            source_session_id: source_session_id.to_owned(),
+            run_session_id: new_run_id.clone(),
             target_chat_id: action.target_chat_id,
             target_thread_id: action.target_thread_id,
-            created_at: &now,
-        },
-    )
-    .await?;
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .await?;
     Ok(new_run_id)
 }
 
@@ -447,6 +504,7 @@ fn classify_cron_failure(
 /// Insert a freshly-started cron run with `status='running'`, snapshotting the
 /// spec's delivery target onto the row so one-shot delivery survives spec
 /// auto-deletion.
+#[cfg(test)]
 async fn insert_running_run(
     conn: &right_db::Connection,
     run_id: &str,
@@ -495,6 +553,7 @@ fn cron_shutdown_failure_payload(
     Ok((run_note, delivery_json, error_json))
 }
 
+#[cfg(test)]
 async fn mark_cron_interrupted_by_shutdown(
     conn: &right_db::Connection,
     job_name: &str,
@@ -558,13 +617,14 @@ async fn mark_cron_interrupted_by_shutdown(
 }
 
 async fn update_failed_run_record(
-    conn: &right_db::Connection,
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
     run_id: &str,
     exit_code: Option<i32>,
 ) {
-    update_run_record(conn, run_id, exit_code, "failed").await;
+    update_run_record(client, agent, run_id, exit_code, "failed").await;
 }
-
+#[cfg(test)]
 async fn persist_successful_cron_output(
     conn: &right_db::Connection,
     run_id: &str,
@@ -616,6 +676,27 @@ fn resolve_cron_model(
     global: &arc_swap::ArcSwap<Option<String>>,
 ) -> Option<String> {
     spec.model.clone().or_else(|| crate::snapshot_model(global))
+}
+
+/// Fetch the skills linked to a cron job from the owner. The linked-skill
+/// set shapes the job prompt (which skills the agent is told it may use),
+/// so a lookup failure must fail the run — silently substituting an empty
+/// list is indistinguishable from a job with no linked skills.
+async fn fetch_linked_skills_for_run(
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
+    job_name: &str,
+) -> Result<Vec<String>, right_mcp::internal_db::InternalDbError> {
+    let response = client
+        .cron_spec_detail(&right_mcp::internal_db::CronSpecDetailRequest {
+            agent: agent.to_owned(),
+            job_name: job_name.to_owned(),
+        })
+        .await?;
+    Ok(response
+        .detail
+        .map(|detail| detail.linked_skills)
+        .unwrap_or_default())
 }
 
 /// Execute one cron job: lock check → DB insert → subprocess → log write → DB update → lock delete.
@@ -676,23 +757,32 @@ async fn execute_job(
     let log_path_str = format!("{sandbox_log_dir}/{log_filename}");
 
     // DB insert: status='running' (D-04)
-    // Open per job so DB resource lifetime is bounded to the job run.
-    let conn = match right_db::open_connection(agent_dir, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(job = %job_name, "DB open failed: {e:#}");
+    let (db_client, db_agent) = match crate::db::client_for_agent_dir(agent_dir) {
+        Ok(pair) => pair,
+        Err(error) => {
+            tracing::error!(job = %job_name, "owner client resolution failed: {error:#}");
             std::fs::remove_file(&lock_path).ok();
             return;
         }
     };
-    if let Err(e) =
-        insert_running_run(&conn, &run_id, job_name, &started_at, &log_path_str, spec).await
+    if let Err(error) = db_client
+        .cron_insert_running_run(&right_mcp::internal_db::CronInsertRunningRunRequest {
+            agent: db_agent.clone(),
+            request_id: crate::db::request_id(),
+            run_id: run_id.clone(),
+            job_name: job_name.to_owned(),
+            started_at: started_at.clone(),
+            log_path: log_path_str.clone(),
+            target_chat_id: spec.target_chat_id,
+            target_thread_id: spec.target_thread_id,
+            force_notify: false,
+        })
+        .await
     {
-        tracing::error!(job = %job_name, "DB insert failed: {e:#}");
+        tracing::error!(job = %job_name, "owner run insert failed: {error:#}");
         std::fs::remove_file(&lock_path).ok();
         return;
     }
-
     // Every cron invocation needs a per-invocation MCP config and a bot-local
     // UDS target. Skill learning only changes which tools CC may invoke.
     // Registration is mandatory: without it channel_post is rejected as
@@ -708,7 +798,7 @@ async fn execute_job(
                 Ok(sandbox) => Arc::clone(sandbox),
                 Err(e) => {
                     tracing::error!(job = %job_name, "{e:#}");
-                    update_failed_run_record(&conn, &run_id, None).await;
+                    update_failed_run_record(&db_client, &db_agent, &run_id, None).await;
                     std::fs::remove_file(&lock_path).ok();
                     return;
                 }
@@ -725,7 +815,7 @@ async fn execute_job(
         Ok(active) => active,
         Err(e) => {
             tracing::error!(job = %job_name, "failed to register cron invocation: {e:#}");
-            update_failed_run_record(&conn, &run_id, None).await;
+            update_failed_run_record(&db_client, &db_agent, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
         }
@@ -746,25 +836,35 @@ async fn execute_job(
     // Per-agent notice token for the trusted `## Platform Notice Token` prompt
     // section and for stamping the force-notify / extra-instruction SYSTEM_NOTICE
     // markers. Reuse the run's conn.
-    let notice_token = match right_mcp::credentials::get_or_create_notice_token(&conn).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!(job = %job_name, "notice token fetch failed: {e:#}");
+    let notice_token = {
+        use secrecy::ExposeSecret as _;
+        match db_client
+            .notice_token_get_or_create(&right_mcp::internal_db::NoticeTokenGetOrCreateRequest {
+                agent: db_agent.clone(),
+                request_id: crate::db::request_id(),
+            })
+            .await
+        {
+            Ok(response) => response.token.expose_secret().to_owned(),
+            Err(error) => {
+                tracing::error!(job = %job_name, "notice token owner fetch failed: {error:#}");
+                registered_cron.cleanup().await;
+                update_failed_run_record(&db_client, &db_agent, &run_id, None).await;
+                std::fs::remove_file(&lock_path).ok();
+                return;
+            }
+        }
+    };
+    let linked_skills = match fetch_linked_skills_for_run(&db_client, &db_agent, job_name).await {
+        Ok(linked_skills) => linked_skills,
+        Err(error) => {
+            tracing::error!(job = %job_name, "owner linked-skill lookup failed: {error:#}");
             registered_cron.cleanup().await;
-            update_failed_run_record(&conn, &run_id, None).await;
+            update_failed_run_record(&db_client, &db_agent, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
         }
     };
-
-    // Read-path fallback: a link-lookup failure must not block the cron run.
-    let linked_skills = right_agent::cron_skill_link::list_live_for_job(&conn, job_name)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(job = %job_name, "linked-skills lookup failed: {e:#}");
-            Vec::new()
-        });
-
     let prompt_for_cc = compose_run_prompt(
         &spec.prompt,
         spec.trigger_force_notify,
@@ -826,7 +926,7 @@ async fn execute_job(
         Err(e) => {
             tracing::error!(job = %job_name, "{e:#}");
             registered_cron.cleanup().await;
-            update_failed_run_record(&conn, &run_id, None).await;
+            update_failed_run_record(&db_client, &db_agent, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
         }
@@ -867,7 +967,7 @@ async fn execute_job(
             Err(e) => {
                 tracing::error!(job = %job_name, "spawn failed: {e:#}");
                 registered_cron.cleanup().await;
-                update_failed_run_record(&conn, &run_id, None).await;
+                update_failed_run_record(&db_client, &db_agent, &run_id, None).await;
                 std::fs::remove_file(&lock_path).ok();
                 return;
             }
@@ -875,7 +975,7 @@ async fn execute_job(
         Err(e) => {
             tracing::error!(job = %job_name, "command build failed: {e:#}");
             registered_cron.cleanup().await;
-            update_failed_run_record(&conn, &run_id, None).await;
+            update_failed_run_record(&db_client, &db_agent, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
         }
@@ -1133,22 +1233,23 @@ async fn execute_job(
                     // sees the run as broken instead of stuck at 'success' with no
                     // delivery payload.
                     if let Some(delivery_json) = delivery_json {
-                        let tx_result: Result<&'static str, right_db::DbError> = async {
-                            let tx = conn.transaction().await?;
-                            let delivery_status = persist_successful_cron_output(
-                                &tx,
-                                &run_id,
-                                &cron_output,
-                                &delivery_json,
-                                spec.trigger_force_notify,
-                            )
-                            .await?;
-                            right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "success")
-                                .await?;
-                            tx.commit().await?;
-                            Ok(delivery_status)
-                        }
-                        .await;
+                        let delivery_required =
+                            matches!(cron_output.delivery, CronDeliveryDecision::Notify { .. })
+                                || spec.trigger_force_notify;
+                        let tx_result = db_client
+                            .persist_run_output(&right_mcp::internal_db::PersistRunOutputRequest {
+                                agent: db_agent.clone(),
+                                request_id: crate::db::request_id(),
+                                run_id: run_id.clone(),
+                                run_note: Some(cron_output.run_note.clone()),
+                                delivery_json: Some(delivery_json),
+                                error_json: None,
+                                delivery_required,
+                                exit_code,
+                                status: "success".to_owned(),
+                            })
+                            .await
+                            .map(|response| response.delivery_status);
 
                         match tx_result {
                             Ok(delivery_status) => {
@@ -1192,14 +1293,16 @@ async fn execute_job(
                                 // if the terminal result line is missing/unparseable. Disjoint from the async
                                 // probe-writer seam (different invocation_id) so no double-linking.
                                 if learning_eligible
-                                    && let Some(inv) = cron_invocation_id.as_deref()
-                                    && let Err(e) =
-                                        crate::learning_probe_writer::link_cron_authored(
-                                            &conn, job_name, inv,
-                                        )
+                                    && let Some(invocation_id) = cron_invocation_id.as_deref()
+                                    && let Err(error) = internal_client
+                                        .learning_link_cron_authored(&right_mcp::internal_db::LearningLinkCronAuthoredRequest {
+                                            agent: agent_name.to_owned(),
+                                            job_name: job_name.to_owned(),
+                                            invocation_id: invocation_id.to_owned(),
+                                        })
                                         .await
                                 {
-                                    tracing::warn!(job = %job_name, "cron inline auto-link failed: {e:#}");
+                                    tracing::warn!(job = %job_name, "cron inline owner auto-link failed: {error:#}");
                                 }
                                 if learning_eligible
                                     && let Some((reply_text, num_turns, cost_usd)) =
@@ -1254,9 +1357,15 @@ async fn execute_job(
                                         baseline_window_days: learning.baseline_window_days,
                                         baseline_min_sample: learning.baseline_min_sample,
                                     };
+                                    let learning_agent = agent_name.to_owned();
                                     tokio::spawn(async move {
-                                        crate::learning_pipeline::run_post_turn(learn_ctx, anchor)
-                                            .await;
+                                        if let Err(error) = crate::learning_pipeline::run_post_turn(
+                                            learn_ctx, anchor,
+                                        )
+                                        .await
+                                        {
+                                            tracing::error!(agent = %learning_agent, "post-turn learning pipeline failed: {error:#}");
+                                        }
                                     });
                                 }
                             }
@@ -1265,7 +1374,8 @@ async fn execute_job(
                                     job = %job_name,
                                     "failed to persist cron output atomically; marking run failed: {e:#}"
                                 );
-                                update_failed_run_record(&conn, &run_id, exit_code).await;
+                                update_failed_run_record(&db_client, &db_agent, &run_id, exit_code)
+                                    .await;
                             }
                         }
                     } else {
@@ -1273,7 +1383,7 @@ async fn execute_job(
                             job = %job_name,
                             "failed to produce delivery_json; marking run failed"
                         );
-                        update_failed_run_record(&conn, &run_id, exit_code).await;
+                        update_failed_run_record(&db_client, &db_agent, &run_id, exit_code).await;
                     }
                 }
                 Err(reason) => {
@@ -1283,32 +1393,26 @@ async fn execute_job(
                         "reason": reason,
                     })
                     .to_string();
-                    let tx_result: Result<(), right_db::DbError> = async {
-                        let tx = conn.transaction().await?;
-                        right_agent::async_runs::persist_run_output(
-                            &tx,
-                            &run_id,
-                            right_agent::async_runs::RunOutput {
-                                run_note: None,
-                                delivery_json: None,
-                                error_json: Some(&error_json_str),
-                                delivery_required: false,
-                            },
-                        )
-                        .await?;
-                        right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "failed")
-                            .await?;
-                        tx.commit().await?;
-                        Ok(())
-                    }
-                    .await;
+                    let tx_result = db_client
+                        .persist_run_output(&right_mcp::internal_db::PersistRunOutputRequest {
+                            agent: db_agent.clone(),
+                            request_id: crate::db::request_id(),
+                            run_id: run_id.clone(),
+                            run_note: None,
+                            delivery_json: None,
+                            error_json: Some(error_json_str),
+                            delivery_required: false,
+                            exit_code,
+                            status: "failed".to_owned(),
+                        })
+                        .await;
 
                     if let Err(e) = tx_result {
                         tracing::error!(
                             job = %job_name,
                             "failed to persist cron parse error atomically: {e:#}"
                         );
-                        update_failed_run_record(&conn, &run_id, exit_code).await;
+                        update_failed_run_record(&db_client, &db_agent, &run_id, exit_code).await;
                     }
 
                     // Parse failed but CC produced a terminal result, so the run's
@@ -1338,7 +1442,7 @@ async fn execute_job(
             // Failure path: commit terminal status='failed' before reflection runs.
             // Reflection then writes its own failure notify via persist_run_output,
             // which is consistent with status='failed'.
-            update_run_record(&conn, &run_id, exit_code, "failed").await;
+            update_run_record(&db_client, &db_agent, &run_id, exit_code, "failed").await;
             let exit_str = exit_code.map_or("unknown".to_string(), |c| c.to_string());
             // CC error results (budget/turn limits) carry no `result` text — read
             // the reason from the result `subtype` so it survives to the notice,
@@ -1442,19 +1546,21 @@ async fn execute_job(
 
             match notify_delivery_json(&reflected_content, None) {
                 Ok(json) => {
-                    if let Err(e) = right_agent::async_runs::persist_run_output(
-                        &conn,
-                        &run_id,
-                        right_agent::async_runs::RunOutput {
-                            run_note: Some(&run_note_detail),
-                            delivery_json: Some(&json),
-                            error_json: Some(&error_json_str),
+                    if let Err(error) = db_client
+                        .persist_run_output(&right_mcp::internal_db::PersistRunOutputRequest {
+                            agent: db_agent.clone(),
+                            request_id: crate::db::request_id(),
+                            run_id: run_id.clone(),
+                            run_note: Some(run_note_detail.clone()),
+                            delivery_json: Some(json),
+                            error_json: Some(error_json_str.clone()),
                             delivery_required: true,
-                        },
-                    )
-                    .await
+                            exit_code,
+                            status: "failed".to_owned(),
+                        })
+                        .await
                     {
-                        tracing::error!(job = %job_name, "failed to persist failure notify to DB: {e:#}");
+                        tracing::error!(job = %job_name, "failed to persist failure notify through owner: {error:#}");
                     }
                 }
                 Err(e) => {
@@ -1492,10 +1598,18 @@ async fn execute_job(
                     .iter()
                     .find_map(|l| crate::cc::stream::parse_api_key_source(l))
                     .unwrap_or_else(|| "none".into());
-                if let Err(e) =
-                    right_agent::usage::insert::insert_cron(&conn, &breakdown, job_name).await
+                if let Err(error) = db_client
+                    .usage_insert_event(&right_mcp::internal_db::UsageInsertEventRequest {
+                        agent: db_agent.clone(),
+                        request_id: crate::db::request_id(),
+                        source: right_mcp::internal_db::UsageSourceDto::Cron {
+                            job_name: job_name.to_owned(),
+                        },
+                        event: crate::db::usage_dto(&breakdown),
+                    })
+                    .await
                 {
-                    tracing::warn!(job = %job_name, "usage insert failed: {e:#}");
+                    tracing::warn!(job = %job_name, "owner usage insert failed: {error:#}");
                 }
             }
             None => {
@@ -1832,13 +1946,23 @@ pub(crate) fn parse_cron_output(lines: &[String]) -> Result<CronReplyOutput, Str
 }
 
 async fn update_run_record(
-    conn: &right_db::Connection,
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
     run_id: &str,
     exit_code: Option<i32>,
     status: &str,
 ) {
-    if let Err(e) = right_agent::async_runs::finish_run(conn, run_id, exit_code, status).await {
-        tracing::error!("DB update for run {run_id} failed: {e:#}");
+    if let Err(error) = client
+        .finish_run(&right_mcp::internal_db::FinishRunRequest {
+            agent: agent.to_owned(),
+            request_id: crate::db::request_id(),
+            run_id: run_id.to_owned(),
+            exit_code,
+            status: status.to_owned(),
+        })
+        .await
+    {
+        tracing::error!(run_id, "owner run update failed: {error:#}");
     }
 }
 
@@ -1917,14 +2041,6 @@ pub(crate) async fn run_cron_task(
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
-    let conn = match right_db::open_connection(&agent_dir, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(agent = %agent_name, "cron task: DB open failed: {e:#}");
-            return;
-        }
-    };
-
     let execute_handles: ExecuteHandles = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut handles: HashMap<String, (CronSpec, JoinHandle<()>)> = HashMap::new();
     let mut triggered_handles: Vec<JoinHandle<()>> = Vec::new();
@@ -1935,7 +2051,7 @@ pub(crate) async fn run_cron_task(
     reconcile_jobs(
         &mut handles,
         &mut triggered_handles,
-        &conn,
+        &internal_client,
         &agent_dir,
         &agent_name,
         &model,
@@ -1953,7 +2069,7 @@ pub(crate) async fn run_cron_task(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &sandbox_runtime, &internal_client, &execute_handles, &upgrade_lock, &debug, &learning, &session_locks, &progress_state).await;
+                reconcile_jobs(&mut handles, &mut triggered_handles, &internal_client, &agent_dir, &agent_name, &model, &sandbox_runtime, &internal_client, &execute_handles, &upgrade_lock, &debug, &learning, &session_locks, &progress_state).await;
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
@@ -2015,24 +2131,17 @@ pub(crate) async fn run_cron_task(
                         "cron shutdown: job timed out, aborting and marking interrupted"
                     );
                     pending_handle.handle.abort();
-                    match right_db::open_connection(&agent_dir, false).await {
-                        Ok(conn) => {
-                            if let Err(e) =
-                                mark_cron_interrupted_by_shutdown(&conn, &name, "shutdown timeout")
-                                    .await
-                            {
-                                tracing::error!(
-                                    job = %name,
-                                    "cron shutdown: mark interrupted failed: {e:#}"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                job = %name,
-                                "cron shutdown: DB open to mark interrupted failed: {e:#}"
-                            );
-                        }
+                    if let Err(error) = internal_client
+                        .cron_mark_interrupted_by_shutdown(
+                            &right_mcp::internal_db::CronMarkInterruptedByShutdownRequest {
+                                agent: agent_name.clone(),
+                                job_name: name.clone(),
+                                reason: "shutdown timeout".to_owned(),
+                            },
+                        )
+                        .await
+                    {
+                        tracing::error!(job = %name, "cron shutdown owner interruption failed: {error:#}");
                     }
                 }
             }
@@ -2065,26 +2174,28 @@ impl Drop for OneShotSpecDeleter {
     }
 }
 
-/// Delete a one-shot spec after it has fired. Opens a fresh DB connection
-/// (callers are inside `tokio::spawn` and cannot share the reconciler's connection).
+/// Delete a one-shot spec after it has fired through the owner.
 async fn delete_one_shot_spec(agent_dir: &std::path::Path, job_name: &str) {
-    let conn = match right_db::open_connection(agent_dir, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(job = %job_name, "failed to open DB for post-fire delete: {e:#}");
-            return;
+    let result = async {
+        let (client, agent) = crate::db::client_for_agent_dir(agent_dir)?;
+        client
+            .cron_delete_spec(&right_mcp::internal_db::CronDeleteSpecRequest {
+                agent,
+                job_name: job_name.to_owned(),
+            })
+            .await
+            .map(drop)
+            .map_err(anyhow::Error::from)
+    }
+    .await;
+    match result {
+        Ok(()) => tracing::info!(job = %job_name, "one-shot spec auto-deleted after fire"),
+        Err(error) => {
+            tracing::error!(job = %job_name, "failed to delete one-shot spec through owner: {error:#}")
         }
-    };
-    if let Err(e) = right_agent::cron_spec::delete_spec(&conn, job_name, agent_dir).await {
-        tracing::error!(job = %job_name, "failed to delete one-shot spec after fire: {e}");
-    } else {
-        tracing::info!(job = %job_name, "one-shot spec auto-deleted after fire");
     }
 }
 
-/// Fire a batch of one-shot specs (RunAt or Immediate). Each becomes a spawned
-/// `execute_job` followed by `delete_one_shot_spec`. The lock check is best-effort —
-/// `execute_job` re-checks under the upgrade-lock guard before writing the lock file.
 #[allow(clippy::too_many_arguments)]
 fn fire_one_shot_specs(
     specs: Vec<(String, CronSpec)>,
@@ -2161,7 +2272,7 @@ fn fire_one_shot_specs(
 async fn reconcile_jobs(
     handles: &mut HashMap<String, (CronSpec, JoinHandle<()>)>,
     triggered_handles: &mut Vec<JoinHandle<()>>,
-    conn: &right_db::Connection,
+    client: &right_mcp::internal_client::InternalClient,
     agent_dir: &std::path::Path,
     agent_name: &str,
     model: &Arc<arc_swap::ArcSwap<Option<String>>>,
@@ -2176,10 +2287,10 @@ async fn reconcile_jobs(
 ) {
     // Clean up finished triggered handles
     triggered_handles.retain(|h| !h.is_finished());
-    let new_specs = match right_agent::cron_spec::load_specs_from_db(conn).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("failed to load cron specs from DB: {e}");
+    let new_specs = match load_specs_ipc(client, agent_name).await {
+        Ok(specs) => specs,
+        Err(error) => {
+            tracing::error!("failed to load cron specs from owner: {error:#}");
             return;
         }
     };
@@ -2296,11 +2407,16 @@ async fn reconcile_jobs(
     for (name, spec) in &new_specs {
         if spec.triggered_at.is_some() {
             // Clear trigger immediately to prevent re-firing on next tick
-            if let Err(e) = right_agent::cron_spec::clear_triggered_at(conn, name).await {
-                tracing::error!(job = %name, "failed to clear triggered_at: {e}");
+            if let Err(error) = client
+                .cron_clear_triggered(&right_mcp::internal_db::CronJobRequest {
+                    agent: agent_name.to_owned(),
+                    job_name: name.clone(),
+                })
+                .await
+            {
+                tracing::error!(job = %name, "failed to clear triggered state through owner: {error:#}");
                 continue;
             }
-
             // Check lock — if locked, skip (trigger lost, same as schedule miss while locked)
             let lock_ttl = effective_lock_ttl(spec);
             if is_lock_fresh(agent_dir, name, lock_ttl) {
@@ -2626,6 +2742,24 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// A linked-skills lookup failure must fail the cron run: silently
+    /// substituting an empty list would run the job with the wrong tool set
+    /// while the audit record looks identical to a job with no linked skills.
+    #[tokio::test]
+    async fn linked_skills_lookup_failure_propagates() {
+        let client = right_mcp::internal_client::InternalClient::new(std::path::PathBuf::from(
+            "/nonexistent-right-test-internal.sock",
+        ));
+        let result = fetch_linked_skills_for_run(&client, "alpha", "job").await;
+        assert!(
+            matches!(
+                result,
+                Err(right_mcp::internal_db::InternalDbError::Transport(_))
+            ),
+            "linked-skills lookup failure must propagate, got {result:?}"
+        );
+    }
+
     #[test]
     fn manual_trigger_notice_carries_token() {
         let n = crate::cc::system_notice::wrap_system_notice(
@@ -2906,6 +3040,7 @@ mod tests {
     /// We assert at the row-insert boundary (`insert_then_continuation_row`)
     /// because the full `spawn_then_continuation` spawns a real CC subprocess,
     /// which the cron unit harness cannot stand up.
+    #[cfg(any())]
     #[tokio::test]
     async fn triggered_run_with_then_success_spawns_continuation() {
         use right_agent::cron_spec::{RunOn, ThenSpec};

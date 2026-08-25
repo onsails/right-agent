@@ -38,6 +38,7 @@ dirs = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde-saphyr = { workspace = true }
+secrecy = { workspace = true }
 cron = { workspace = true }
 arc-swap = { workspace = true }
 axum = { workspace = true }

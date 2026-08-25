@@ -16,6 +16,7 @@ right-bot = { path = "../bot", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }
 right-config = { path = "../right-config", version = "*" }
 right-db = { path = "../right-db", version = "*" }
+right-dashboard = { path = "../right-dashboard", version = "*" }
 right-lifecycle = { path = "../right-lifecycle", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
 right-memory = { path = "../right-memory", version = "*" }
@@ -63,3 +64,4 @@ right-db = { path = "../right-db", version = "*", features = ["test-support"] }
 right-providers = { path = "../right-providers", version = "*", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
+syn = { version = "3.0", features = ["full", "visit"] }

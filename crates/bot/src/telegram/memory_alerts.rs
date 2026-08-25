@@ -31,28 +31,20 @@ pub(crate) fn spawn_watcher(
     agent_dir: PathBuf,
     allowlist: AllowlistHandle,
 ) {
-    // Startup cleanup: delete memory alerts older than 1h so crash-loops
-    // re-notify. Scoped to memory alert types so longer-dedup alerts on the
-    // shared `memory_alerts` table (e.g. `learning_circuit_open`, 24h) keep
-    // their dedup window across bot restarts.
-    {
-        let db = agent_dir.clone();
+    // Startup cleanup: allow memory alerts older than one hour to re-notify.
+    if let Ok((client, agent)) = crate::db::client_for_agent_dir(&agent_dir) {
         tokio::spawn(async move {
-            match right_db::open_connection(&db, false).await {
-                Ok(conn) => {
-                    if let Err(e) = conn
-                        .execute(
-                            "DELETE FROM memory_alerts \
-                             WHERE alert_type IN (?1, ?2) \
-                               AND datetime(first_sent_at) < datetime('now', '-1 hour')",
-                            [AUTH_FAILED, CLIENT_FLOOD],
-                        )
-                        .await
-                    {
-                        tracing::warn!("memory_alerts startup cleanup failed: {e:#}");
-                    }
+            for alert_type in [AUTH_FAILED, CLIENT_FLOOD] {
+                if let Err(error) = client
+                    .alert_clear(&right_mcp::internal_db::AlertClearRequest {
+                        agent: agent.clone(),
+                        alert_type: alert_type.to_owned(),
+                        older_than_secs: Some(3600),
+                    })
+                    .await
+                {
+                    tracing::warn!("memory_alerts startup owner cleanup failed: {error:#}");
                 }
-                Err(e) => tracing::warn!("memory_alerts startup open_connection failed: {e:#}"),
             }
         });
     }
@@ -130,20 +122,16 @@ async fn handle_status_change(
             super::alerts::record_fire(db, AUTH_FAILED).await;
         }
     } else if matches!(status, MemoryStatus::Healthy) {
-        // Clear dedup on recovery.
-        match right_db::open_connection(db, false).await {
-            Ok(conn) => {
-                if let Err(e) = conn
-                    .execute(
-                        "DELETE FROM memory_alerts WHERE alert_type = ?1",
-                        [AUTH_FAILED],
-                    )
-                    .await
-                {
-                    tracing::warn!("memory_alerts dedup clear failed: {e:#}");
-                }
-            }
-            Err(e) => tracing::warn!("memory_alerts dedup clear open failed: {e:#}"),
+        if let Ok((client, agent)) = crate::db::client_for_agent_dir(db)
+            && let Err(error) = client
+                .alert_clear(&right_mcp::internal_db::AlertClearRequest {
+                    agent,
+                    alert_type: AUTH_FAILED.to_owned(),
+                    older_than_secs: None,
+                })
+                .await
+        {
+            tracing::warn!("memory_alerts owner dedup clear failed: {error:#}");
         }
     }
 }

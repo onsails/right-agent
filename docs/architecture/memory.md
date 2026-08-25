@@ -125,25 +125,28 @@ from older Telegram history or Claude session JSONL.
 
 ## Memory Resilience Layer
 
-`memory::resilient::ResilientHindsight` wraps `HindsightClient` with:
-- per-process circuit breaker (closed→open after 5 fails in 30s; 30s initial
+`memory::resilient::ResilientHindsight` wraps `HindsightClient` with an injected
+`PendingRetainSink`, not a database path. It also provides:
+- a per-process circuit breaker (closed→open after 5 fails in 30s; 30s initial
   open with doubling backoff to a 10 min cap; 1h hard open on Auth). `Quota`
-  (HTTP 402) and `Client` errors do **not** tick the breaker — 402 is a
-  stable known state and every turn should retry; the first 2xx after top-up
-  is the natural recovery signal.
-- classified retries (Transient/RateLimited yes; Auth/Client/Malformed/Quota no)
-- local `data.db` `pending_retains` queue through `right-db` (1000-row cap,
-  24h age cap). Auth and Quota failures bypass the queue entirely (no entry
-  that could only drain after user action).
+  (HTTP 402) and `Client` errors do **not** tick the breaker;
+- classified retries (Transient/RateLimited yes; Auth/Client/Malformed/Quota no);
+- the 1000-row/24h `pending_retains` queue behind either an Aggregator-local
+  owner adapter or bot typed IPC. Auth and Quota failures bypass the queue;
 - `watch::Sender<MemoryStatus>` signalling
-  Healthy/Degraded/QuotaExhausted/AuthFailed. `QuotaExhausted` is sticky
-  against itself and against `refresh_status`; only an explicit 2xx success
-  flips it back to `Healthy`. `AuthFailed` (higher severity) wins over
-  `QuotaExhausted`.
+  Healthy/Degraded/QuotaExhausted/AuthFailed. `QuotaExhausted` is sticky until
+  an explicit 2xx success, and `AuthFailed` has higher severity.
 
-The bot runs a single drain task (30s interval, batch 20, stop on first
-non-Client failure). The aggregator shares the same local `data.db` queue
-through `right-db`; it enqueues on failure but never drains.
+The bot drain loop claims the oldest batch with a bounded lease. Every claim
+returns a token and expiry; ack/nack requires that token, expired leases are
+reclaimed on startup and the next claim, and a crashed drainer's stale token
+cannot delete or requeue a successor's work. The Aggregator owns the SQL
+connection and transaction boundaries; bot enqueue/claim/ack/nack calls cross
+`internal.sock` as typed domain operations.
+Retain enqueue applies expired-lease reclaim, queue-cap eviction, the new queue
+row, and the durable idempotency response in one owner transaction. A replay
+with the same request ID returns the recorded response without another row;
+reusing that ID for a different payload conflicts.
 
 Telegram alerts (`memory_alerts` table, 24h dedup, 1h startup cleanup) fire
 on:

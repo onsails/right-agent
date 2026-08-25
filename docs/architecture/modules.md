@@ -68,9 +68,9 @@
 
 ### right-db
 
-- `Connection`, `Transaction`, `DbError` — async project-owned wrappers over the local Turso driver for per-agent SQLite-compatible `data.db`; filesystem opens use Turso multiprocess WAL so bot and MCP aggregator processes can share the same DB and may create Turso sidecar files such as `data.db-tshm`, while in-memory opens stay single-process. Legacy FTS5 cleanup uses bundled `rusqlite` only inside locked `migrate: true` schema bootstrap, not runtime opens.
-- `multiprocess_io.rs` — Turso IO adapter that disables legacy DB/WAL file locks for filesystem-backed multiprocess-WAL opens while preserving shared WAL coordination.
-- `migrations.rs` — ordered idempotent migration runner.
+- `Connection`, `Transaction`, `DbError` — async project-owned wrappers over Turso standard-local WAL. The Aggregator retains the only live filesystem connections; offline callers use these primitives after quiescence. Standard local may create `data.db-wal`/`data.db-shm` but never legacy `data.db-tshm`.
+- `repair.rs` — explicit offline legacy multiprocess-WAL recovery with forensic preservation and an atomic standalone-snapshot swap.
+- `migrations.rs` — ordered idempotent migration runner guarded by the bootstrap lock.
 - `conversation.rs` — transcript archive and FTS search storage helpers.
 - `test_support.rs` — migrated temp `data.db` fixtures for crate tests.
 
@@ -102,27 +102,30 @@
 - `hindsight.rs` — Hindsight Cloud API client and DTOs.
 - `resilient.rs`, `circuit.rs`, `classify.rs`, `status.rs` — memory failure handling, circuit state, classification, and status reporting.
 - `prefetch.rs` — recall prefetch cache.
-- `retain_queue.rs` — `right-db` backed pending-retain queue in per-agent `data.db`.
+- `retain_sink.rs`, `retain_queue.rs` — injected pending-retain sink plus token-guarded lease claim/ack/nack queue; SQL storage remains behind the Aggregator owner.
 - `error.rs` — semantic-memory error type and `right-db` boundary.
 
 ### right-mcp
 
-- `credentials.rs` — MCP server registry, OAuth state persistence, auth tokens, URL helpers.
-- `internal_client.rs` — bot-to-aggregator Unix-socket client.
-- `oauth.rs`, `refresh.rs`, `reconnect.rs` — OAuth discovery, token refresh, and reconnect handling.
-- `proxy.rs` — upstream MCP proxy backend and auth injection.
+- `internal_client.rs`, `internal_db.rs` — private UDS transport plus finite typed database-domain DTOs/methods used by bots.
+- `credentials.rs` — owner-local MCP registry and credential operations.
+- `oauth.rs`, `refresh.rs`, `reconnect.rs` — OAuth discovery plus owner-local refresh/reconnect handling.
+- `proxy.rs` — upstream MCP proxy backend with owner-local persistence and auth injection.
 - `tool_error.rs` — MCP tool-error helpers.
 
 ### right (CLI)
 
-- `main.rs` — CLI dispatcher.
+- `main.rs` — CLI dispatcher and Aggregator startup ordering.
+- `db_owner.rs`, `db_owner_ops.rs` — one retained writable owner per agent, serialized typed operations, readiness/draining state, and tracked runtime bundles.
+- `internal_api.rs`, `internal_api_db.rs` — owner-only Unix-socket control plane and finite database-domain routes.
+- `retain_owner.rs` — Aggregator-local pending-retain adapter over each retained owner connection.
 - `aggregator.rs` — MCP Aggregator (Aggregator + ToolDispatcher + BackendRegistry).
-- `right_backend.rs` — built-in MCP tools (memory, cron, conversation, channels, and provider capabilities).
-- `internal_api.rs` — internal REST API on Unix socket.
+- `right_backend.rs` — built-in MCP tools using owner interfaces rather than direct opens.
 
 ### right-bot
 
-- `lib.rs` — entry: resolve agent dir, open `data.db`, sandbox lifecycle, start the Telegram bot (frankenstein webhook).
+- `lib.rs` — constructs `InternalClient`, waits for typed database-owner readiness, then starts sandbox and Telegram runtime without opening `data.db` or `providers.db`.
+- `db.rs`, `provider_bindings.rs` — typed domain IPC adapters; provider secret DTOs are converted immediately into sandbox bindings and dropped.
 - `cc/` — generic Claude Code subprocess plumbing: invocation builder, prompt assembly, stream parser, structured-reply parser, outbound DTOs, and shared markdown helpers.
 - `telegram/` — frankenstein `RightBot` client wrapper (`tg_bot.rs`), update router (`router.rs`), command parser (`command.rs`), `Message` field helpers (`msg_ext.rs`), handler, per-session worker, session table, chat-ID filter, OAuth callback server, Telegram markdown rendering/splitting, dashboard routes, and attachment delivery (with STT integration).
 - `telegram/dashboard.rs` — Axum route mounting for `/dashboard/<agent>/`, dashboard API handlers, Telegram menu/button setup, and injected bot-owned auth/runtime state.

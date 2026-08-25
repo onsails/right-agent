@@ -272,7 +272,7 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
     // Phase 2: detached — drain the REST of the same reader to EOF (prevents
     // pipe-fill hang) while awaiting the process, capturing the final result.
     let agent_name = ctx.agent_name.clone();
-    let agent_db_dir = ctx.agent_db_dir.clone();
+    let internal_client = Arc::clone(&ctx.internal_client);
     let chat_id = ctx.chat_id;
     let thread_id = ctx.thread_id;
     let invocation_id = active_invocation.invocation_id().to_owned();
@@ -311,36 +311,35 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
             }
         }
 
-        // Record usage + per-skill create/patch spend from the captured result.
         if let Some(result_line) = crate::cc::stream::last_result_line(&tail)
-            && let Some(b) = crate::cc::stream::parse_usage_full(&result_line)
-            && let Ok(conn) = right_db::open_connection(&agent_db_dir, false).await
+            && let Some(breakdown) = crate::cc::stream::parse_usage_full(&result_line)
+            && let Err(error) = internal_client
+                .usage_insert_event(&right_mcp::internal_db::UsageInsertEventRequest {
+                    agent: agent_name.clone(),
+                    request_id: crate::db::request_id(),
+                    source: right_mcp::internal_db::UsageSourceDto::LearningProbeWriter {
+                        chat_id,
+                        thread_id,
+                    },
+                    event: crate::db::usage_dto(&breakdown),
+                })
+                .await
         {
-            if let Err(e) = right_agent::usage::insert::insert_learning_probe_writer(
-                &conn, &b, chat_id, thread_id,
-            )
-            .await
-            {
-                tracing::warn!(agent = %agent_name, "probe-writer usage insert failed: {e:#}");
-            }
-            record_probe_writer_spend(&conn, &agent_name, &invocation_id, &b).await;
+            tracing::warn!(agent = %agent_name, "probe-writer owner usage insert failed: {error:#}");
         }
 
-        // Auto-link runs regardless of usage-line parseability: a skill the
-        // probe-writer authored is recorded in skill_learning_events independent
-        // of the terminal result line, so gating the link on usage parsing would
-        // silently drop links on truncated/missing result events.
-        if let Some(job) = origin_cron_job.as_deref() {
-            match right_db::open_connection(&agent_db_dir, false).await {
-                Ok(conn) => {
-                    if let Err(e) = link_cron_authored(&conn, job, &invocation_id).await {
-                        tracing::warn!(agent = %agent_name, job = %job, "cron auto-link failed: {e:#}");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(agent = %agent_name, job = %job, "cron auto-link open_connection failed: {e:#}")
-                }
-            }
+        if let Some(job_name) = origin_cron_job.as_deref()
+            && let Err(error) = internal_client
+                .learning_link_cron_authored(
+                    &right_mcp::internal_db::LearningLinkCronAuthoredRequest {
+                        agent: agent_name.clone(),
+                        job_name: job_name.to_owned(),
+                        invocation_id: invocation_id.clone(),
+                    },
+                )
+                .await
+        {
+            tracing::warn!(agent = %agent_name, job = %job_name, "cron auto-link owner operation failed: {error:#}");
         }
 
         active_invocation.cleanup().await;
@@ -368,39 +367,7 @@ async fn read_until_init<R: AsyncRead + Unpin>(
     false
 }
 
-/// Look up the skill created/patched in this invocation and write a skill_spend
-/// row. No finish row (aborted/failed/timeout) → no spend row.
-async fn record_probe_writer_spend(
-    conn: &right_db::Connection,
-    agent_name: &str,
-    invocation_id: &str,
-    b: &right_agent::usage::UsageBreakdown,
-) {
-    match right_agent::learned_skills::finish_event_for_invocation(conn, invocation_id).await {
-        Ok(Some((skill_name, status))) => {
-            if let Some(kind) = finish_status_to_spend_kind(&status)
-                && let Err(e) = right_agent::usage::insert::insert_skill_spend(
-                    conn,
-                    &skill_name,
-                    kind,
-                    b.total_cost_usd,
-                    b.cache_read_tokens as i64,
-                    b.cache_creation_tokens as i64,
-                    Some(invocation_id),
-                )
-                .await
-            {
-                tracing::warn!(agent = %agent_name, "probe-writer skill_spend insert failed: {e:#}");
-            }
-        }
-        Ok(None) => {}
-        Err(e) => tracing::warn!(agent = %agent_name, "probe-writer finish lookup failed: {e:#}"),
-    }
-}
-
-/// Auto-link the skills authored under `invocation_id` to the originating cron.
-/// Returns the number of skills linked. Shared by the async probe-writer tail
-/// and the inline cron seam.
+#[cfg(test)]
 pub(crate) async fn link_cron_authored(
     conn: &right_db::Connection,
     job: &str,

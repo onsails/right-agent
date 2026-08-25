@@ -35,25 +35,6 @@ async fn open_connection_propagates_persistent_short_read_without_deleting_datab
         .set_len(0)
         .unwrap();
 
-    let raw_database = turso::Builder::new_local(db_path.to_str().unwrap())
-        .experimental_index_method(true)
-        .experimental_multiprocess_wal(true)
-        .build()
-        .await
-        .unwrap();
-    let raw_connection = raw_database.connect().unwrap();
-    let mut rows = raw_connection
-        .query("SELECT count(*) FROM wal_probe", ())
-        .await
-        .unwrap();
-    let raw_error = rows.next().await.unwrap_err();
-    assert!(
-        raw_error.to_string().contains(&format!(
-            "short read on WAL frame at offset {FIFTH_FRAME_OFFSET}"
-        )),
-        "fixture must reproduce the production short-read: {raw_error:#}"
-    );
-
     let reopened = right_db::open_connection(dir.path(), false)
         .await
         .expect("right-db open may succeed before a lazy WAL read");
@@ -70,11 +51,14 @@ async fn open_connection_propagates_persistent_short_read_without_deleting_datab
         )),
         "persistent short-read must propagate unchanged: {error:#}"
     );
-    assert!(db_path.exists(), "recovery must preserve the database file");
-    assert!(wal_path.exists(), "recovery must preserve the WAL file");
+    assert!(
+        db_path.exists(),
+        "open failure must preserve the database file"
+    );
+    assert!(wal_path.exists(), "open failure must preserve the WAL file");
     assert_eq!(
         std::fs::metadata(&wal_path).unwrap().len(),
         0,
-        "recovery must not replace the zero-byte WAL"
+        "normal open must not replace the zero-byte WAL"
     );
 }

@@ -4,13 +4,17 @@ pub mod credentials;
 pub mod detect;
 pub mod health;
 pub mod internal_client;
+pub mod internal_db;
 pub mod oauth;
+pub mod persistence;
 pub mod proxy;
 pub mod reconnect;
 pub mod refresh;
 pub mod ssrf;
 pub mod tool_error;
 
+#[cfg(test)]
+mod internal_db_tests;
 #[cfg(test)]
 mod test_server;
 

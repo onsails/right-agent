@@ -43,12 +43,11 @@ mod tests {
                         .and_then(|e| e.to_str())
                         .map(|e| e == "js" || e == "html")
                         .unwrap_or(false);
-                    if is_js_or_html {
-                        if let Ok(s) = std::str::from_utf8(f.contents()) {
-                            if s.contains("ProvidersView") {
-                                return true;
-                            }
-                        }
+                    if is_js_or_html
+                        && let Ok(s) = std::str::from_utf8(f.contents())
+                        && s.contains("ProvidersView")
+                    {
+                        return true;
                     }
                 }
                 DirEntry::Dir(d) => {

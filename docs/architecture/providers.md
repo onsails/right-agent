@@ -1,29 +1,22 @@
 # Providers
 
-> **Authority note (microsandbox migration).** The internal provider API and
-> dashboard handlers run on `right_providers::ProviderStore`
-> (`~/.right/providers.db`, SQLite 0600). The OpenShell gateway, its CRUD,
-> profile-composition confirmation, and `wait_for_provider_composed*` flows
-> are deleted. What that means:
+> **Authority note.** The Aggregator owns the sole live
+> `right_providers::ProviderStore` connection (`~/.right/providers.db`, mode
+> 0600). Dashboard mutations already execute there; bot sandbox bring-up and
+> reconciliation request only typed binding resolutions over `internal.sock`.
 >
 > - **Authority.** Records and credentials live in `providers.db`; ownership
 >   is the `owner_agent` column plus `provider_borrows` rows, never
 >   `agent.yaml`'s `shared_from` (legacy migration input only).
-> - **Wire shapes.** `ProviderView.status` is the tri-state
->   `{kind: ready|needs_value|error}` (error carries `message`); the
->   `composed: bool|null` field and the `healthy|missing|gateway_error|
->   unknown_builtin` statuses are gone. Error→HTTP mapping is unchanged
->   (409 `borrowed_read_only`/`copy_conflict`, 422
->   `source_credential_unreadable`, 500 `unknown_builtin_slug`, 403
->   `unauthorized`, …).
 > - **Sharing.** `/provider-share` inserts a borrow row pointing at the true
 >   owner and appends a definition-only entry to the destination's
->   agent.yaml; no secret is read back or copied. Owner deletion re-homes
->   the record to a surviving borrower.
-> - **Redaction.** Store read APIs structurally carry no credential;
->   `ProviderStore::source_ref_binding` is the only reader and returns a
->   redacted binding whose value is consumed only by the sandbox apply path's
->   scoped, zeroizing SDK resolver. No process environment mutation occurs.
+>   `agent.yaml`; no secret is copied. Owner deletion re-homes the record to a
+>   surviving borrower.
+> - **Secret lifetime.** Binding requests authenticate the exact agent with an
+>   HMAC token derived from `agent.yaml::secret` and the `provider-binding-ipc`
+>   label. The UDS DTO uses `SecretString` with redacted `Debug`; the bot
+>   converts it immediately to `right_sandbox::SecretBinding`, uses it only for
+>   sandbox create/reconcile/apply, then drops and zeroizes it.
 >
 
 > **Status:** descriptive doc. Re-read and update when modifying this
@@ -46,8 +39,8 @@ substituted, so accepting it would promise an injection that cannot happen.
 
 ## Placeholder substitution
 
-A provider reaches the guest as a `right_sandbox::SecretBinding`, built by
-`ProviderStore::source_ref_binding`. It carries:
+A provider reaches the guest as a `right_sandbox::SecretBinding`, converted by
+the bot from an authenticated Aggregator resolution DTO. It carries:
 
 - `env_var` — the guest-visible environment variable.
 - `placeholder` — what the guest actually sees in that variable
@@ -126,36 +119,33 @@ migration input only — the internal API writers never emit it.
 
 ## Reconciler walkthrough
 
-For each declared provider, `ProviderStore::source_ref_binding` resolves the
-owning row and returns a redacted binding with an owner-scoped source identity.
-The credential is installed into the vendored SDK's scoped resolver only for
-the create/start/apply call; the guard removes and zeroizes it afterward.
+For each declared provider, the bot asks the Aggregator to resolve bindings for
+the authenticated same-agent identity. The owner follows owned/borrowed rows,
+reads credentials only inside that handler, and returns the minimal redacted
+binding DTO. `NeedsValue` providers are omitted; all secret DTO debug/error/log
+forms remain redacted.
 
 - At create, ready bindings go into `agent_sandbox_spec`; `NeedsValue` records
-  are deliberately skipped so migrated agents can start and receive their
-  first value from the dashboard.
+  are skipped so migrated agents can start and receive a first value later.
 - On every bot bring-up, after the sandbox reports ready and before it is
   published Ready or synced, each ready binding goes through
-  `SandboxHandle::apply_secret`. Existing bindings converge with the safe
-  shrink→rotate→widen order, while missing non-query bindings are added with
-  the SDK-managed restart path. `NeedsValue` records remain skipped, and any
-  apply error fails bring-up.
-- Config hot-reconcile verifies that obsolete live entries have both a known
-  provider env var and a Right-minted hashed source identity before removal.
-- Dashboard create, remove, share, borrow, and watcher/startup/recovery
-  reconciliation take the destination agent's cross-process advisory provider
-  lock before touching its sandbox. The lock path is under Right's home and is
-  keyed by agent identity only; credentials never enter the path.
-- Owner rotate and generic config-update enumerate the owner plus every
-  borrower from `providers.db`, then resolve each holder's current config and
-  sandbox under that destination lock. Success means every holder converged;
-  post-commit failure names failed agents without including credentials.
+  `SandboxHandle::apply_secret`. Existing bindings converge in safe
+  shrink→rotate→widen order; missing non-query bindings use the SDK restart
+  path. Any apply error fails bring-up.
+- Config hot-reconcile verifies obsolete entries have both a known provider env
+  var and a Right-minted hashed source identity before removal.
+- Dashboard create/remove/share/borrow and watcher/startup/recovery
+  reconciliation retain the per-agent advisory convergence lock around sandbox
+  mutation. Credentials never enter its path.
+- Owner rotation/config update enumerates owner and borrowers from the retained
+  Aggregator store, then each bot resolves its named current binding through
+  authenticated typed IPC and converges under the destination lock. Success
+  means every holder converged; failure names agents without secret material.
 
-The bot's process-local mutex serializes its config publication with recovery,
-while the per-agent advisory file lock is authoritative across bot, aggregator,
-watcher, startup, CLI, and cross-agent destination processes. A missing
-declaration/store record, unavailable sandbox, or failed SDK apply returns an
-error instead of falsely reporting that durable state is live everywhere.
+Durable provider mutations and `agent.yaml` compensation remain owner-side;
+live sandbox convergence remains bot-side because only the bot owns its sandbox
+handle. Missing declarations, unavailable owners/sandboxes, and failed SDK
+apply return errors rather than reporting false convergence.
 
 A record whose built-in slug no longer resolves fails fast
 (`unknown_builtin_slug`, HTTP 500) on rotation and config-update; the list
@@ -187,17 +177,17 @@ synchronously. A durable rotation self-heals on the next bot start.
 
 ## Lifecycle
 
-**Create.** The internal API validates and stores the provider, then appends
-its definition-only entry to `agent.yaml`. Bot bring-up resolves ready records
-from `ProviderStore` into source-ref bindings. Migrated `NeedsValue` records
+**Create.** The Aggregator's internal API validates and stores the provider,
+then appends its definition-only entry to `agent.yaml`. Bot bring-up resolves
+ready bindings through authenticated typed IPC. Migrated `NeedsValue` records
 stay declared but unbound until their first dashboard rotation.
 
-**Rotate.** The owner bot verifies durable state, then asks the aggregator to
-write the new credential to `providers.db`. It enumerates every holder from the
-store and applies the named provider using each holder's own config and sandbox
-under that destination's advisory lock. The dashboard returns success only
-after owner and borrower sandboxes converge; a post-commit failure names the
-failed agents without exposing credential material.
+**Rotate.** The Aggregator writes the new credential, enumerates each holder,
+and drives holder convergence without returning the value to dashboard code.
+Each holder bot receives only its authenticated named binding for immediate
+sandbox apply under the destination advisory lock. Success is reported only
+after owner and borrower sandboxes converge; post-commit failures name agents
+without exposing credential material.
 
 **Edit non-secret config.** Generic-provider endpoint changes update the
 store's non-secret definition, then fan out to every holder through the same
@@ -273,8 +263,8 @@ literal string `"REDACTED"` — so the copy wrote `"REDACTED"` as the
 destination credential and the proxy substituted it verbatim on egress,
 yielding an upstream `401`. Copy-by-readback was unfixable and is retired.
 Borrowing is the supported replacement: `provider_borrows` rows point at the
-true owner, and `source_ref_binding` follows the borrow to read the owner's
-credential at bind time.
+true owner, and the Aggregator's binding resolver follows the borrow to read the
+owner's credential only while encoding the authenticated UDS response.
 
 **Naming & ownership.** A record's NAME no longer encodes its owner. New
 records use an agent-agnostic `{type-slug}-{short-uuid}` id (e.g. `fal-a1b2c3`,

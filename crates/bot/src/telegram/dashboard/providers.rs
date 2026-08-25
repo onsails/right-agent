@@ -113,7 +113,7 @@ pub(crate) async fn handle_create(
         return error.into_response();
     }
     let _mutation = state.provider_mutation.lock().await;
-    let Some(providers) = state.providers.as_ref() else {
+    let Some(resolver) = state.provider_bindings.as_ref() else {
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "provider_propagation_unavailable",
@@ -165,13 +165,6 @@ pub(crate) async fn handle_create(
         Ok(view) => view,
         Err(error) => return internal_api_error_response(error, "provider_create_failed"),
     };
-    let _agent_guard = match providers.agent_lock(&state.agent_name).await {
-        Ok(guard) => guard,
-        Err(error) => {
-            tracing::error!(error = %format!("{error:#}"), "provider was created but convergence lock failed");
-            return holder_convergence_error("creation", std::slice::from_ref(&state.agent_name));
-        }
-    };
     let Some(provider_name) = view
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -194,7 +187,7 @@ pub(crate) async fn handle_create(
         &state.agent_name,
         &provider_name,
         &config,
-        providers,
+        resolver,
         &sandbox,
     )
     .await
@@ -229,79 +222,41 @@ pub(crate) async fn handle_create(
 
 async fn converge_provider_holders(
     state: &DashboardState,
-    providers: &right_providers::ProviderStore,
-    owner_agent: &str,
+    resolver: &crate::provider_bindings::ProviderBindingResolver,
+    _owner_agent: &str,
     provider_name: &str,
 ) -> Result<(), Vec<String>> {
-    let holders = match providers.holders(owner_agent, provider_name).await {
-        Ok(holders) => holders,
+    match converge_provider_holder(state, resolver, &state.agent_name, provider_name).await {
+        Ok(()) => Ok(()),
         Err(error) => {
-            tracing::error!(agent = %owner_agent, provider = %provider_name, error = %format!("{error:#}"), "failed to enumerate provider holders for convergence");
-            return Err(vec![owner_agent.to_owned()]);
+            tracing::error!(agent = %state.agent_name, provider = %provider_name, error = %format!("{error:#}"), "requesting-agent sandbox convergence failed");
+            Err(vec![state.agent_name.clone()])
         }
-    };
-    let mut failed = Vec::new();
-    for holder in holders {
-        match converge_provider_holder(state, providers, &holder.agent, provider_name).await {
-            Ok(()) => {}
-            Err(error) => {
-                tracing::error!(agent = %holder.agent, provider = %provider_name, error = %format!("{error:#}"), "provider holder sandbox convergence failed");
-                failed.push(holder.agent);
-            }
-        }
-    }
-    if failed.is_empty() {
-        Ok(())
-    } else {
-        Err(failed)
     }
 }
 
 async fn converge_provider_holder(
     state: &DashboardState,
-    providers: &right_providers::ProviderStore,
+    resolver: &crate::provider_bindings::ProviderBindingResolver,
     agent: &str,
     provider_name: &str,
 ) -> miette::Result<()> {
-    let _guard = providers.agent_lock(agent).await.map_err(|error| {
-        miette::miette!("locking provider convergence for agent {agent}: {error:#}")
-    })?;
-    let agent_dir = if agent == state.agent_name {
-        state.agent_dir.clone()
-    } else {
-        right_config::agents_dir(&state.home).join(agent)
-    };
-    let config = right_agent::agent::parse_agent_config(&agent_dir)
+    miette::ensure!(
+        agent == state.agent_name,
+        "cross-agent provider convergence is Aggregator-owned"
+    );
+    let config = right_agent::agent::parse_agent_config(&state.agent_dir)
         .map_err(|error| miette::miette!("loading agent {agent} config: {error:#}"))?
         .ok_or_else(|| miette::miette!("agent {agent} config is missing"))?;
-    if agent == state.agent_name {
-        state.provider_config.store(Arc::new(config.clone()));
-    }
-    let sandbox = if agent == state.agent_name {
-        state
-            .sandbox()
-            .ok_or_else(|| miette::miette!("agent {agent} sandbox is unavailable"))?
-    } else {
-        let sandbox_name = right_sandbox::resolve_sandbox_name(
-            agent,
-            config
-                .sandbox
-                .as_ref()
-                .and_then(|sandbox| sandbox.name.as_deref()),
-        );
-        Arc::new(
-            right_sandbox::SandboxHandle::attach(&sandbox_name)
-                .await
-                .map_err(|error| {
-                    miette::miette!("attaching agent {agent} sandbox {sandbox_name}: {error:#}")
-                })?,
-        )
-    };
+    state.provider_config.store(Arc::new(config.clone()));
+    let sandbox = state
+        .sandbox()
+        .ok_or_else(|| miette::miette!("agent {agent} sandbox is unavailable"))?;
     crate::sandbox_supervisor::apply_named_provider(
         agent,
         provider_name,
         &config,
-        providers,
+        resolver,
         &sandbox,
     )
     .await?;
@@ -338,7 +293,7 @@ pub(crate) async fn handle_rotate(
         Err(resp) => return resp,
     };
     drop(body);
-    let Some(providers) = state.providers.as_ref() else {
+    let Some(resolver) = state.provider_bindings.as_ref() else {
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "provider_propagation_unavailable",
@@ -383,29 +338,6 @@ pub(crate) async fn handle_rotate(
             Some("provider is absent from the current agent config"),
         );
     }
-    let record = match providers.get(&state.agent_name, &provider_name).await {
-        Ok(record) => record,
-        Err(error) => {
-            tracing::error!(
-                agent = %state.agent_name,
-                provider = %provider_name,
-                error = %format!("{error:#}"),
-                "provider rotation target could not be loaded from the local provider store"
-            );
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "provider_propagation_failed",
-                Some("provider could not be loaded from the provider store"),
-            );
-        }
-    };
-    if record.is_borrowed() {
-        return json_error(
-            StatusCode::CONFLICT,
-            "borrowed_read_only",
-            Some("borrowed providers can only be rotated by their owner"),
-        );
-    }
     let req = right_mcp::internal_client::ProviderRotateRequest {
         agent: &state.agent_name,
         name: &provider_name,
@@ -417,7 +349,7 @@ pub(crate) async fn handle_rotate(
     };
     drop(credential);
     drop(_mutation);
-    match converge_provider_holders(&state, providers, &state.agent_name, &provider_name).await {
+    match converge_provider_holders(&state, resolver, &state.agent_name, &provider_name).await {
         Ok(()) => Json(view).into_response(),
         Err(failed) => holder_convergence_error("credential rotation", &failed),
     }
@@ -432,7 +364,7 @@ pub(crate) async fn handle_remove(
         return error.into_response();
     }
     let _mutation = state.provider_mutation.lock().await;
-    let Some(providers) = state.providers.as_ref() else {
+    let Some(resolver) = state.provider_bindings.as_ref() else {
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "provider_propagation_unavailable",
@@ -450,17 +382,6 @@ pub(crate) async fn handle_remove(
         Ok(config) => config,
         Err(response) => return response,
     };
-    let target = match providers.get(&state.agent_name, &provider_name).await {
-        Ok(record) => record,
-        Err(error) => {
-            tracing::error!(error = %format!("{error:#}"), "failed to preflight provider removal target");
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "provider_propagation_failed",
-                Some("provider could not be preflighted; it was not removed"),
-            );
-        }
-    };
     if let Err(error) = sandbox.secret_env_vars().await {
         tracing::error!(error = %format!("{error:#}"), "failed to preflight sandbox provider bindings");
         return json_error(
@@ -477,17 +398,6 @@ pub(crate) async fn handle_remove(
         Ok(view) => view,
         Err(error) => return internal_api_error_response(error, "provider_remove_failed"),
     };
-    let _agent_guard = match providers.agent_lock(&state.agent_name).await {
-        Ok(guard) => guard,
-        Err(error) => {
-            tracing::error!(error = %format!("{error:#}"), "provider lock failed before removal");
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "provider_propagation_failed",
-                Some("provider lock failed; provider was not removed"),
-            );
-        }
-    };
     let config = match load_provider_config(&state) {
         Ok(config) => config,
         Err(response) => return response,
@@ -497,7 +407,7 @@ pub(crate) async fn handle_remove(
         &state.agent_name,
         std::slice::from_ref(&previous),
         &config,
-        providers,
+        resolver,
         &sandbox,
     )
     .await
@@ -506,7 +416,6 @@ pub(crate) async fn handle_remove(
             tracing::info!(
                 agent = %state.agent_name,
                 provider = %provider_name,
-                env_var = %target.env_var,
                 "dashboard provider removal revoked the sandbox binding"
             );
             Json(view).into_response()
@@ -515,7 +424,6 @@ pub(crate) async fn handle_remove(
             tracing::error!(
                 agent = %state.agent_name,
                 provider = %provider_name,
-                env_var = %target.env_var,
                 error = %format!("{error:#}"),
                 "provider was durably removed but its sandbox binding revocation failed"
             );
@@ -540,7 +448,7 @@ pub(crate) async fn handle_config_update(
         return error.into_response();
     }
     let _mutation = state.provider_mutation.lock().await;
-    let Some(providers) = state.providers.as_ref() else {
+    let Some(resolver) = state.provider_bindings.as_ref() else {
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "provider_propagation_unavailable",
@@ -591,7 +499,7 @@ pub(crate) async fn handle_config_update(
     };
     state.provider_config.store(Arc::new(config.clone()));
     drop(_mutation);
-    match converge_provider_holders(&state, providers, &state.agent_name, &provider_name).await {
+    match converge_provider_holders(&state, resolver, &state.agent_name, &provider_name).await {
         Ok(()) => Json(view).into_response(),
         Err(failed) => holder_convergence_error("config update", &failed),
     }
@@ -738,7 +646,7 @@ pub(crate) async fn handle_share(
         Err(error) => return error.into_response(),
     };
     let _mutation = state.provider_mutation.lock().await;
-    let Some(providers) = state.providers.as_ref() else {
+    let Some(resolver) = state.provider_bindings.as_ref() else {
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "provider_propagation_unavailable",
@@ -787,22 +695,11 @@ pub(crate) async fn handle_share(
             );
         }
     };
-    let _agent_guard = match providers.agent_lock(&body.dest_agent).await {
-        Ok(guard) => guard,
-        Err(error) => {
-            tracing::error!(dest_agent = %body.dest_agent, error = %format!("{error:#}"), "destination provider lock failed before share");
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "provider_propagation_failed",
-                Some("destination provider lock failed; provider was not shared"),
-            );
-        }
-    };
     match crate::sandbox_supervisor::hot_reconcile_providers(
         &body.dest_agent,
         std::slice::from_ref(&previous),
         &config,
-        providers,
+        resolver,
         &sandbox,
     )
     .await
@@ -831,7 +728,7 @@ pub(crate) async fn handle_unshare(
         Err(error) => return error.into_response(),
     };
     let _mutation = state.provider_mutation.lock().await;
-    let Some(providers) = state.providers.as_ref() else {
+    let Some(resolver) = state.provider_bindings.as_ref() else {
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "provider_propagation_unavailable",
@@ -853,17 +750,6 @@ pub(crate) async fn handle_unshare(
         Ok(config) => config,
         Err(response) => return response,
     };
-    let target = match providers.get(&state.agent_name, &body.provider).await {
-        Ok(record) => record,
-        Err(error) => {
-            tracing::error!(error = %format!("{error:#}"), "failed to preflight provider unshare target");
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "provider_propagation_failed",
-                Some("provider could not be preflighted; it was not unshared"),
-            );
-        }
-    };
     if let Err(error) = sandbox.secret_env_vars().await {
         tracing::error!(error = %format!("{error:#}"), "failed to preflight sandbox provider bindings");
         return json_error(
@@ -881,13 +767,6 @@ pub(crate) async fn handle_unshare(
         Ok(view) => view,
         Err(error) => return internal_api_error_response(error, "provider_unshare_failed"),
     };
-    let _agent_guard = match providers.agent_lock(&state.agent_name).await {
-        Ok(guard) => guard,
-        Err(error) => {
-            tracing::error!(error = %format!("{error:#}"), "provider lock failed after unshare");
-            return holder_convergence_error("unshare", std::slice::from_ref(&state.agent_name));
-        }
-    };
     let config = match load_provider_config(&state) {
         Ok(config) => config,
         Err(response) => return response,
@@ -897,17 +776,17 @@ pub(crate) async fn handle_unshare(
         &state.agent_name,
         std::slice::from_ref(&previous),
         &config,
-        providers,
+        resolver,
         &sandbox,
     )
     .await
     {
         Ok(()) => {
-            tracing::info!(agent = %state.agent_name, provider = %body.provider, env_var = %target.env_var, "dashboard provider unshare revoked the sandbox binding");
+            tracing::info!(agent = %state.agent_name, provider = %body.provider, "dashboard provider unshare revoked the sandbox binding");
             Json(view).into_response()
         }
         Err(error) => {
-            tracing::error!(agent = %state.agent_name, provider = %body.provider, env_var = %target.env_var, error = %format!("{error:#}"), "provider was durably unshared but its sandbox binding revocation failed");
+            tracing::error!(agent = %state.agent_name, provider = %body.provider, error = %format!("{error:#}"), "provider was durably unshared but its sandbox binding revocation failed");
             holder_convergence_error("unshare", std::slice::from_ref(&state.agent_name))
         }
     }
@@ -927,7 +806,7 @@ pub(crate) async fn handle_borrow(
         Err(error) => return error.into_response(),
     };
     let _mutation = state.provider_mutation.lock().await;
-    let Some(providers) = state.providers.as_ref() else {
+    let Some(resolver) = state.provider_bindings.as_ref() else {
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "provider_propagation_unavailable",
@@ -967,17 +846,6 @@ pub(crate) async fn handle_borrow(
         Ok(view) => view,
         Err(error) => return internal_api_error_response(error, "provider_borrow_failed"),
     };
-    let _agent_guard = match providers.agent_lock(&state.agent_name).await {
-        Ok(guard) => guard,
-        Err(error) => {
-            tracing::error!(error = %format!("{error:#}"), "provider lock failed before borrow");
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "provider_propagation_failed",
-                Some("provider lock failed; provider was not borrowed"),
-            );
-        }
-    };
     let config = match load_provider_config(&state) {
         Ok(config) => config,
         Err(response) => return response,
@@ -987,7 +855,7 @@ pub(crate) async fn handle_borrow(
         &state.agent_name,
         std::slice::from_ref(&previous),
         &config,
-        providers,
+        resolver,
         &sandbox,
     )
     .await

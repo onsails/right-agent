@@ -202,10 +202,28 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let now = now_utc.to_rfc3339();
     let tx = conn.transaction().await?;
+    bump_use_many_in_tx(&tx, skill_names, now_utc).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// [`bump_use_many`] on a connection that is already inside a transaction,
+/// so the caller can commit the counter updates atomically with other
+/// writes. The database owner uses this to record the request's idempotency
+/// key in the same transaction as the counter increments.
+pub async fn bump_use_many_in_tx<I, S>(
+    conn: &Connection,
+    skill_names: I,
+    now_utc: DateTime<Utc>,
+) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let now = now_utc.to_rfc3339();
     for name in skill_names {
-        tx.execute(
+        conn.execute(
             BUMP_USE_SQL,
             (
                 name.as_ref(),
@@ -216,7 +234,6 @@ where
         )
         .await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 

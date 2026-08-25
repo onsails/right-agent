@@ -121,6 +121,27 @@ impl SecretBinding {
         }
     }
 
+    /// Construct a fully-resolved binding received from the authenticated
+    /// internal provider-binding endpoint. The credential is immediately
+    /// wrapped in the binding's private zeroizing storage.
+    pub fn from_resolved_parts(
+        env_var: String,
+        source_env_var: String,
+        placeholder: String,
+        allowed_hosts: Vec<String>,
+        inject_query: bool,
+        resolved_value: SecretString,
+    ) -> Self {
+        Self {
+            env_var,
+            source_env_var,
+            placeholder,
+            allowed_hosts,
+            inject_query,
+            resolved_value: Arc::new(resolved_value),
+        }
+    }
+
     /// Validate the binding. Placeholder rules mirror the SDK's: non-empty,
     /// at most 1024 bytes, no NUL/CR/LF.
     pub(crate) fn validate(&self) -> Result<(), SandboxError> {
@@ -194,6 +215,22 @@ impl SecretBinding {
         (
             self.source_env_var.clone(),
             zeroize::Zeroizing::new(self.resolved_value.as_ref().expose_secret().to_owned()),
+        )
+    }
+
+    /// Consume this short-lived binding into its transport-safe metadata and
+    /// secret value. This is intentionally consumption-only: provider-binding
+    /// IPC encodes the value once over the owner-only Unix socket, then drops
+    /// the DTO. Debug output remains redacted throughout.
+    pub fn into_transport_parts(self) -> (String, String, String, Vec<String>, bool, SecretString) {
+        let value = SecretString::from(self.resolved_value.as_ref().expose_secret().to_owned());
+        (
+            self.env_var,
+            self.source_env_var,
+            self.placeholder,
+            self.allowed_hosts,
+            self.inject_query,
+            value,
         )
     }
 }

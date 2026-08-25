@@ -584,17 +584,12 @@ fn agent_lock_child_probe() -> Result<()> {
     if std::env::var_os("RIGHT_PROVIDER_LOCK_CHILD").is_none() {
         return Ok(());
     }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("build child runtime")?;
-    runtime.block_on(async {
-        let cwd = std::env::current_dir().context("read child cwd")?;
-        let store = ProviderStore::open(&cwd).await?;
-        std::fs::write(cwd.join("child-ready"), b"ready").context("publish child readiness")?;
-        let _guard = store.agent_lock("riskoff").await?;
-        Ok::<(), anyhow::Error>(())
-    })
+    let cwd = std::env::current_dir().context("read child cwd")?;
+    let db_path = cwd.join("providers.db");
+    let lock_path = agent_lock_path(&db_path, "riskoff");
+    std::fs::write(cwd.join("child-ready"), b"ready").context("publish child readiness")?;
+    let _guard = acquire_agent_file_lock(&lock_path)?;
+    Ok(())
 }
 
 #[tokio::test]

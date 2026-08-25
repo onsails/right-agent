@@ -41,6 +41,7 @@ async fn run_backup(
     agent_name: &str,
     agent_dir: &Path,
     config: &Option<AgentConfig>,
+    _guard: &crate::runtime::RuntimeExclusionGuard,
 ) -> miette::Result<PathBuf> {
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
     let backup_dir = right_config::backups_dir(home, agent_name).join(&timestamp);
@@ -142,6 +143,7 @@ async fn back_up_sandbox(
 /// Non-fatal steps (stop, sandbox delete, PC reload) warn and continue.
 /// Fatal steps (backup if requested, directory removal) propagate errors.
 pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Result<DestroyResult> {
+    let _quiescence_guard = crate::runtime::require_runtime_quiesced(home).await?;
     let agents_dir = right_config::agents_dir(home);
     let agent_dir = agents_dir.join(&options.agent_name);
 
@@ -225,7 +227,14 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
     }
 
     if options.backup {
-        let backup_path = run_backup(home, &options.agent_name, &agent_dir, &config).await?;
+        let backup_path = run_backup(
+            home,
+            &options.agent_name,
+            &agent_dir,
+            &config,
+            &_quiescence_guard,
+        )
+        .await?;
         result.backup_path = Some(backup_path);
     }
 

@@ -178,10 +178,11 @@ pub struct CodegenOutcome {
     pub cloudflared_config_changed: bool,
 }
 
-/// Run cross-agent codegen pipeline.
+/// Run cross-agent runtime codegen.
 ///
-/// Generates: agent-tokens.json, process-compose.yaml, cloudflared config, runtime state.
-/// Per-agent codegen is handled by the bot at startup via `run_single_agent_codegen()`.
+/// Generates agent-tokens.json, process-compose.yaml, cloudflared config, and
+/// runtime state. Per-agent codegen is handled by the bot at startup via
+/// `run_single_agent_codegen()`.
 ///
 /// - `all_agents`: all discovered agents
 /// - `self_exe`: path to the right binary (used in process-compose.yaml)
@@ -191,6 +192,29 @@ pub fn run_agent_codegen(
     all_agents: &[AgentDef],
     self_exe: &Path,
     debug: bool,
+) -> miette::Result<CodegenOutcome> {
+    run_agent_codegen_inner(home, all_agents, self_exe, debug, true)
+}
+
+/// Run cross-agent configuration codegen without publishing runtime state.
+///
+/// Offline initialization uses this entry point because generating runtime
+/// configuration does not mean process-compose has been started.
+pub fn run_agent_codegen_for_init(
+    home: &Path,
+    all_agents: &[AgentDef],
+    self_exe: &Path,
+    debug: bool,
+) -> miette::Result<CodegenOutcome> {
+    run_agent_codegen_inner(home, all_agents, self_exe, debug, false)
+}
+
+fn run_agent_codegen_inner(
+    home: &Path,
+    all_agents: &[AgentDef],
+    self_exe: &Path,
+    debug: bool,
+    publish_runtime_state: bool,
 ) -> miette::Result<CodegenOutcome> {
     let run_dir = home.join("run");
     std::fs::create_dir_all(&run_dir)
@@ -314,37 +338,38 @@ pub fn run_agent_codegen(
     write_regenerated(&config_path, &pc_config)?;
     tracing::debug!("wrote process-compose config: {}", config_path.display());
 
-    // Write runtime state.json, preserving started_at and pc_api_token from
-    // existing state (reload case — token must stay consistent with the running PC).
-    let state_path = run_dir.join("state.json");
-    let socket_path = run_dir.join("pc.sock");
-    let existing = read_state(&state_path).ok();
-    let started_at = existing
-        .as_ref()
-        .map(|s| s.started_at.clone())
-        .unwrap_or_else(|| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
-            format!("{}Z", now.as_secs())
-        });
-    // Reuse existing token on reload; generate a fresh one on first start.
-    let pc_api_token = existing
-        .and_then(|s| s.pc_api_token)
-        .unwrap_or_else(generate_pc_api_token);
-    let state = RuntimeState {
-        agents: all_agents
-            .iter()
-            .map(|a| AgentState {
-                name: a.name.clone(),
-            })
-            .collect(),
-        socket_path: socket_path.display().to_string(),
-        started_at,
-        pc_port: PC_PORT,
-        pc_api_token: Some(pc_api_token),
-    };
-    write_state(&state, &state_path)?;
+    if publish_runtime_state {
+        // Preserve started_at and pc_api_token on reload: both must stay
+        // consistent with the running process-compose instance.
+        let state_path = run_dir.join("state.json");
+        let socket_path = run_dir.join("pc.sock");
+        let existing = read_state(&state_path).ok();
+        let started_at = existing
+            .as_ref()
+            .map(|s| s.started_at.clone())
+            .unwrap_or_else(|| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                format!("{}Z", now.as_secs())
+            });
+        let pc_api_token = existing
+            .and_then(|s| s.pc_api_token)
+            .unwrap_or_else(generate_pc_api_token);
+        let state = RuntimeState {
+            agents: all_agents
+                .iter()
+                .map(|a| AgentState {
+                    name: a.name.clone(),
+                })
+                .collect(),
+            socket_path: socket_path.display().to_string(),
+            started_at,
+            pc_port: PC_PORT,
+            pc_api_token: Some(pc_api_token),
+        };
+        write_state(&state, &state_path)?;
+    }
 
     Ok(outcome)
 }
@@ -457,6 +482,19 @@ pub(crate) mod tests {
         assert!(home.join("run/process-compose.yaml").exists());
         // state.json should exist
         assert!(home.join("run/state.json").exists());
+    }
+
+    #[tokio::test]
+    async fn init_codegen_does_not_publish_runtime_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+        write_minimal_global_config(home);
+        let self_exe = std::path::PathBuf::from("/usr/bin/right");
+
+        run_agent_codegen_for_init(home, &[], &self_exe, false).unwrap();
+
+        assert!(home.join("run/process-compose.yaml").exists());
+        assert!(!home.join("run/state.json").exists());
     }
 
     #[tokio::test]

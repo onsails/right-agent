@@ -22,6 +22,12 @@ right init  /  right agent init <name>
   │   exactly matches the configured UUID; then
   │   `cloudflared tunnel --loglevel error info --output json <uuid>` must
   │   succeed, or the operator must recreate the tunnel through `right config`.
+  ├─ Acquire project-wide runtime exclusion before any initialization write;
+  │   fail closed if preexisting runtime state is reachable or unreachable, and
+  │   retain the same guard through codegen, database migration, token storage,
+  │   restore, and force-recreate completion. Init codegen writes launch
+  │   configuration but does not publish `run/state.json`; only runtime startup
+  │   publishes state.
   ├─ Top-level `right init` completes tunnel setup and writes global config
   │   before creating `agents/right`, so a tunnel setup failure leaves no
   │   default-agent state.
@@ -91,6 +97,12 @@ right up [--agents x,y] [--detach] [--non-interactive]
       VM, waits for readiness, syncs guest state, and starts its in-guest
       Claude health probe.
 
+`right-mcp-server` starts first, opens and migrates every registered agent DB,
+restores owner-local MCP/memory state, binds mode-0600 `internal.sock`, and only
+then reports database readiness. Reload additions publish a complete ready
+runtime bundle atomically; removal marks it Draining, rejects new operations,
+cancels tracked tasks, waits for accepted operations, and then drops the owner.
+
 right reload / running agent register / running agent destroy
   ├─ Discover agents from agents/ directory
   ├─ Run cross-agent codegen and record whether cloudflared config content changed
@@ -99,13 +111,14 @@ right reload / running agent register / running agent destroy
   └─ Notify aggregator reload path when applicable
 
 right bot --agent <name>  (spawned by process-compose)
-  ├─ Resolve token, open data.db
+  ├─ Construct InternalClient and wait up to 30s for the Aggregator's typed
+  │   /db/ready response; transport failure, Failed state, or timeout aborts
+  │   startup with no direct-open fallback
   ├─ Per-agent codegen:
   │   ├─ settings.json, schemas
   │   ├─ .claude.json, credentials symlink, mcp.json
   │   ├─ TOOLS.md, skills install, policy.yaml
-  │   └─ data.db init, git init, secret generation
-  ├─ Clear Telegram webhook, verify bot identity
+  │   └─ filesystem/codegen state only; live database work uses typed IPC
   ├─ Microsandbox lifecycle (`right-sandbox`):
   │   ├─ ensure_runtime_installed + diagnose_host (hypervisor preflight)
   │   ├─ SandboxHandle::create_or_attach, then wait_ready
@@ -170,15 +183,15 @@ Per message:
   │   → YAML.
   ├─ Fail-closed sandbox gate: sandboxed agent + `SandboxHealth::Unavailable` →
   │   send cause-specific HTML message to Telegram, record affected chat, skip CC.
-  ├─ Before session preparation, read the stored setup token from data.db
-  │   through a read-only connection. Missing, empty, or CR/LF-containing
-  │   credentials atomically reserve the agent's single pending Telegram login
-  │   for that chat/thread and skip the batch; this local check makes no model,
-  │   sandbox, or API call. Other conversations receive an explicit pending
-  │   reminder, and credential-store failures surface separately.
-  │   A submitted token is rejected locally if it is too short, non-ASCII, or
-  │   contains any whitespace; valid opaque bytes are persisted unchanged. The
-  │   user sees `Saving token…`, then `Token saved. Send your message again.`
+  ├─ Before session preparation, fetch typed auth status from the Aggregator.
+  │   Missing, empty, or CR/LF-containing credentials atomically reserve the
+  │   agent's single pending Telegram login for that chat/thread and skip the
+  │   batch; no bot process opens `data.db`. Other conversations receive an
+  │   explicit pending reminder, and owner/credential failures surface
+  │   separately. A submitted token is rejected locally if it is too short,
+  │   non-ASCII, or contains whitespace; valid opaque bytes are persisted
+  │   through typed IPC. The user sees `Saving token…`, then `Token saved. Send
+  │   your message again.`
   ├─ Pipe input to claude -p via stdin; this foreground turn is the only
   │   runtime API validation of the stored token.
   │   ├─ First message: --session-id <uuid> (new session)
@@ -322,14 +335,14 @@ archived rows.
 
 ## Login Flow (setup-token)
 
-Before `prepare_cc_invocation`, each foreground batch reads the stored Claude
-credential through a read-only database connection. This check makes no sandbox,
-model, or API call: absent tokens are `Missing`, empty or CR/LF-containing tokens
-are `Invalid`, and all other tokens are `Valid`. Missing or invalid credentials
-atomically start the existing Telegram setup-token request and skip session
-preparation; credential-store failures are reported separately. The foreground
-`claude -p` turn is the only runtime API validation; init validation remains the
-separate 60-second real probe.
+Before `prepare_cc_invocation`, each foreground batch asks the Aggregator for
+typed auth status. This check makes no sandbox, model, or API call: absent
+tokens are `Missing`, empty or CR/LF-containing tokens are `Invalid`, and all
+others are `Valid`. Missing or invalid credentials atomically start the
+Telegram setup-token request and skip session preparation; owner/credential
+failures are reported separately. The foreground `claude -p` turn is the only
+runtime API validation; offline init validation remains the separate
+quiescence-guarded 60-second real probe.
 
 ```
 1. Install auth_code_tx for the requesting (chat_id, thread_id)

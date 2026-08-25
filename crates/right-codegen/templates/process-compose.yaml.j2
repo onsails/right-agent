@@ -14,7 +14,7 @@ processes:
       max_restarts: 10
     shutdown:
       signal: 15
-      timeout_seconds: 10
+      timeout_seconds: 30
 {% endif %}
 {% for agent in agents %}
   {{ agent.name }}-bot:
@@ -35,6 +35,7 @@ processes:
 {% if right_mcp_server or cloudflared %}
     depends_on:
 {% if right_mcp_server %}
+      # Ordering only; the bot's /db/ready handshake is authoritative readiness.
       right-mcp-server:
         condition: process_started
 {% endif %}

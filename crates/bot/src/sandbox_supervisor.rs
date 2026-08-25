@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use right_agent::agent::types::AgentConfig;
-use right_providers::{ProviderStatus, ProviderStore};
 use right_sandbox::{
     DEFAULT_READY_TIMEOUT, SandboxCause, SandboxDiagnosis, SandboxError, SandboxHandle,
     SandboxPhase, SandboxSpec, agent_sandbox_spec,
@@ -42,8 +41,8 @@ pub(crate) struct BringUpCtx<'a> {
     pub sandbox_name: &'a str,
     /// Full parsed agent config (egress mode, declared providers).
     pub config: &'a AgentConfig,
-    /// Provider credential store; the only reader of stored credentials.
-    pub providers: &'a ProviderStore,
+    /// Authenticated internal provider-binding resolver.
+    pub provider_bindings: &'a crate::provider_bindings::ProviderBindingResolver,
 }
 
 /// Successful bring-up. `initial_sync`, effective Claude validation, and
@@ -81,104 +80,10 @@ fn retryable_upgrade_diagnosis(
         .map(|_| SandboxCause::Unreachable.diagnose())
 }
 
-/// Resolve one declared provider into a source-ref secret binding.
-///
-/// The returned binding privately carries a redacted credential for
-/// right-sandbox's scoped SDK resolver. `NeedsValue` is returned as `None`
-/// only for create-time bulk resolution, where a migrated agent must be
-/// allowed to start before the dashboard receives its value.
-async fn secret_binding(
-    agent: &str,
-    provider_name: &str,
-    providers: &ProviderStore,
-) -> miette::Result<Option<right_sandbox::SecretBinding>> {
-    let record = providers.get(agent, provider_name).await.map_err(|e| {
-        miette::miette!(
-            "provider '{provider_name}' declared by agent {agent} cannot be bound: {e:#}"
-        )
-    })?;
-    if record.status == ProviderStatus::NeedsValue {
-        tracing::warn!(
-            agent = %agent,
-            provider = %provider_name,
-            env_var = %record.env_var,
-            "provider holds no credential yet, so the sandbox starts without it; \
-             add its credential from the dashboard: /providers"
-        );
-        return Ok(None);
-    }
-    providers
-        .source_ref_binding(agent, provider_name)
-        .await
-        .map(Some)
-        .map_err(|e| {
-            miette::miette!(
-                "provider '{provider_name}' declared by agent {agent} cannot be bound: {e:#}"
-            )
-        })
-}
-
 async fn secret_bindings(
-    agent: &str,
-    config: &AgentConfig,
-    providers: &ProviderStore,
+    resolver: &crate::provider_bindings::ProviderBindingResolver,
 ) -> miette::Result<Vec<right_sandbox::SecretBinding>> {
-    secret_bindings_with(agent, config, providers, false).await
-}
-
-/// Bulk provider resolution, with an optional tolerance mode.
-///
-/// The strict mode is create-time resolution: an unresolvable declared
-/// provider must abort bring-up, because the spec is about to be built from
-/// these bindings. The tolerant mode is reconcile-time resolution: a desired
-/// provider that cannot be bound (unknown built-in slug, store error, or a
-/// `Status::Error` record) is downgraded to a warning and skipped so that it
-/// cannot block revocation of bindings that are already obsolete. Duplicate
-/// guest env-var identities remain hard errors in both modes — that is a
-/// config defect that must be fixed before any sandbox mutation is safe.
-async fn secret_bindings_with(
-    agent: &str,
-    config: &AgentConfig,
-    providers: &ProviderStore,
-    tolerant: bool,
-) -> miette::Result<Vec<right_sandbox::SecretBinding>> {
-    let mut bindings = Vec::new();
-    let mut env_vars = std::collections::HashMap::<String, &str>::new();
-    for entry in config.providers() {
-        let env_var = match provider_entry_env_var(entry) {
-            Ok(env_var) => env_var,
-            Err(error) if tolerant => {
-                tracing::warn!(
-                    agent = %agent,
-                    provider = %entry.name,
-                    error = %format!("{error:#}"),
-                    "desired provider is unresolvable; skipping it during reconcile"
-                );
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if let Some(first) = env_vars.insert(env_var.to_owned(), &entry.name) {
-            return Err(miette::miette!(
-                "providers '{first}' and '{}' both bind guest env var '{env_var}'; binding identity must be unique per agent",
-                entry.name
-            ));
-        }
-        match secret_binding(agent, &entry.name, providers).await {
-            Ok(Some(binding)) => bindings.push(binding),
-            Ok(None) => {}
-            Err(error) if tolerant => {
-                tracing::warn!(
-                    agent = %agent,
-                    provider = %entry.name,
-                    error = %format!("{error:#}"),
-                    "desired provider cannot be bound; skipping it during reconcile"
-                );
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(bindings)
+    resolver.resolve_all().await
 }
 
 /// Guest environment variables that are, or ever were, provider-managed for
@@ -253,14 +158,11 @@ fn provider_entry_env_var(
 }
 
 /// Resolve one named provider after a dashboard mutation.
-///
-/// The config supplies identity; [`ProviderStore`] returns a redacted binding
-/// whose credential remains private to the sandbox application path.
 pub(crate) async fn resolve_named_provider(
     agent: &str,
     provider_name: &str,
     config: &AgentConfig,
-    providers: &ProviderStore,
+    resolver: &crate::provider_bindings::ProviderBindingResolver,
 ) -> miette::Result<right_sandbox::SecretBinding> {
     if !config
         .providers()
@@ -271,48 +173,52 @@ pub(crate) async fn resolve_named_provider(
             "provider '{provider_name}' is not declared by agent {agent}"
         ));
     }
-    secret_binding(agent, provider_name, providers)
-        .await?
-        .ok_or_else(|| miette::miette!("provider '{provider_name}' still has no usable credential"))
+    resolver.resolve_named(provider_name).await
 }
 
-/// Resolve and apply one named provider after a dashboard mutation.
 pub(crate) async fn apply_named_provider(
     agent: &str,
     provider_name: &str,
     config: &AgentConfig,
-    providers: &ProviderStore,
+    resolver: &crate::provider_bindings::ProviderBindingResolver,
     sandbox: &SandboxHandle,
 ) -> miette::Result<right_sandbox::SecretApply> {
-    let binding = resolve_named_provider(agent, provider_name, config, providers).await?;
+    let binding = resolve_named_provider(agent, provider_name, config, resolver).await?;
     sandbox
         .apply_secret(&binding)
         .await
         .map_err(|e| miette::miette!("applying provider secret {} failed: {e:#}", binding.env_var))
 }
 
-/// Build an agent's create-time sandbox specification.
-///
-/// Resolving the agent's declared providers is the only part that needs the
-/// bot's store; every other field comes from the shared
-/// [`right_sandbox::agent_sandbox_spec`]. The bot's bring-up, the CLI's
-/// `agent restore`, and `right agent migrate-sandbox` all use this spec.
-/// Later provider additions use [`SandboxHandle::apply_secret`] so existing
-/// sandboxes are upgraded without deletion.
-pub async fn agent_sandbox_spec_for(
+/// Offline CLI adapter. The caller must establish runtime quiescence before
+/// opening the provider store passed here.
+pub async fn agent_sandbox_spec_for_offline(
     agent: &str,
     sandbox_name: &str,
     config: &AgentConfig,
-    providers: &ProviderStore,
+    providers: &right_providers::ProviderStore,
 ) -> miette::Result<SandboxSpec> {
-    let secrets = secret_bindings(agent, config, providers).await?;
+    let mut secrets = Vec::new();
+    for entry in config.providers() {
+        let binding = providers
+            .source_ref_binding(agent, &entry.name)
+            .await
+            .map_err(|error| {
+                miette::miette!(
+                    "provider '{}' cannot be bound offline: {error:#}",
+                    entry.name
+                )
+            })?;
+        secrets.push(binding);
+    }
     agent_sandbox_spec(sandbox_name, config.network_policy, secrets)
         .map_err(|e| miette::miette!("invalid sandbox spec for agent {agent}: {e:#}"))
 }
 
-/// The bring-up sequence's view of [`agent_sandbox_spec_for`].
 async fn sandbox_spec(ctx: &BringUpCtx<'_>) -> miette::Result<SandboxSpec> {
-    agent_sandbox_spec_for(ctx.agent, ctx.sandbox_name, ctx.config, ctx.providers).await
+    let secrets = secret_bindings(ctx.provider_bindings).await?;
+    agent_sandbox_spec(ctx.sandbox_name, ctx.config.network_policy, secrets)
+        .map_err(|e| miette::miette!("invalid sandbox spec for agent {}: {e:#}", ctx.agent))
 }
 
 /// Bring the Agent Sandbox up.
@@ -353,7 +259,7 @@ pub(crate) async fn bring_up_sandbox(
         tracing::warn!(agent = %ctx.agent, sandbox = %ctx.sandbox_name, "sandbox readiness failed: {e:#}");
         return Ok(Err(diagnose(&e)));
     }
-    hot_reconcile_providers(ctx.agent, &[], ctx.config, ctx.providers, &sandbox)
+    hot_reconcile_providers(ctx.agent, &[], ctx.config, ctx.provider_bindings, &sandbox)
         .await
         .map_err(|e| {
             miette::miette!(
@@ -400,10 +306,10 @@ pub(crate) async fn hot_reconcile_providers(
     agent: &str,
     previous_configs: &[AgentConfig],
     config: &AgentConfig,
-    providers: &ProviderStore,
+    resolver: &crate::provider_bindings::ProviderBindingResolver,
     sandbox: &SandboxHandle,
 ) -> miette::Result<()> {
-    let bindings = secret_bindings_with(agent, config, providers, true).await?;
+    let bindings = secret_bindings(resolver).await?;
     let desired: std::collections::HashSet<&str> = bindings
         .iter()
         .map(|binding| binding.env_var.as_str())
@@ -472,8 +378,8 @@ pub(crate) struct SupervisorDeps {
     pub sandbox_name: String,
     /// Latest accepted agent config. Provider-only reloads replace this value.
     pub config: Arc<arc_swap::ArcSwap<AgentConfig>>,
-    /// Provider credential store.
-    pub providers: Arc<ProviderStore>,
+    /// Authenticated internal provider-binding resolver.
+    pub provider_bindings: Arc<crate::provider_bindings::ProviderBindingResolver>,
     /// Serializes provider config publication, live apply, and recovery.
     pub provider_mutation: Arc<tokio::sync::Mutex<()>>,
     /// Shutdown token shared with the rest of the bot.
@@ -487,7 +393,7 @@ impl SupervisorDeps {
         agent_dir: PathBuf,
         sandbox_name: String,
         config: Arc<arc_swap::ArcSwap<AgentConfig>>,
-        providers: Arc<ProviderStore>,
+        provider_bindings: Arc<crate::provider_bindings::ProviderBindingResolver>,
         provider_mutation: Arc<tokio::sync::Mutex<()>>,
         shutdown: CancellationToken,
     ) -> Self {
@@ -496,7 +402,7 @@ impl SupervisorDeps {
             agent_dir,
             sandbox_name,
             config,
-            providers,
+            provider_bindings,
             provider_mutation,
             shutdown,
         }
@@ -628,20 +534,13 @@ async fn recovery_step(
     attempt: &mut usize,
 ) -> LoopStep {
     let _mutation = deps.provider_mutation.lock().await;
-    let _agent_guard = match deps.providers.agent_lock(&deps.agent).await {
-        Ok(guard) => guard,
-        Err(error) => {
-            tracing::error!(agent = %deps.agent, error = %format!("{error:#}"), "failed to lock provider recovery");
-            return LoopStep::Break;
-        }
-    };
     let config = deps.config_snapshot();
     let ctx = BringUpCtx {
         agent: &deps.agent,
         agent_dir: &deps.agent_dir,
         sandbox_name: &deps.sandbox_name,
         config: &config,
-        providers: &deps.providers,
+        provider_bindings: &deps.provider_bindings,
     };
     match bring_up_sandbox(&ctx).await {
         Ok(Ok(bring_up)) => {
@@ -747,7 +646,3 @@ async fn notify_back_online(handle: &Arc<SandboxRuntimeHandle>, bot: &crate::tel
         }
     }
 }
-
-#[cfg(test)]
-#[path = "sandbox_supervisor_tests.rs"]
-mod tests;

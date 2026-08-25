@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 const REFRESH_MARGIN_MAX: Duration = Duration::from_secs(3600);
 
 /// Per-server OAuth state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthServerState {
     pub refresh_token: Option<String>,
     pub token_endpoint: String,
@@ -27,6 +27,32 @@ pub struct OAuthServerState {
     pub expires_at: chrono::DateTime<chrono::Utc>,
     pub server_url: String,
     pub resource: String,
+}
+
+impl std::fmt::Debug for OAuthServerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthServerState")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "token_endpoint",
+                &crate::credentials::redact_url(&self.token_endpoint),
+            )
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("expires_at", &self.expires_at)
+            .field(
+                "server_url",
+                &crate::credentials::redact_url(&self.server_url),
+            )
+            .field("resource", &crate::credentials::redact_url(&self.resource))
+            .finish()
+    }
 }
 
 /// Message sent to refresh scheduler (new token or removal).
@@ -43,6 +69,11 @@ pub enum RefreshMessage {
     },
     /// Server removed — cancel timer and clean up state.
     RemoveServer { server_name: String },
+    /// Server removed with acknowledgement after scheduler state and in-flight work are cancelled.
+    RemoveServerAndWait {
+        server_name: String,
+        completion: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 impl std::fmt::Debug for RefreshMessage {
@@ -59,6 +90,10 @@ impl std::fmt::Debug for RefreshMessage {
                 .debug_struct("RemoveServer")
                 .field("server_name", server_name)
                 .finish(),
+            Self::RemoveServerAndWait { server_name, .. } => f
+                .debug_struct("RemoveServerAndWait")
+                .field("server_name", server_name)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -176,13 +211,32 @@ type RefreshTaskOutput = (
     Result<(OAuthServerState, String), crate::reconnect::ReconnectError>,
 );
 
+fn remove_refresh_server(
+    server_name: &str,
+    timers: &mut HashMap<String, tokio::time::Instant>,
+    entries: &mut HashMap<String, OAuthServerState>,
+    token_handles: &mut HashMap<String, Arc<tokio::sync::RwLock<Option<String>>>>,
+    backend_handles: &mut HashMap<String, Arc<crate::proxy::ProxyBackend>>,
+    retry_attempts: &mut HashMap<String, u32>,
+    cancel_tokens: &mut HashMap<String, CancellationToken>,
+) {
+    timers.remove(server_name);
+    entries.remove(server_name);
+    token_handles.remove(server_name);
+    backend_handles.remove(server_name);
+    retry_attempts.remove(server_name);
+    if let Some(token) = cancel_tokens.remove(server_name) {
+        token.cancel();
+    }
+    tracing::info!(server = %server_name, "refresh cancelled — server removed");
+}
 /// Run the OAuth token refresh scheduler.
 ///
 /// Listens for `RefreshMessage` messages (new tokens or removals) and maintains
 /// timers for each server. On successful refresh: writes new token to ProxyBackend's
-/// shared `Arc<RwLock>` in-memory, and persists state to SQLite.
+/// shared `Arc<RwLock>` in-memory, and persists state owner-locally.
 pub async fn run_refresh_scheduler(
-    agent_dir: std::path::PathBuf,
+    persistence: std::sync::Arc<dyn crate::persistence::McpPersistence>,
     mut rx: tokio::sync::mpsc::Receiver<RefreshMessage>,
 ) {
     crate::ensure_crypto_provider();
@@ -208,6 +262,7 @@ pub async fn run_refresh_scheduler(
         HashMap::new();
     let mut backend_handles: HashMap<String, Arc<crate::proxy::ProxyBackend>> = HashMap::new();
     let mut timers: HashMap<String, tokio::time::Instant> = HashMap::new();
+
     let mut retry_attempts: HashMap<String, u32> = HashMap::new();
     // In-flight refresh tasks. Each task returns its server name plus the
     // refresh result; we look up `entries`/`backend_handles` on completion
@@ -249,32 +304,25 @@ pub async fn run_refresh_scheduler(
                         let due = refresh_due_in(&entry_state);
                         timers.insert(server_name.clone(), tokio::time::Instant::now() + due);
 
-                        // Read token before opening DB connection (Connection is !Send across await)
                         let current_token = token.read().await.clone().unwrap_or_default();
 
-                        // Persist to SQLite
-                        match right_db::open_connection(&agent_dir, false).await {
-                            Ok(conn) => {
-                                let expires_at = entry_state.expires_at.to_rfc3339();
-                                if let Err(e) = crate::credentials::db_set_oauth_state(
-                                    &conn,
-                                    &server_name,
-                                    &current_token,
-                                    entry_state.refresh_token.as_deref(),
-                                    &entry_state.token_endpoint,
-                                    &entry_state.client_id,
-                                    entry_state.client_secret.as_deref(),
-                                    &expires_at,
-                                    &entry_state.resource,
-                                )
-                                .await
-                                {
-                                    tracing::error!("failed to persist OAuth state: {e:#}");
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("failed to open memory DB for OAuth state persistence: {e:#}");
-                            }
+                        // Persist owner-locally.
+                        if let Err(e) = persistence
+                            .set_oauth_state(
+                                &server_name,
+                                crate::persistence::OAuthStatePersist {
+                                    access_token: current_token,
+                                    refresh_token: entry_state.refresh_token.clone(),
+                                    token_endpoint: entry_state.token_endpoint.clone(),
+                                    client_id: entry_state.client_id.clone(),
+                                    client_secret: entry_state.client_secret.clone(),
+                                    expires_at: entry_state.expires_at.to_rfc3339(),
+                                    oauth_resource: entry_state.resource.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            tracing::error!("failed to persist OAuth state: {e:#}");
                         }
 
                         tracing::info!(
@@ -311,26 +359,27 @@ pub async fn run_refresh_scheduler(
                         }
                     }
                     RefreshMessage::RemoveServer { server_name } => {
-                        timers.remove(&server_name);
-                        entries.remove(&server_name);
-                        token_handles.remove(&server_name);
-                        backend_handles.remove(&server_name);
-                        retry_attempts.remove(&server_name);
-                        // Don't drop the generation: a re-registered server
-                        // would otherwise reuse generation 0, potentially
-                        // matching an in-flight task that was tagged with 0
-                        // before this removal. Keeping the counter monotonic
-                        // preserves the entries-contains-key short-circuit
-                        // as the load-bearing defense for removed servers.
-                        // Cancel any in-flight refresh for this server.
-                        // do_refresh_cancellable checks the token before each
-                        // attempt and races backoff sleeps against it, so the
-                        // task aborts cleanly with Err(Cancelled) rather than
-                        // running for minutes against a removed server.
-                        if let Some(token) = cancel_tokens.remove(&server_name) {
-                            token.cancel();
-                        }
-                        tracing::info!(server = %server_name, "refresh cancelled — server removed");
+                        remove_refresh_server(
+                            &server_name,
+                            &mut timers,
+                            &mut entries,
+                            &mut token_handles,
+                            &mut backend_handles,
+                            &mut retry_attempts,
+                            &mut cancel_tokens,
+                        );
+                    }
+                    RefreshMessage::RemoveServerAndWait { server_name, completion } => {
+                        remove_refresh_server(
+                            &server_name,
+                            &mut timers,
+                            &mut entries,
+                            &mut token_handles,
+                            &mut backend_handles,
+                            &mut retry_attempts,
+                            &mut cancel_tokens,
+                        );
+                        let _ = completion.send(());
                     }
                 }
             }
@@ -404,28 +453,18 @@ pub async fn run_refresh_scheduler(
                                 let due = refresh_due_in(&new_entry);
                                 timers.insert(name.clone(), tokio::time::Instant::now() + due);
 
-                                match right_db::open_connection(&agent_dir, false).await {
-                                    Ok(conn) => {
-                                        let expires_at = new_entry.expires_at.to_rfc3339();
-                                        if let Err(e) = crate::credentials::db_update_oauth_token(
-                                            &conn,
-                                            &name,
-                                            &access_token,
-                                            new_entry.refresh_token.as_deref(),
-                                            &expires_at,
-                                        )
-                                        .await
-                                        {
-                                            tracing::error!("failed to persist refreshed token: {e:#}");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "failed to open memory DB for token refresh persistence: {e:#}"
-                                        );
-                                    }
+                                let expires_at = new_entry.expires_at.to_rfc3339();
+                                if let Err(e) = persistence
+                                    .update_oauth_token(
+                                        &name,
+                                        &access_token,
+                                        new_entry.refresh_token.as_deref(),
+                                        &expires_at,
+                                    )
+                                    .await
+                                {
+                                    tracing::error!("failed to persist refreshed token: {e:#}");
                                 }
-                                entries.insert(name.clone(), new_entry);
 
                                 // Re-read status AFTER the token write so a concurrent
                                 // tool_call 401 that flipped the backend to NeedsAuth
@@ -829,14 +868,17 @@ mod tests {
             Arc::new(tokio::sync::RwLock::new(Some("old".into())));
         let backend = Arc::new(crate::proxy::ProxyBackend::new(
             "s".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             "https://x/mcp".into(),
             token_arc.clone(),
             crate::proxy::AuthMethod::Bearer,
         ));
 
         let (tx, rx) = tokio::sync::mpsc::channel(8);
-        let scheduler = tokio::spawn(run_refresh_scheduler(tmp.path().to_path_buf(), rx));
+        let scheduler = tokio::spawn(run_refresh_scheduler(
+            crate::persistence::test_support::sqlite(tmp.path()),
+            rx,
+        ));
 
         tx.send(RefreshMessage::NewEntry {
             server_name: "s".into(),
@@ -902,7 +944,7 @@ mod tests {
             Arc::new(tokio::sync::RwLock::new(Some("old".into())));
         let backend = Arc::new(crate::proxy::ProxyBackend::new(
             "s".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             "https://x/mcp".into(),
             token_arc.clone(),
             crate::proxy::AuthMethod::Bearer,
@@ -913,7 +955,10 @@ mod tests {
             .await;
 
         let (tx, rx) = tokio::sync::mpsc::channel(8);
-        let scheduler = tokio::spawn(run_refresh_scheduler(tmp.path().to_path_buf(), rx));
+        let scheduler = tokio::spawn(run_refresh_scheduler(
+            crate::persistence::test_support::sqlite(tmp.path()),
+            rx,
+        ));
 
         tx.send(RefreshMessage::NewEntry {
             server_name: "s".into(),
@@ -1020,21 +1065,24 @@ mod tests {
             Arc::new(tokio::sync::RwLock::new(Some("old-b".into())));
         let backend_a = Arc::new(crate::proxy::ProxyBackend::new(
             "a".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             "https://x/a/mcp".into(),
             token_a.clone(),
             crate::proxy::AuthMethod::Bearer,
         ));
         let backend_b = Arc::new(crate::proxy::ProxyBackend::new(
             "b".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             "https://x/b/mcp".into(),
             token_b.clone(),
             crate::proxy::AuthMethod::Bearer,
         ));
 
         let (tx, rx) = tokio::sync::mpsc::channel(8);
-        let scheduler = tokio::spawn(run_refresh_scheduler(tmp.path().to_path_buf(), rx));
+        let scheduler = tokio::spawn(run_refresh_scheduler(
+            crate::persistence::test_support::sqlite(tmp.path()),
+            rx,
+        ));
 
         // Register server "a" — its refresh will be spawned and stuck on
         // the slow response.
@@ -1070,6 +1118,7 @@ mod tests {
         .unwrap();
 
         wait_for_scheduler_entry(tmp.path(), "b").await;
+
         wait_for_token(&token_b, "b-tok", &server).await;
 
         // Token "a" must NOT have been refreshed (the slow mock never
@@ -1081,5 +1130,26 @@ mod tests {
         );
 
         scheduler.abort();
+    }
+
+    #[tokio::test]
+    async fn remove_server_and_wait_acknowledges_scheduler_cleanup() {
+        crate::ensure_crypto_provider();
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let scheduler = tokio::spawn(run_refresh_scheduler(
+            crate::persistence::test_support::sqlite(tmp.path()),
+            rx,
+        ));
+        let (completion, completed) = tokio::sync::oneshot::channel();
+        tx.send(RefreshMessage::RemoveServerAndWait {
+            server_name: "server".to_owned(),
+            completion,
+        })
+        .await
+        .unwrap();
+        completed.await.unwrap();
+        scheduler.abort();
+        assert!(scheduler.await.unwrap_err().is_cancelled());
     }
 }

@@ -256,7 +256,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let backend = Arc::new(ProxyBackend::new(
             "composio".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             "http://127.0.0.1:1/mcp".into(),
             Arc::new(RwLock::new(None)),
             AuthMethod::default(),
@@ -381,7 +381,7 @@ mod tests {
             .unwrap();
         let backend = Arc::new(ProxyBackend::new(
             "composio".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             url,
             Arc::new(RwLock::new(None)),
             AuthMethod::default(),
@@ -428,7 +428,7 @@ mod tests {
             .unwrap();
         let backend = Arc::new(ProxyBackend::new(
             "obsidian".into(),
-            tmp.path().to_path_buf(),
+            crate::persistence::test_support::sqlite(tmp.path()),
             url,
             Arc::new(RwLock::new(None)),
             AuthMethod::default(),

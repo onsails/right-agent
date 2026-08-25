@@ -449,6 +449,7 @@ pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> 
     // spec builder below resolves every declared provider through this store
     // and hard-fails on one it has no record of, and a definition the store
     // rejects must abort while the agent is still untouched.
+    let _quiescence_guard = crate::runtime_quiescence::require_runtime_quiesced(home).await?;
     let providers = ProviderStore::open(home)
         .await
         .map_err(|error| miette::miette!("open provider store: {error:#}"))?;
@@ -501,7 +502,7 @@ pub(crate) async fn cmd_agent_migrate_sandbox(home: &Path, agent_name: &str) -> 
     let _provider_guard = providers.agent_lock(agent_name).await.map_err(|error| {
         miette::miette!("lock provider store for agent {agent_name}: {error:#}")
     })?;
-    let spec = right_bot::agent_sandbox_spec_for(
+    let spec = right_bot::agent_sandbox_spec_for_offline(
         agent_name,
         &plan.new_name,
         &plan.migrated_config,

@@ -41,45 +41,61 @@ pub(crate) struct PostTurnLearningCtx {
 /// turn (so the async probe must not run — the agent already captured the how).
 /// `None` invocation (progress/learning disabled) → false; query error → false.
 pub(crate) async fn authored_skill_this_turn(
-    conn: &right_db::Connection,
+    client: &right_mcp::internal_client::InternalClient,
+    agent: &str,
     learning_invocation_id: Option<&str>,
 ) -> bool {
-    let Some(inv) = learning_invocation_id else {
+    let Some(invocation_id) = learning_invocation_id else {
         return false;
     };
-    match right_agent::learned_skills::successful_finish_exists(conn, inv).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("learning pipeline: successful_finish_exists failed: {e:#}");
+    match client
+        .learning_authored_skill_this_turn(
+            &right_mcp::internal_db::LearningAuthoredSkillThisTurnRequest {
+                agent: agent.to_owned(),
+                invocation_id: invocation_id.to_owned(),
+            },
+        )
+        .await
+    {
+        Ok(response) => response.result,
+        Err(error) => {
+            tracing::warn!("learning pipeline: owner authored-skill query failed: {error:#}");
             false
         }
     }
 }
 
 /// Run the budget gate, prefilter, and (on a non-Skip decision) the
-/// probe-writer fork for one captured turn. All failure paths log and return;
-/// never propagates (the caller is fire-and-forget and must not be disrupted).
-pub(crate) async fn run_post_turn(ctx: PostTurnLearningCtx, anchor: ProbeAnchor) {
+/// probe-writer fork for one captured turn. A database-owner mutation error
+/// propagates to the spawned-task boundary so the pipeline operation fails;
+/// non-database skip decisions remain normal `Ok(())` outcomes.
+pub(crate) async fn run_post_turn(
+    ctx: PostTurnLearningCtx,
+    anchor: ProbeAnchor,
+) -> Result<(), right_mcp::internal_db::InternalDbError> {
     let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "learning pipeline: open_connection failed: {e:#}");
-            return;
-        }
-    };
-    if authored_skill_this_turn(&conn, anchor.learning_invocation_id.as_deref()).await {
-        tracing::debug!(
-            agent = %ctx.agent_name,
-            "learning pipeline skipped: skill authored/patched this turn"
-        );
-        return;
+    if authored_skill_this_turn(
+        &ctx.internal_client,
+        &ctx.agent_name,
+        anchor.learning_invocation_id.as_deref(),
+    )
+    .await
+    {
+        tracing::debug!(agent = %ctx.agent_name, "learning pipeline skipped: skill authored/patched this turn");
+        return Ok(());
     }
-    let today_spend = match crate::learning_prefilter::today_spend_usd(&conn, &now_utc).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "learning pipeline: today_spend query failed: {e:#}");
-            return;
+    let today_spend = match ctx
+        .internal_client
+        .learning_today_spend(&right_mcp::internal_db::LearningTodaySpendRequest {
+            agent: ctx.agent_name.clone(),
+            now_utc,
+        })
+        .await
+    {
+        Ok(response) => response.usd,
+        Err(error) => {
+            tracing::warn!(agent = %ctx.agent_name, "learning pipeline: owner spend query failed: {error:#}");
+            return Ok(());
         }
     };
     if today_spend >= ctx.daily_budget {
@@ -89,8 +105,17 @@ pub(crate) async fn run_post_turn(ctx: PostTurnLearningCtx, anchor: ProbeAnchor)
             budget = ctx.daily_budget,
             "learning pipeline skipped: daily budget exhausted"
         );
-        record_budget_skip(&conn, &ctx.agent_name, anchor.chat_id, anchor.thread_id).await;
-        return;
+        // Skip learning when today's spend already exceeds the budget. A
+        // failed skip record fails the pipeline run: without the row there
+        // is no audit trail explaining why learning did not happen.
+        record_budget_skip(
+            &ctx.internal_client,
+            &ctx.agent_name,
+            anchor.chat_id,
+            anchor.thread_id,
+        )
+        .await?;
+        return Ok(());
     }
 
     let prefilter_ctx = crate::learning_prefilter::PrefilterContext {
@@ -103,12 +128,13 @@ pub(crate) async fn run_post_turn(ctx: PostTurnLearningCtx, anchor: ProbeAnchor)
         thread_id: anchor.thread_id,
         baseline_window_days: ctx.baseline_window_days,
         baseline_min_sample: ctx.baseline_min_sample,
+        internal_client: Arc::clone(&ctx.internal_client),
     };
     let decision = crate::learning_prefilter::run(prefilter_ctx, anchor.clone()).await;
     let hint = match decision {
         crate::learning_prefilter::PrefilterDecision::Skip { reason } => {
             tracing::debug!(reason = %reason, "prefilter skipped");
-            return;
+            return Ok(());
         }
         crate::learning_prefilter::PrefilterDecision::PatchExisting {
             target_skill,
@@ -122,7 +148,7 @@ pub(crate) async fn run_post_turn(ctx: PostTurnLearningCtx, anchor: ProbeAnchor)
         }
     };
     if !ctx.probe_writer_enabled {
-        return;
+        return Ok(());
     }
     let probe_writer_model = match ctx
         .probe_writer_model_override
@@ -131,7 +157,7 @@ pub(crate) async fn run_post_turn(ctx: PostTurnLearningCtx, anchor: ProbeAnchor)
         Some(m) if !m.is_empty() => m,
         _ => {
             tracing::warn!(agent = %ctx.agent_name, "probe-writer model unresolved, skipping");
-            return;
+            return Ok(());
         }
     };
 
@@ -167,28 +193,29 @@ pub(crate) async fn run_post_turn(ctx: PostTurnLearningCtx, anchor: ProbeAnchor)
         incoming_hint: hint,
     };
     crate::learning_probe_writer::run(writer_ctx, anchor, skill_index).await;
+    Ok(())
 }
 
-/// Record a `learning_skip(reason='budget')` row. Moved verbatim from worker.
+/// Record a `learning_skip(reason='budget')` row.
 pub(crate) async fn record_budget_skip(
-    conn: &right_db::Connection,
+    client: &right_mcp::internal_client::InternalClient,
     agent_name: &str,
     chat_id: i64,
     thread_id: i64,
-) {
-    if let Err(e) = right_agent::usage::insert::insert_learning_skip(
-        conn,
-        "budget",
-        None,
-        Some(chat_id),
-        Some(thread_id),
-    )
-    .await
-    {
-        tracing::warn!(agent = %agent_name, "learning_skip insert failed: {e:#}");
-    }
+) -> Result<(), right_mcp::internal_db::InternalDbError> {
+    let request = right_mcp::internal_db::LearningRecordBudgetSkipRequest {
+        agent: agent_name.to_owned(),
+        request_id: crate::db::request_id(),
+        chat_id,
+        thread_id,
+        reason: "budget".to_string(),
+        intended_kind: None,
+    };
+    // Propagate: silently dropping this row would erase the only record of
+    // why the learning turn was skipped.
+    client.learning_record_budget_skip(&request).await?;
+    Ok(())
 }
-
 /// First non-empty line of a skill excerpt (truncated to 200 chars), for the
 /// one-line index summary. Moved verbatim from worker.
 pub(crate) fn summary_first_line(excerpt: &str) -> String {
@@ -204,60 +231,21 @@ pub(crate) fn summary_first_line(excerpt: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A budget-skip record failure must propagate to the caller: silently
+    /// continuing drops the observability row that explains why the learning
+    /// turn was skipped, with no signal anywhere.
     #[tokio::test]
-    async fn authored_skill_this_turn_true_after_successful_finish() {
-        let dir = tempfile::tempdir().unwrap();
-        {
-            let mut c = right_db::open_connection(dir.path(), true).await.unwrap();
-            right_db::migrations::MIGRATIONS
-                .to_latest(&mut c)
-                .await
-                .unwrap();
-        }
-        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
-        right_agent::learned_skills::insert_learning_event(
-            &conn,
-            &right_agent::learned_skills::LearningEvent {
-                invocation_id: "inv-1".into(),
-                agent_name: "a".into(),
-                action: right_agent::learned_skills::LearningAction::Create,
-                skill_name: "rightx-x".into(),
-                phase: right_agent::learned_skills::LearningPhase::Finish,
-                status: Some(right_agent::learned_skills::LearningStatus::Created),
-                hint_outcome: None,
-                reason: None,
-                message: None,
-                summary: None,
-                event_refs: vec![],
-            },
-        )
-        .await
-        .unwrap();
-        assert!(authored_skill_this_turn(&conn, Some("inv-1")).await);
-        assert!(!authored_skill_this_turn(&conn, Some("inv-2")).await);
-        assert!(!authored_skill_this_turn(&conn, None).await);
-    }
-
-    #[tokio::test]
-    async fn budget_skip_records_learning_skip_row() {
-        let dir = tempfile::tempdir().unwrap();
-        {
-            let mut c = right_db::open_connection(dir.path(), true).await.unwrap();
-            right_db::migrations::MIGRATIONS
-                .to_latest(&mut c)
-                .await
-                .unwrap();
-        }
-        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
-        record_budget_skip(&conn, "agent-x", 99, 0).await;
-        let (n, reason, kind): (i64, String, Option<String>) = conn
-            .query_row(
-                "SELECT COUNT(*), MAX(reason), MAX(intended_kind) FROM learning_skip",
-                (),
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .await
-            .unwrap();
-        assert_eq!((n, reason.as_str(), kind), (1, "budget", None));
+    async fn record_budget_skip_propagates_owner_error() {
+        let client = right_mcp::internal_client::InternalClient::new(std::path::PathBuf::from(
+            "/nonexistent-right-test-internal.sock",
+        ));
+        let result = record_budget_skip(&client, "alpha", 7, 0).await;
+        assert!(
+            matches!(
+                result,
+                Err(right_mcp::internal_db::InternalDbError::Transport(_))
+            ),
+            "budget-skip failure must propagate as a typed error, got {result:?}"
+        );
     }
 }

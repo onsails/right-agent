@@ -4,13 +4,22 @@ use std::process::Stdio;
 use clap::{Parser, Subcommand};
 
 pub(crate) mod aggregator;
+pub(crate) mod db_owner;
+pub(crate) mod db_repair;
 pub(crate) mod internal_api;
+pub(crate) mod internal_api_db;
+#[cfg(test)]
+mod internal_api_db_tests;
 pub(crate) mod internal_api_providers;
 pub(crate) mod learning;
+pub(crate) mod mcp_persistence;
 pub(crate) mod migrate_sandbox;
 pub(crate) mod progress;
 mod restore;
+pub(crate) mod retain_owner;
 pub(crate) mod right_backend;
+pub(crate) mod runtime_builder;
+pub(crate) mod runtime_quiescence;
 mod wizard;
 
 /// Source-of-truth list for every interactive prompt label rendered from
@@ -20,7 +29,7 @@ mod wizard;
 /// test on `right-agent` does the same for those crates. When you add or
 /// edit an `inquire` prompt in this file, update this array — failure to do
 /// so is caught by the test.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) const MAIN_PROMPT_LABELS: &[&str] = &[
     // cmd_agent_init: existing-agent override path
     "how to initialize this agent?",
@@ -130,6 +139,23 @@ mod cli_parse_tests {
             right_agent_config::OPENSHELL_UNMIGRATED.contains("right agent migrate-sandbox"),
             "the rejection message must point at the command that fixes it"
         );
+    }
+
+    #[test]
+    fn db_repair_requires_one_or_more_agent_names() {
+        let cli = Cli::try_parse_from(["right", "agent", "db-repair", "right", "riskoff"])
+            .expect("`right agent db-repair <name>...` must parse");
+        match cli.command {
+            Commands::Agent {
+                command: AgentCommands::DbRepair { names },
+            } => assert_eq!(names, ["right", "riskoff"]),
+            _ => panic!("db-repair did not parse into its own subcommand"),
+        }
+
+        let err = Cli::try_parse_from(["right", "agent", "db-repair"])
+            .err()
+            .expect("db-repair without names must be rejected by clap");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
@@ -598,6 +624,14 @@ pub enum AgentCommands {
         /// Agent name
         name: String,
     },
+    /// Offline repair of legacy multiprocess-WAL databases. Stops the entire
+    /// runtime, preserves forensic artifacts, and does not restart.
+    #[command(name = "db-repair")]
+    DbRepair {
+        /// One or more agent names (database paths and SQL are never accepted).
+        #[arg(required = true, num_args = 1..)]
+        names: Vec<String>,
+    },
 }
 
 /// Skill lifecycle subcommands.
@@ -891,31 +925,6 @@ fn restore_binding_mode_from_flags(
     }
 }
 
-fn restored_mcp_auth_method(
-    auth_type: Option<&str>,
-    auth_header: Option<&str>,
-    http_headers: Option<Vec<right_mcp::credentials::HttpHeaderSecret>>,
-) -> Option<right_mcp::proxy::AuthMethod> {
-    if auth_type == Some("headers") {
-        let headers = http_headers?;
-        if headers.is_empty() {
-            None
-        } else {
-            Some(right_mcp::proxy::AuthMethod::from_db_with_headers(
-                auth_type,
-                auth_header,
-                headers,
-            ))
-        }
-    } else {
-        Some(right_mcp::proxy::AuthMethod::from_db_with_headers(
-            auth_type,
-            auth_header,
-            Vec::new(),
-        ))
-    }
-}
-
 /// Intercept `BlockAlreadyRendered`: exit code 1, no miette formatting.
 /// Used when a command has already rendered a brand-conformant rail block
 /// explaining the failure.
@@ -1030,6 +1039,7 @@ async fn main() -> miette::Result<()> {
             network_policy,
         } => {
             let claude_setup_token = std::env::var("RIGHT_CLAUDE_SETUP_TOKEN").ok();
+            let quiescence_guard = runtime_quiescence::require_runtime_quiesced(&home).await?;
             cmd_init(
                 &home,
                 telegram_token.as_deref(),
@@ -1040,6 +1050,7 @@ async fn main() -> miette::Result<()> {
                 &tunnel_provider,
                 yes,
                 network_policy,
+                &quiescence_guard,
             )
             .await
         }
@@ -1122,6 +1133,7 @@ async fn main() -> miette::Result<()> {
                 let supplied_claude_setup_token = std::env::var("RIGHT_CLAUDE_SETUP_TOKEN").ok();
                 let claude_setup_token =
                     resolve_claude_setup_token(supplied_claude_setup_token.as_deref(), !yes)?;
+                let quiescence_guard = runtime_quiescence::require_runtime_quiesced(&home).await?;
                 if let Some(backup_path) = from_backup {
                     let restore_binding_mode = restore_binding_mode_from_flags(
                         preserve_source_bindings,
@@ -1134,6 +1146,7 @@ async fn main() -> miette::Result<()> {
                         &backup_path,
                         restore_binding_mode,
                         &claude_setup_token,
+                        &quiescence_guard,
                     )
                     .await
                 } else {
@@ -1148,6 +1161,7 @@ async fn main() -> miette::Result<()> {
                         telegram_token.as_deref(),
                         &claude_setup_token,
                         &telegram_allowed_chat_ids,
+                        &quiescence_guard,
                     )
                     .await
                 }
@@ -1397,6 +1411,9 @@ async fn main() -> miette::Result<()> {
             AgentCommands::MigrateSandbox { name } => {
                 migrate_sandbox::cmd_agent_migrate_sandbox(&home, &name).await
             }
+            AgentCommands::DbRepair { names } => {
+                db_repair::cmd_agent_db_repair(&home, &names).await
+            }
         },
         Commands::Memory { command } => match command {
             MemoryCommands::List {
@@ -1433,8 +1450,12 @@ async fn main() -> miette::Result<()> {
                 serde_json::from_str(&token_map_content)
                     .map_err(|e| miette::miette!("failed to parse token map: {e:#}"))?;
 
+            // Construct every complete per-agent runtime before publishing any
+            // routing. A single broken database or restore aborts startup.
+            let db_owners = db_owner::DbOwnerRegistry::new();
+
             // One store handle for the whole server: the per-agent backends
-            // and the internal API must answer from the same authority.
+            // and the internal API answer from the same authority.
             let providers = internal_api::open_provider_store(&home).await?;
 
             let token_map = {
@@ -1455,371 +1476,41 @@ async fn main() -> miette::Result<()> {
             let dispatcher = std::sync::Arc::new(aggregator::ToolDispatcher {
                 agents: dashmap::DashMap::new(),
             });
-
-            // Register agents in dispatcher, restoring proxy backends from SQLite.
-            // Also create per-agent refresh schedulers and spawn reconnect tasks.
-            let mut refresh_senders_map = std::collections::HashMap::new();
-            let mut reconnect_managers_map: std::collections::HashMap<
-                String,
-                tokio::sync::Mutex<right_mcp::reconnect::ReconnectManager>,
-            > = std::collections::HashMap::new();
-            let http_client = match right_mcp::ssrf::hardened_client_builder(
-                right_mcp::ssrf::NetworkPolicy::AllowPrivate,
-            )
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            {
-                Ok(client) => client,
-                Err(error) => {
-                    tracing::error!("MCP reconnect HTTP client build failed: {error:#}");
-                    return Err(miette::miette!(
-                        "MCP reconnect HTTP client build failed: {error:#}"
-                    ));
-                }
-            };
+            let refresh_senders: aggregator::RefreshSenders =
+                std::sync::Arc::new(dashmap::DashMap::new());
+            let reconnect_managers: aggregator::ReconnectManagers =
+                std::sync::Arc::new(dashmap::DashMap::new());
+            let http_client = runtime_builder::build_http_client()
+                .map_err(|error| miette::miette!("{error:#}"))?;
 
             for agent_name in token_entries.keys() {
-                let agent_dir = agents_dir.join(agent_name);
-                let agent_config = right_agent::agent::discovery::parse_agent_config(&agent_dir)
-                    .ok()
-                    .flatten();
-                let right =
-                    right_backend::RightBackend::new(agents_dir.clone(), Some(providers.clone()));
-
-                // Load existing MCP servers from SQLite and create ProxyBackends.
-                // Collect OAuth entries for refresh scheduling.
-                let mut proxies = std::collections::HashMap::new();
-                // Local to this block; extracting a named type alias is out of scope.
-                #[allow(clippy::type_complexity)]
-                let mut oauth_entries: Vec<(
-                    String,
-                    right_mcp::refresh::OAuthServerState,
-                    std::sync::Arc<tokio::sync::RwLock<Option<String>>>,
-                )> = Vec::new();
-                let mut oauth_server_names = std::collections::HashSet::<String>::new();
-
-                match right_db::open_connection(&agent_dir, true).await {
-                    Ok(conn) => match right_mcp::credentials::db_list_servers(&conn).await {
-                        Ok(servers) => {
-                            for s in servers {
-                                let http_headers = if s.auth_type.as_deref() == Some("headers") {
-                                    match right_mcp::credentials::db_list_http_headers(
-                                        &conn, &s.name,
-                                    )
-                                    .await
-                                    {
-                                        Ok(headers) => Some(headers),
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                agent = agent_name.as_str(),
-                                                server = %s.name,
-                                                "failed to load MCP HTTP headers: {e:#}"
-                                            );
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    None
-                                };
-                                let auth_method = restored_mcp_auth_method(
-                                    s.auth_type.as_deref(),
-                                    s.auth_header.as_deref(),
-                                    http_headers,
-                                );
-                                let needs_auth_on_restore = auth_method.is_none();
-                                if needs_auth_on_restore {
-                                    tracing::warn!(
-                                        agent = agent_name.as_str(),
-                                        server = %s.name,
-                                        "MCP HTTP headers missing or empty during startup restore; marking NeedsAuth",
-                                    );
-                                }
-                                let auth_method = auth_method.unwrap_or_default();
-                                let token = std::sync::Arc::new(tokio::sync::RwLock::new(
-                                    s.auth_token.clone(),
-                                ));
-
-                                // Collect OAuth entries before moving token into ProxyBackend.
-                                if s.auth_type.as_deref() == Some("oauth") {
-                                    oauth_server_names.insert(s.name.clone());
-                                    if let (Some(te), Some(cid), Some(exp)) =
-                                        (&s.token_endpoint, &s.client_id, &s.expires_at)
-                                    {
-                                        let expires_at = chrono::DateTime::parse_from_rfc3339(exp)
-                                            .map(|dt| dt.with_timezone(&chrono::Utc))
-                                            .unwrap_or_else(|_| chrono::Utc::now());
-                                        oauth_entries.push((
-                                            s.name.clone(),
-                                            right_mcp::refresh::OAuthServerState {
-                                                refresh_token: s.refresh_token.clone(),
-                                                token_endpoint: te.clone(),
-                                                client_id: cid.clone(),
-                                                client_secret: s.client_secret.clone(),
-                                                expires_at,
-                                                server_url: s.url.clone(),
-                                                resource: s
-                                                    .oauth_resource
-                                                    .as_deref()
-                                                    .filter(|r| !r.trim().is_empty())
-                                                    .map(ToOwned::to_owned)
-                                                    .unwrap_or_else(|| {
-                                                        right_mcp::oauth::canonical_resource_uri(
-                                                            &s.url,
-                                                        )
-                                                        .unwrap_or_else(|_| s.url.clone())
-                                                    }),
-                                            },
-                                            token.clone(),
-                                        ));
-                                    }
-                                }
-
-                                let backend =
-                                    std::sync::Arc::new(right_mcp::proxy::ProxyBackend::new(
-                                        s.name.clone(),
-                                        agent_dir.clone(),
-                                        s.url.clone(),
-                                        token,
-                                        auth_method,
-                                    ));
-                                if needs_auth_on_restore {
-                                    backend
-                                        .set_status(right_mcp::proxy::BackendStatus::NeedsAuth)
-                                        .await;
-                                }
-                                proxies.insert(s.name, backend);
-                            }
-                        }
-                        Err(e) => tracing::error!(
-                            agent = agent_name.as_str(),
-                            "failed to list MCP servers: {e:#}"
-                        ),
-                    },
-                    Err(e) => tracing::error!(
-                        agent = agent_name.as_str(),
-                        "failed to open DB for MCP restore: {e:#}"
-                    ),
-                }
-
-                // Clone proxies for reconnect tasks before moving into registry.
-                let proxies_snapshot: Vec<(
-                    String,
-                    std::sync::Arc<right_mcp::proxy::ProxyBackend>,
-                )> = proxies
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-
-                // Wire up HindsightBackend if memory provider is configured.
-                let hindsight = match &agent_config {
-                    Some(agent_config) => {
-                        if let Some(ref mem_config) = agent_config.memory {
-                            if mem_config.provider
-                                == right_agent::agent::types::MemoryProvider::Hindsight
-                            {
-                                let resolved_key = std::env::var("HINDSIGHT_API_KEY")
-                                    .ok()
-                                    .or_else(|| mem_config.api_key.clone());
-                                if let Some(ref api_key) = resolved_key {
-                                    let bank_id = mem_config
-                                        .bank_id
-                                        .as_deref()
-                                        .unwrap_or(agent_name.as_str());
-                                    let budget = mem_config.recall_budget.to_string();
-                                    let client = right_memory::hindsight::HindsightClient::new(
-                                        api_key,
-                                        bank_id,
-                                        &budget,
-                                        mem_config.recall_max_tokens,
-                                        None,
-                                    );
-                                    let wrapper =
-                                        std::sync::Arc::new(right_memory::ResilientHindsight::new(
-                                            client,
-                                            agent_dir.clone(),
-                                            "aggregator",
-                                        ));
-                                    Some(std::sync::Arc::new(aggregator::HindsightBackend::new(
-                                        wrapper,
-                                    )))
-                                } else {
-                                    tracing::warn!(
-                                        agent = agent_name.as_str(),
-                                        "Hindsight provider configured but no API key found (set HINDSIGHT_API_KEY or memory.api_key in agent.yaml) — memory tools disabled"
-                                    );
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
-
-                let proxies_arc = std::sync::Arc::new(tokio::sync::RwLock::new(proxies));
-                let registry = aggregator::BackendRegistry {
-                    right,
-                    proxies: proxies_arc.clone(),
-                    agent_dir: agent_dir.clone(),
-                    hindsight,
-                };
-                dispatcher.agents.insert(agent_name.clone(), registry);
-
-                // Spawn per-agent refresh scheduler.
-                let (refresh_tx, refresh_rx) =
-                    tokio::sync::mpsc::channel::<right_mcp::refresh::RefreshMessage>(32);
-                tokio::spawn(right_mcp::refresh::run_refresh_scheduler(
-                    agent_dir.clone(),
-                    refresh_rx,
-                ));
-
-                // Spawn per-agent MCP health reconciler — keeps BackendStatus
-                // honest on the Connected↔Unreachable axis so the dashboard and
-                // the agent see accurate status without waiting for a tool call.
-                tokio::spawn(right_mcp::health::run_health_reconciler(
-                    proxies_arc,
+                let runtime = runtime_builder::build_agent_runtime(
+                    agent_name,
+                    agents_dir.join(agent_name),
+                    &agents_dir,
+                    std::sync::Arc::clone(&providers),
                     http_client.clone(),
-                ));
-
-                // Build oauth_map for reconnect loop.
-                let oauth_map: std::collections::HashMap<String, _> = oauth_entries
-                    .into_iter()
-                    .map(|(name, state, token_arc)| (name, (state, token_arc)))
-                    .collect();
-
-                // Send NewEntry for non-expired OAuth servers. Expired tokens
-                // are handled by the reconnect task which sends NewEntry after refresh.
-                for (name, (state, token_arc)) in &oauth_map {
-                    if state.refresh_token.is_none() {
-                        continue;
-                    }
-                    let due_in = right_mcp::refresh::refresh_due_in(state);
-                    if due_in == std::time::Duration::ZERO {
-                        continue;
-                    }
-                    let Some((_, backend)) = proxies_snapshot.iter().find(|(n, _)| n == name)
-                    else {
-                        tracing::warn!(
-                            agent = agent_name.as_str(),
-                            server = name.as_str(),
-                            "OAuth server registered in DB but has no ProxyBackend in snapshot — \
-                             skipping refresh schedule (self-healing invariant violation)",
-                        );
-                        continue;
-                    };
-                    let msg = right_mcp::refresh::RefreshMessage::NewEntry {
-                        server_name: name.clone(),
-                        state: state.clone(),
-                        token: token_arc.clone(),
-                        backend: backend.clone(),
-                    };
-                    if let Err(e) = refresh_tx.send(msg).await {
-                        tracing::warn!(
-                            agent = agent_name.as_str(),
-                            server = name.as_str(),
-                            "failed to send refresh entry: {e:#}",
-                        );
-                    }
-                }
-
-                // Spawn background reconnect tasks (fire-and-forget).
-                let mut reconnect_mgr = right_mcp::reconnect::ReconnectManager::new(
-                    refresh_tx.clone(),
-                    agent_dir.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    miette::miette!("failed to initialize runtime for {agent_name}: {error:#}")
+                })?;
+                db_owners
+                    .insert_bundle(std::sync::Arc::clone(&runtime.bundle))
+                    .await
+                    .map_err(|error| {
+                        miette::miette!("failed to register runtime for {agent_name}: {error:#}")
+                    })?;
+                refresh_senders.insert(agent_name.clone(), runtime.refresh_sender);
+                reconnect_managers.insert(
+                    agent_name.clone(),
+                    tokio::sync::Mutex::new(runtime.reconnect_manager),
                 );
-                for (server_name, backend) in proxies_snapshot {
-                    let http = http_client.clone();
-                    let agent_name_owned = agent_name.clone();
-
-                    if backend.status().await == right_mcp::proxy::BackendStatus::NeedsAuth {
-                        tracing::warn!(
-                            agent = agent_name.as_str(),
-                            server = server_name.as_str(),
-                            "MCP backend restored as NeedsAuth; skipping startup reconnect",
-                        );
-                        continue;
-                    }
-
-                    if let Some((oauth_state, token_arc)) = oauth_map.get(&server_name) {
-                        // OAuth server — check token expiry before connecting.
-                        let due_in = right_mcp::refresh::refresh_due_in(oauth_state);
-                        tracing::info!(
-                            agent = agent_name.as_str(),
-                            server = server_name.as_str(),
-                            due_secs = due_in.as_secs(),
-                            expires_at = %oauth_state.expires_at,
-                            has_refresh_token = oauth_state.refresh_token.is_some(),
-                            "reconnect: checking OAuth token",
-                        );
-                        if due_in == std::time::Duration::ZERO {
-                            // Token expired — try refresh or mark NeedsAuth.
-                            if oauth_state.refresh_token.is_some() {
-                                reconnect_mgr.start_reconnect(
-                                    server_name.clone(),
-                                    backend,
-                                    oauth_state.clone(),
-                                    token_arc.clone(),
-                                    http,
-                                );
-                            } else {
-                                // No refresh_token — cannot refresh.
-                                let b = backend.clone();
-                                tokio::spawn(async move {
-                                    b.set_status(right_mcp::proxy::BackendStatus::NeedsAuth)
-                                        .await;
-                                });
-                            }
-                        } else {
-                            // Token still valid — just connect.
-                            tokio::spawn(async move {
-                                if let Err(e) = backend.connect(http).await {
-                                    tracing::warn!(
-                                        agent = agent_name_owned.as_str(),
-                                        server = server_name.as_str(),
-                                        "reconnect failed: {e:#}",
-                                    );
-                                }
-                            });
-                        }
-                    } else if oauth_server_names.contains(&server_name) {
-                        // OAuth server with incomplete DB fields — cannot refresh.
-                        tracing::warn!(
-                            agent = agent_name.as_str(),
-                            server = server_name.as_str(),
-                            "OAuth server missing token_endpoint/client_id/expires_at — marking NeedsAuth",
-                        );
-                        let b = backend.clone();
-                        tokio::spawn(async move {
-                            b.set_status(right_mcp::proxy::BackendStatus::NeedsAuth)
-                                .await;
-                        });
-                    } else {
-                        // Non-OAuth server — just connect.
-                        tokio::spawn(async move {
-                            if let Err(e) = backend.connect(http).await {
-                                tracing::warn!(
-                                    agent = agent_name_owned.as_str(),
-                                    server = server_name.as_str(),
-                                    "reconnect failed: {e:#}",
-                                );
-                            }
-                        });
-                    }
-                }
-
-                reconnect_managers_map
-                    .insert(agent_name.clone(), tokio::sync::Mutex::new(reconnect_mgr));
-                refresh_senders_map.insert(agent_name.clone(), refresh_tx);
+                dispatcher
+                    .agents
+                    .insert(agent_name.clone(), runtime.registry);
+                runtime.bundle.publish();
             }
-
-            let refresh_senders: aggregator::RefreshSenders =
-                std::sync::Arc::new(refresh_senders_map);
-            let reconnect_managers: aggregator::ReconnectManagers =
-                std::sync::Arc::new(reconnect_managers_map);
 
             aggregator::run_aggregator_http(
                 port,
@@ -1831,6 +1522,7 @@ async fn main() -> miette::Result<()> {
                 providers,
                 refresh_senders,
                 reconnect_managers,
+                db_owners,
                 allowed_hosts,
             )
             .await
@@ -2022,7 +1714,11 @@ fn validate_host_claude() -> miette::Result<PathBuf> {
     ))
 }
 
-async fn persist_claude_setup_token(agent_dir: &Path, token: &str) -> miette::Result<()> {
+async fn persist_claude_setup_token(
+    agent_dir: &Path,
+    token: &str,
+    _guard: &right_agent::runtime::RuntimeExclusionGuard,
+) -> miette::Result<()> {
     let conn = right_db::open_connection(agent_dir, false)
         .await
         .map_err(|error| {
@@ -2034,7 +1730,7 @@ async fn persist_claude_setup_token(agent_dir: &Path, token: &str) -> miette::Re
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_borrow, clippy::too_many_arguments)]
 async fn cmd_init(
     home: &Path,
     telegram_token: Option<&str>,
@@ -2045,6 +1741,7 @@ async fn cmd_init(
     tunnel_provider: &str,
     yes: bool,
     network_policy: Option<right_agent::agent::types::NetworkPolicy>,
+    quiescence_guard: &right_agent::runtime::RuntimeExclusionGuard,
 ) -> miette::Result<()> {
     let interactive = !yes;
     let claude_setup_token = resolve_claude_setup_token(claude_setup_token, interactive)?;
@@ -2336,12 +2033,18 @@ async fn cmd_init(
             },
             heartbeat_path: None,
         };
-        right_codegen::run_agent_codegen(home, std::slice::from_ref(&agent_def), &self_exe, false)?;
+        right_codegen::run_agent_codegen_for_init(
+            home,
+            std::slice::from_ref(&agent_def),
+            &self_exe,
+            false,
+        )?;
         right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false).await?;
+        // The command already owns runtime exclusion for direct database work.
         right_db::open_db(&agent_dir, true)
             .await
             .map_err(|error| miette::miette!("failed to migrate data.db: {error:#}"))?;
-        persist_claude_setup_token(&agent_dir, &claude_setup_token).await?;
+        persist_claude_setup_token(&agent_dir, &claude_setup_token, &quiescence_guard).await?;
 
         // The Agent Sandbox is deliberately not created here. The bot's
         // sandbox supervisor is the sole owner of sandbox lifecycle: it
@@ -2384,7 +2087,7 @@ async fn cmd_init(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_borrow, clippy::too_many_arguments)]
 async fn cmd_agent_init(
     home: &Path,
     name: &str,
@@ -2395,6 +2098,7 @@ async fn cmd_agent_init(
     telegram_token: Option<&str>,
     claude_setup_token: &str,
     telegram_allowed_chat_ids: &[i64],
+    quiescence_guard: &right_agent::runtime::RuntimeExclusionGuard,
 ) -> miette::Result<()> {
     if let Some(t) = telegram_token {
         right_agent::init::validate_telegram_token(t)?;
@@ -2582,6 +2286,7 @@ async fn cmd_agent_init(
                         &backup_path,
                         restore::RestoreBindingMode::Interactive,
                         claude_setup_token,
+                        &quiescence_guard,
                     ))
                 });
             }
@@ -2772,12 +2477,18 @@ async fn cmd_agent_init(
             },
             heartbeat_path: None,
         };
-        right_codegen::run_agent_codegen(home, std::slice::from_ref(&agent_def), &self_exe, false)?;
+        right_codegen::run_agent_codegen_for_init(
+            home,
+            std::slice::from_ref(&agent_def),
+            &self_exe,
+            false,
+        )?;
         right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false).await?;
+        // Nested database work reuses the outer exclusion capability.
         right_db::open_db(&agent_dir, true)
             .await
             .map_err(|error| miette::miette!("failed to migrate data.db: {error:#}"))?;
-        persist_claude_setup_token(&agent_dir, claude_setup_token).await?;
+        persist_claude_setup_token(&agent_dir, claude_setup_token, &quiescence_guard).await?;
     }
 
     // No sandbox is created here: the bot's supervisor create-or-attaches on
@@ -3282,6 +2993,10 @@ async fn cmd_up(
         "up: verify_dependencies"
     );
     t_phase = std::time::Instant::now();
+    // Exclude every offline direct database command from the entire startup
+    // publication window. The guard is released only after process-compose is
+    // reachable; offline commands recheck runtime state while holding this same lock.
+    let startup_guard = right_agent::runtime::acquire_runtime_exclusion(home).await?;
 
     let run_dir = home.join("run");
 
@@ -3314,14 +3029,16 @@ async fn cmd_up(
     }
     let mut agents = discovery.agents;
 
-    // An existing process or occupied runtime port must short-circuit before
-    // readiness performs network probes, prompts, or repair mutations.
+    // Validate the mandatory global configuration before the fixed-port probe
+    // so an isolated, misconfigured home reports its own actionable error even
+    // if another Right home is already running. Runtime availability still
+    // precedes network-backed agent readiness and interactive repair.
+    right_config::read_global_config(home)?;
     run_up_preflight(
         || ensure_up_runtime_available(home),
         || validate_up_readiness(home, &agents, non_interactive, discovery.issues),
     )
     .await?;
-    // Interactive readiness repair may have changed an agent token in YAML.
     // Reload before codegen so the launched configuration is the validated one.
     if !non_interactive {
         let refreshed = discover_up_agents(&agents_dir, agents_filter.as_deref())?;
@@ -3443,6 +3160,7 @@ async fn cmd_up(
         client.health_check().await.map_err(|e| {
             miette::miette!("process-compose started but health check failed: {e:#}")
         })?;
+        drop(startup_guard);
 
         println!(
             "right started in background ({} agent(s)). Use `right attach` to view TUI.",
@@ -3452,10 +3170,21 @@ async fn cmd_up(
         // Drop child handle without killing -- it's detached.
         drop(child);
     } else {
-        let status = cmd
-            .status()
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| miette::miette!("failed to spawn process-compose: {e:#}"))?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let client = right_agent::runtime::PcClient::from_home(home)?.ok_or_else(|| {
+            miette::miette!("runtime state missing after codegen — refusing to health-check")
+        })?;
+        client.health_check().await.map_err(|e| {
+            miette::miette!("process-compose started but health check failed: {e:#}")
+        })?;
+        drop(startup_guard);
+        let status = child
+            .wait()
             .await
-            .map_err(|e| miette::miette!("failed to run process-compose: {e:#}"))?;
+            .map_err(|e| miette::miette!("failed to wait for process-compose: {e:#}"))?;
 
         if !status.success() {
             return Err(miette::miette!(
@@ -3848,12 +3577,33 @@ where
     cleanup_failed_restore_agent_dir(&plan.agent_dir)
 }
 
+async fn open_provider_store_for_restore(
+    home: &Path,
+    _quiescence_guard: &right_agent::runtime::RuntimeExclusionGuard,
+) -> miette::Result<right_providers::ProviderStore> {
+    right_providers::ProviderStore::open(home)
+        .await
+        .map_err(|error| miette::miette!("open provider store: {error:#}"))
+}
+
+async fn migrate_restored_agent_db(
+    agent_dir: &Path,
+    _quiescence_guard: &right_agent::runtime::RuntimeExclusionGuard,
+) -> miette::Result<()> {
+    right_db::open_db(agent_dir, true)
+        .await
+        .map_err(|error| miette::miette!("failed to migrate restored data.db: {error:#}"))?;
+    Ok(())
+}
+
+#[allow(clippy::needless_borrow)]
 async fn cmd_agent_restore(
     home: &Path,
     agent_name: &str,
     backup_path: &Path,
     restore_binding_mode: restore::RestoreBindingMode,
     claude_setup_token: &str,
+    quiescence_guard: &right_agent::runtime::RuntimeExclusionGuard,
 ) -> miette::Result<()> {
     use miette::IntoDiagnostic;
 
@@ -4004,9 +3754,7 @@ async fn cmd_agent_restore(
         let restored_config = agent_def.config.as_ref().ok_or_else(|| {
             miette::miette!("restored agent.yaml is missing before sandbox create")
         })?;
-        let providers = right_providers::ProviderStore::open(home)
-            .await
-            .map_err(|error| miette::miette!("open provider store: {error:#}"))?;
+        let providers = open_provider_store_for_restore(home, &quiescence_guard).await?;
         // Serialize restore bring-up against the bot's sandbox supervisor,
         // which reads credentials and applies them under this same per-agent
         // lock. The spec build below resolves every declared provider's
@@ -4015,7 +3763,7 @@ async fn cmd_agent_restore(
         let _provider_guard = providers.agent_lock(agent_name).await.map_err(|error| {
             miette::miette!("lock provider store for agent {agent_name}: {error:#}")
         })?;
-        let spec = right_bot::agent_sandbox_spec_for(
+        let spec = right_bot::agent_sandbox_spec_for_offline(
             agent_name,
             &new_sandbox_name,
             restored_config,
@@ -4104,14 +3852,12 @@ async fn cmd_agent_restore(
                 .render(theme)
         );
 
-        right_db::open_db(&agent_dir, true)
-            .await
-            .map_err(|error| miette::miette!("failed to migrate restored data.db: {error:#}"))?;
-        persist_claude_setup_token(&agent_dir, claude_setup_token).await?;
+        migrate_restored_agent_db(&agent_dir, &quiescence_guard).await?;
+        persist_claude_setup_token(&agent_dir, claude_setup_token, &quiescence_guard).await?;
         let restored_agent = right_agent::agent::discover_single_agent(&agent_dir)?;
         let self_exe = std::env::current_exe()
             .map_err(|error| miette::miette!("failed to resolve self exe: {error:#}"))?;
-        right_codegen::run_agent_codegen(
+        right_codegen::run_agent_codegen_for_init(
             home,
             std::slice::from_ref(&restored_agent),
             &self_exe,
@@ -4524,6 +4270,7 @@ async fn cmd_agent_backup(
     if !sandbox_only {
         copy_agent_backup_config_files(&agent_dir, &backup_dir)?;
 
+        let _quiescence_guard = runtime_quiescence::require_runtime_quiesced(home).await?;
         let db_path = agent_dir.join("data.db");
         if db_path.exists() {
             let backup_db = backup_dir.join("data.db");
@@ -4792,43 +4539,31 @@ async fn cmd_agent_skill_list(home: &Path) -> miette::Result<()> {
         println!("No learned skills.");
         return Ok(());
     }
-
-    let mut agent_dirs = Vec::new();
-    for entry in std::fs::read_dir(&agents_dir)
+    let socket_path = home.join("run/internal.sock");
+    let client = right_mcp::internal_client::InternalClient::new(&socket_path);
+    let mut agent_names = std::fs::read_dir(&agents_dir)
         .map_err(|e| miette::miette!("cannot read agents dir: {e:#}"))?
-    {
-        let path = entry
-            .map_err(|e| miette::miette!("cannot read agents dir entry: {e:#}"))?
-            .path();
-        if path.is_dir() {
-            agent_dirs.push(path);
-        }
-    }
-    agent_dirs.sort();
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect::<Vec<_>>();
+    agent_names.sort();
 
     let mut any = false;
-    for agent_dir in agent_dirs {
-        let db_path = agent_dir.join("data.db");
-        if !db_path.is_file() {
-            continue;
-        }
-        let agent_name = agent_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| miette::miette!("invalid agent dir name: {}", agent_dir.display()))?;
-        let conn = right_db::open_connection_readonly(&agent_dir)
-            .await
-            .map_err(|e| miette::miette!("open lifecycle db for {agent_name}: {e:#}"))?;
-        let rows = right_lifecycle::list(&conn)
+    for agent_name in agent_names {
+        let response = client
+            .skill_lifecycle_list(&right_mcp::internal_db::SkillLifecycleListRequest {
+                agent: agent_name.clone(),
+            })
             .await
             .map_err(|e| miette::miette!("list lifecycle rows for {agent_name}: {e:#}"))?;
-        for row in rows {
+        for row in response.rows {
             println!(
                 "{agent_name}\t{}\tstate={}\tpinned={}\tcreated_by={}\tuses={}\tpatches={}",
                 row.skill_name,
-                row.state.as_db_str(),
+                row.state,
                 row.pinned,
-                row.created_by.as_db_str(),
+                row.created_by,
                 row.use_count,
                 row.patch_count
             );
@@ -5058,10 +4793,11 @@ mod tests {
         cleanup_failed_restore_agent_dir, cleanup_failed_restore_with,
         copy_agent_backup_config_files, copy_agent_restore_config_files,
         copy_database_snapshot_for_restore, discover_up_agents, non_interactive_readiness_result,
-        remove_database_sidecars, resolve_agent_db, restore_recap, restored_mcp_auth_method,
-        run_up_preflight, truncate_content, validate_agent_readiness_with,
-        validate_configured_tunnel_with, write_managed_settings,
+        remove_database_sidecars, resolve_agent_db, restore_recap, run_up_preflight,
+        truncate_content, validate_agent_readiness_with, validate_configured_tunnel_with,
+        write_managed_settings,
     };
+    use crate::runtime_builder;
 
     use right_agent_config::{AgentConfig, SandboxConfig};
     use std::fs;
@@ -5401,7 +5137,7 @@ mod tests {
     #[test]
     fn restored_mcp_auth_method_fails_closed_for_missing_header_secrets() {
         assert!(
-            restored_mcp_auth_method(Some("headers"), None, None).is_none(),
+            runtime_builder::restored_mcp_auth_method(Some("headers"), None, None).is_none(),
             "headers auth must not restore as an unauthenticated backend when secrets fail to load"
         );
     }
@@ -5409,7 +5145,8 @@ mod tests {
     #[test]
     fn restored_mcp_auth_method_fails_closed_for_empty_header_secrets() {
         assert!(
-            restored_mcp_auth_method(Some("headers"), None, Some(Vec::new())).is_none(),
+            runtime_builder::restored_mcp_auth_method(Some("headers"), None, Some(Vec::new()))
+                .is_none(),
             "headers auth must not restore as an unauthenticated backend with no stored headers"
         );
     }
@@ -5421,7 +5158,11 @@ mod tests {
                 .unwrap();
 
         assert_eq!(
-            restored_mcp_auth_method(Some("headers"), None, Some(vec![header.clone()])),
+            runtime_builder::restored_mcp_auth_method(
+                Some("headers"),
+                None,
+                Some(vec![header.clone()]),
+            ),
             Some(right_mcp::proxy::AuthMethod::Headers(vec![header]))
         );
     }
@@ -6202,16 +5943,24 @@ groups:
     }
 
     #[tokio::test]
-    async fn cmd_mcp_status_returns_ok_with_no_mcp_json() {
+    async fn cmd_mcp_status_fails_when_runtime_owner_is_unavailable() {
         use super::cmd_mcp_status;
         let tmp = TempDir::new().unwrap();
         let agent_dir = tmp.path().join("agents").join("myagent");
         fs::create_dir_all(&agent_dir).unwrap();
-        // CLI commands expect a pre-migrated DB (aggregator migrates at startup).
-        right_db::open_db(&agent_dir, true).await.unwrap();
 
-        let result = cmd_mcp_status(tmp.path(), Some("myagent")).await;
-        assert!(result.is_ok(), "should succeed when mcp.json absent");
+        let error = cmd_mcp_status(tmp.path(), Some("myagent"))
+            .await
+            .expect_err("MCP status must not fall back to a direct database open");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("list MCP servers") || message.contains("internal"),
+            "error must identify unavailable owner IPC: {message}"
+        );
+        assert!(
+            !agent_dir.join("data.db").exists(),
+            "MCP status must not create data.db when the owner is unavailable"
+        );
     }
 }
 
@@ -6267,7 +6016,18 @@ fn format_size(bytes: u64) -> String {
 /// Resolve agent directory and open its memory database.
 ///
 /// Returns a live `Connection` or a fatal miette error.
-async fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<right_db::Connection> {
+struct OfflineAgentDb {
+    _quiescence_guard: right_agent::runtime::RuntimeExclusionGuard,
+    connection: right_db::Connection,
+}
+impl std::fmt::Debug for OfflineAgentDb {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OfflineAgentDb { .. }")
+    }
+}
+
+/// Resolve an agent database for commands that are explicitly offline-only.
+async fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<OfflineAgentDb> {
     let agent_path = right_config::agents_dir(home).join(agent);
     if !agent_path.exists() {
         return Err(miette::miette!(
@@ -6283,9 +6043,14 @@ async fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<right_db::
             agent
         ));
     }
-    right_db::open_connection(&agent_path, false)
+    let quiescence_guard = runtime_quiescence::require_runtime_quiesced(home).await?;
+    let connection = right_db::open_connection(&agent_path, false)
         .await
-        .map_err(|e| miette::miette!("failed to open data.db for '{}': {e:#}", agent))
+        .map_err(|e| miette::miette!("failed to open data.db for '{}': {e:#}", agent))?;
+    Ok(OfflineAgentDb {
+        _quiescence_guard: quiescence_guard,
+        connection,
+    })
 }
 
 async fn cmd_memory_list(
@@ -6295,7 +6060,8 @@ async fn cmd_memory_list(
     offset: i64,
     json: bool,
 ) -> miette::Result<()> {
-    let conn = resolve_agent_db(home, agent).await?;
+    let db = resolve_agent_db(home, agent).await?;
+    let conn = &db.connection;
     let mut stmt = conn
         .prepare(
             "SELECT id, content, tags, stored_by, created_at \
@@ -6381,7 +6147,8 @@ async fn cmd_memory_list(
 
 async fn cmd_memory_stats(home: &Path, agent: &str, json: bool) -> miette::Result<()> {
     // resolve_agent_db validates agent dir and data.db existence before opening.
-    let conn = resolve_agent_db(home, agent).await?;
+    let db = resolve_agent_db(home, agent).await?;
+    let conn = &db.connection;
 
     // db_path needed only for fs metadata (file size) — derive from home, not conn.
     let db_path = right_config::agents_dir(home).join(agent).join("data.db");
@@ -6428,7 +6195,8 @@ async fn cmd_memory_search(
     offset: i64,
     json: bool,
 ) -> miette::Result<()> {
-    let conn = resolve_agent_db(home, agent).await?;
+    let db = resolve_agent_db(home, agent).await?;
+    let conn = &db.connection;
     let search_err = |e: right_db::DbError| {
         miette::miette!(
             help = "Full-text search uses Turso MATCH syntax: use simple words or phrases.",
@@ -6514,7 +6282,8 @@ async fn cmd_memory_delete(home: &Path, agent: &str, id: i64) -> miette::Result<
     use right_db::OptionalExtension;
     use std::io::{self, Write};
 
-    let conn = resolve_agent_db(home, agent).await?;
+    let db = resolve_agent_db(home, agent).await?;
+    let conn = &db.connection;
 
     // Check soft-deleted rows too (hard-delete works on any existing row).
     let any_row: Option<(String, Option<String>)> = conn
@@ -6655,39 +6424,37 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
 
 async fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()> {
     let agents_dir = right_config::agents_dir(home);
-    // Collect agent dirs -- either all or filtered to one
-    let entries: Vec<std::path::PathBuf> = if let Some(name) = agent_filter {
+    let mut agent_names = if let Some(name) = agent_filter {
         let dir = agents_dir.join(name);
         if !dir.is_dir() {
             return Err(miette::miette!("agent not found: {name}"));
         }
-        vec![dir]
+        vec![name.to_owned()]
     } else {
-        let rd = std::fs::read_dir(&agents_dir)
-            .map_err(|e| miette::miette!("cannot read agents dir: {e:#}"))?;
-        let mut dirs: Vec<_> = rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect();
-        dirs.sort();
-        dirs
+        let mut names = std::fs::read_dir(&agents_dir)
+            .map_err(|e| miette::miette!("cannot read agents dir: {e:#}"))?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
     };
+    agent_names.sort();
 
+    let client = right_mcp::internal_client::InternalClient::new(home.join("run/internal.sock"));
     let mut any = false;
-    for agent_dir in &entries {
-        let agent_name = agent_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("?");
-        let conn = right_db::open_connection(agent_dir, false)
+    for agent_name in agent_names {
+        let response = client
+            .mcp_list(&agent_name)
             .await
-            .map_err(|e| miette::miette!("open data.db for {agent_name}: {e:#}"))?;
-        let servers = right_mcp::credentials::db_list_servers(&conn)
-            .await
-            .map_err(|e| miette::miette!("db_list_servers for {agent_name}: {e:#}"))?;
-        for s in &servers {
-            println!("{agent_name}  {} [{}]", s.name, s.url);
+            .map_err(|e| miette::miette!("list MCP servers for {agent_name}: {e:#}"))?;
+        for server in response.servers {
+            println!(
+                "{agent_name}  {} [{}]",
+                server.name,
+                server.url.as_deref().unwrap_or("-")
+            );
             any = true;
         }
     }

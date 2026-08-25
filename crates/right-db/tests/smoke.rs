@@ -1,8 +1,9 @@
 use right_db::{MIGRATIONS, open_connection, open_connection_readonly, open_db};
 use tempfile::tempdir;
 
-const MULTIPROCESS_OPEN_CHILD_TEST: &str = "multiprocess_open_child_can_read_existing_db";
-const MULTIPROCESS_OPEN_ENV: &str = "RIGHT_DB_MULTIPROCESS_AGENT_DIR";
+const CONCURRENT_WRITER_CHILD_TEST: &str =
+    "second_process_cannot_write_while_owner_connection_is_live";
+const CONCURRENT_WRITER_ENV: &str = "RIGHT_DB_CONCURRENT_WRITER_AGENT_DIR";
 
 #[tokio::test]
 async fn open_db_creates_file() {
@@ -70,40 +71,79 @@ async fn open_connection_without_migration_preserves_existing_schema() {
 }
 
 #[tokio::test]
-async fn open_connection_allows_second_process_while_parent_connection_alive() {
+async fn standard_local_write_read_reopen_without_tshm() {
     let dir = tempdir().unwrap();
-    let _parent = open_connection(dir.path(), true).await.unwrap();
+    let conn = open_connection(dir.path(), true).await.unwrap();
+    conn.execute_batch("CREATE TABLE standard_local_probe (value TEXT NOT NULL)")
+        .await
+        .unwrap();
+    conn.execute(
+        "INSERT INTO standard_local_probe (value) VALUES (?1)",
+        ["persisted"],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let reopened = open_connection(dir.path(), false).await.unwrap();
+    let value: String = reopened
+        .query_row("SELECT value FROM standard_local_probe", (), |row| {
+            row.get(0)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(value, "persisted");
+    assert!(
+        !dir.path().join("data.db-tshm").exists(),
+        "standard local mode must never create the legacy multiprocess -tshm sidecar"
+    );
+}
+
+#[tokio::test]
+async fn second_process_cannot_become_a_concurrent_writer() {
+    let dir = tempdir().unwrap();
+    let owner = open_connection(dir.path(), true).await.unwrap();
+    owner
+        .execute_batch("CREATE TABLE concurrent_writer_probe (value TEXT NOT NULL)")
+        .await
+        .unwrap();
 
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .arg(MULTIPROCESS_OPEN_CHILD_TEST)
+        .arg(CONCURRENT_WRITER_CHILD_TEST)
         .arg("--exact")
         .arg("--nocapture")
-        .env(MULTIPROCESS_OPEN_ENV, dir.path())
+        .env(CONCURRENT_WRITER_ENV, dir.path())
         .output()
         .unwrap();
 
     assert!(
         output.status.success(),
-        "child process failed to open the live parent DB\nstdout:\n{}\nstderr:\n{}",
+        "child process unexpectedly became a concurrent writer\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }
 
 #[tokio::test]
-async fn multiprocess_open_child_can_read_existing_db() {
-    let Some(agent_dir) = std::env::var_os(MULTIPROCESS_OPEN_ENV) else {
+async fn second_process_cannot_write_while_owner_connection_is_live() {
+    let Some(agent_dir) = std::env::var_os(CONCURRENT_WRITER_ENV) else {
         return;
     };
 
-    let conn = open_connection(std::path::Path::new(&agent_dir), false)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        query_table_count(&conn, "sessions").await,
-        1,
-        "child process should read schema from parent-opened database"
+    let error = match open_connection(std::path::Path::new(&agent_dir), false).await {
+        Ok(conn) => conn
+            .execute(
+                "INSERT INTO concurrent_writer_probe (value) VALUES (?1)",
+                ["unsupported-second-writer"],
+            )
+            .await
+            .expect_err("a second process must not become a supported concurrent writer"),
+        Err(error) => error,
+    };
+    assert!(
+        error.is_transient() || error.is_open_error(),
+        "second-process rejection must be an open or lock-contention error: {error:#}"
     );
 }
 
@@ -134,19 +174,71 @@ async fn open_connection_async_api_works_inside_tokio_runtime() {
 }
 
 #[tokio::test]
-async fn open_connection_readonly_missing_db_returns_error() {
+async fn open_connection_readonly_missing_db_creates_no_files() {
     let dir = tempdir().unwrap();
     let err = open_connection_readonly(dir.path())
         .await
         .expect_err("missing db should not open");
 
+    let created = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
     assert!(
-        !dir.path().join("data.db").exists(),
-        "readonly open must not create data.db",
+        created.is_empty(),
+        "readonly open must not create database or sidecar files: {created:?}"
     );
     assert!(
         err.is_open_error(),
         "expected readonly open failure, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn open_connection_readonly_existing_db_creates_no_sidecars() {
+    let dir = tempdir().unwrap();
+    let writable = open_connection(dir.path(), true).await.unwrap();
+    writable
+        .execute(
+            "INSERT INTO auth_tokens (token) VALUES (?1)",
+            ["readonly-sidecar-probe"],
+        )
+        .await
+        .unwrap();
+    writable
+        .query_all("PRAGMA wal_checkpoint(TRUNCATE)", (), |_| Ok(()))
+        .await
+        .unwrap();
+    drop(writable);
+
+    for suffix in ["-wal", "-shm", "-tshm"] {
+        let sidecar = dir.path().join(format!("data.db{suffix}"));
+        if sidecar.exists() {
+            std::fs::remove_file(&sidecar).unwrap();
+        }
+    }
+
+    let readonly = open_connection_readonly(dir.path()).await.unwrap();
+    let count: i64 = readonly
+        .query_one(
+            "SELECT COUNT(*) FROM auth_tokens WHERE token = ?1",
+            ["readonly-sidecar-probe"],
+            |row| row.get(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+
+    let created_sidecars = ["-wal", "-shm", "-tshm"]
+        .into_iter()
+        .filter_map(|suffix| {
+            let path = dir.path().join(format!("data.db{suffix}"));
+            path.exists().then_some(path)
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        created_sidecars.is_empty(),
+        "readonly open must not create sidecars: {created_sidecars:?}",
     );
 }
 

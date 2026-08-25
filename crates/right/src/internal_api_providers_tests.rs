@@ -692,10 +692,9 @@ mod handler_tests {
         agents.insert("hostagent".into(), registry);
         let dispatcher = Arc::new(crate::aggregator::ToolDispatcher { agents });
 
-        let refresh_senders: crate::aggregator::RefreshSenders =
-            Arc::new(std::collections::HashMap::new());
+        let refresh_senders: crate::aggregator::RefreshSenders = Arc::new(dashmap::DashMap::new());
         let reconnect_managers: crate::aggregator::ReconnectManagers =
-            Arc::new(std::collections::HashMap::new());
+            Arc::new(dashmap::DashMap::new());
 
         let token_map_path = tmp.join("agent-tokens.json");
         std::fs::write(
@@ -718,15 +717,16 @@ mod handler_tests {
         let providers = right_providers::ProviderStore::open(tmp)
             .await
             .expect("temp provider store");
-        crate::internal_api::internal_router(
+        crate::internal_api::internal_router(crate::internal_api::InternalRouterDeps {
             dispatcher,
             refresh_senders,
             reconnect_managers,
             token_map,
+            db_owners: crate::db_owner::DbOwnerRegistry::new(),
             token_map_path,
             agents_dir,
-            Arc::new(providers),
-        )
+            providers: Arc::new(providers),
+        })
     }
 
     /// Build a minimal `InternalState` rooted at `tmp/agents` with a store in
@@ -755,10 +755,9 @@ mod handler_tests {
         agents.insert("hostagent".into(), registry);
         let dispatcher = Arc::new(crate::aggregator::ToolDispatcher { agents });
 
-        let refresh_senders: crate::aggregator::RefreshSenders =
-            Arc::new(std::collections::HashMap::new());
+        let refresh_senders: crate::aggregator::RefreshSenders = Arc::new(dashmap::DashMap::new());
         let reconnect_managers: crate::aggregator::ReconnectManagers =
-            Arc::new(std::collections::HashMap::new());
+            Arc::new(dashmap::DashMap::new());
 
         let token_map_path = tmp.join("agent-tokens.json");
         std::fs::write(
@@ -781,15 +780,16 @@ mod handler_tests {
         let providers = right_providers::ProviderStore::open(tmp)
             .await
             .expect("temp provider store");
-        crate::internal_api::InternalState::new_for_test(
+        crate::internal_api::InternalState::new(crate::internal_api::InternalRouterDeps {
             dispatcher,
             refresh_senders,
             reconnect_managers,
             token_map,
+            db_owners: crate::db_owner::DbOwnerRegistry::new(),
             token_map_path,
             agents_dir,
-            providers,
-        )
+            providers: std::sync::Arc::new(providers),
+        })
     }
 
     #[tokio::test]
@@ -1108,7 +1108,7 @@ mod handler_tests {
         // sleep between read and write, widening the race window.
         let agent_yaml = state.agents_dir.join("hostagent").join("agent.yaml");
         let mut tasks = Vec::with_capacity(N);
-        for entry in entries.iter().cloned() {
+        for entry in entries.clone() {
             let state = state.clone();
             let agent_yaml = agent_yaml.clone();
             tasks.push(tokio::spawn(async move {
