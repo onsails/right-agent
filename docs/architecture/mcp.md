@@ -435,11 +435,14 @@ for any direct UDS caller). The bot route also rejects empty/whitespace posts
 and posts over 4096 chars before any send. The tool is hidden from
 background/delivery/reflection turns via `disallow_channel_post` at those call
 sites — deliberately NOT in the shared `disallow_foreground_only_tools*`
-chains, which cron uses. Delivered posts are archived as assistant rows
-(preserving the Telegram message_id) so `channel_read` sees the agent's own
-posts; an archive failure after a successful Telegram send returns an explicit
-`published but archive failed` error (HTTP 502 with the message_id) instead of
-silent success.
+chains, which cron uses. Channel post text is sent through Telegram Bot API
+Rich Markdown (`sendRichMessage`) without local HTML conversion; deterministic
+pre-delivery formatting rejections retry once as a regular plain message with
+the unchanged original Markdown, while ambiguous network/5xx/timeout failures
+do not retry. Delivered posts are archived as assistant rows (preserving the
+Telegram message_id) so `channel_read` sees the agent's own posts; an archive
+failure after a successful Telegram send returns an explicit `published but
+archive failed` error (HTTP 502 with the message_id) instead of silent success.
 
 ## Learned Skill MCP Tools
 

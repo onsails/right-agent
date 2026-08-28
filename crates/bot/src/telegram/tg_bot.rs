@@ -9,8 +9,8 @@
 //!   the limits teloxide's `Throttle` adaptor used to enforce.
 //! - A cached `get_me` identity resolved once at [`RightBot::connect`] time,
 //!   replacing teloxide's `CacheMe` adaptor.
-//! - Uniform defaults: HTML parse-mode for our message/edit helpers, optional
-//!   thread-id threading, single 429 retry honoring `retry_after`.
+//! - Uniform defaults for regular messages: HTML parse mode, optional thread-id
+//!   threading, and bounded 429 retry; channel Rich Markdown stays unconverted.
 //!
 //! Sibling `telegram::*` modules call into [`RightBot`] rather than touching
 //! `frankenstein` directly.
@@ -32,6 +32,7 @@ use frankenstein::ParseMode;
 use frankenstein::client_reqwest::Bot as FBot;
 use frankenstein::input_file::{FileUpload, InputFile};
 use frankenstein::input_media::MediaGroupInputMedia;
+use frankenstein::rich_message::InputRichMessage;
 use frankenstein::types::{
     AllowedUpdate, BotCommand, BotCommandScope, ChatAction, ChatMember, InlineKeyboardButton,
     InlineKeyboardMarkup, MenuButton, MenuButtonWebApp, Message, ReplyMarkup, ReplyParameters,
@@ -344,6 +345,7 @@ fn placeholder_user() -> User {
         can_join_groups: None,
         can_read_all_group_messages: None,
         supports_guest_queries: None,
+        supports_join_request_queries: None,
         supports_inline_queries: None,
         can_connect_to_business: None,
         has_main_web_app: None,
@@ -502,6 +504,27 @@ impl RightBot {
             .maybe_reply_markup(markup.map(ReplyMarkup::InlineKeyboardMarkup))
             .build();
         let resp = with_retry_text(|| self.bot.send_message(&params)).await?;
+        Ok(resp.result)
+    }
+
+    /// Send Telegram Bot API Rich Markdown without converting it to HTML.
+    /// Throttling and bounded 429 retry behavior match regular text sends.
+    pub(crate) async fn send_rich_markdown(
+        &self,
+        chat_id: i64,
+        markdown: &str,
+        thread: Option<i32>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let rich_message = InputRichMessage::builder()
+            .markdown(markdown.to_owned())
+            .build();
+        let params = frankenstein::methods::SendRichMessageParams::builder()
+            .chat_id(chat_id)
+            .rich_message(rich_message)
+            .maybe_message_thread_id(thread)
+            .build();
+        let resp = with_retry_text(|| self.bot.send_rich_message(&params)).await?;
         Ok(resp.result)
     }
 
@@ -1343,6 +1366,68 @@ mod with_retry_tests {
         )
         .await;
         assert!(matches!(result, Ok(7)));
+    }
+}
+
+#[cfg(test)]
+mod rich_markdown_tests {
+    use super::*;
+    use axum::Router;
+    use axum::body::Bytes;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+
+    const RISKOFF_CHANNEL_POST: &str = "🔍🐳 #HYPE #Hyperliquid Wallet Lora has topped $100M in total losses on Hyperliquid: it sold part of a 144.58K $HYPE (~$12.1M) transfer and unstaked another 274.93K $HYPE (~$23.12M) batch for sale, still holding 166.97K $HYPE (~$14M) to offload. Its $51.5M $HYPE short carries an unrealized loss of ~$18.5M.";
+
+    #[tokio::test]
+    async fn riskoff_channel_post_uses_telegram_rich_markdown_without_html_conversion() {
+        let (body_tx, mut body_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/botTEST-TOKEN/sendRichMessage",
+            post(move |body: Bytes| {
+                let body_tx = body_tx.clone();
+                async move {
+                    body_tx
+                        .send(body)
+                        .expect("test must receive request body");
+                    (
+                        StatusCode::OK,
+                        r#"{"ok":true,"result":{"message_id":321,"date":0,"chat":{"id":-1001234567890,"type":"channel"}}}"#,
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Telegram API");
+        let address = listener.local_addr().expect("read mock API address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock Telegram API");
+        });
+        let bot = RightBot::new_for_test(format!("http://{address}/botTEST-TOKEN"));
+
+        let message = bot
+            .send_rich_markdown(-1001234567890, RISKOFF_CHANNEL_POST, None)
+            .await
+            .expect("Rich Markdown send must succeed");
+
+        assert_eq!(message.message_id, 321);
+        let body = body_rx.recv().await.expect("receive captured request body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("decode Telegram request JSON");
+        assert_eq!(
+            payload["rich_message"]["markdown"], RISKOFF_CHANNEL_POST,
+            "Telegram must receive the exact original Markdown"
+        );
+        assert_eq!(RISKOFF_CHANNEL_POST.matches('~').count(), 4);
+        assert!(payload.get("parse_mode").is_none());
+        let raw_body = std::str::from_utf8(&body).expect("request body is UTF-8");
+        assert!(!raw_body.contains("<s>"));
+        assert!(!raw_body.contains("HTML"));
     }
 }
 

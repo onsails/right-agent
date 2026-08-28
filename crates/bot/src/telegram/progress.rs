@@ -275,6 +275,48 @@ async fn send_text_message(
     }
 }
 
+fn is_retryable_rich_markdown_format_error(err: &TgError) -> bool {
+    let TgError::Api(frankenstein::Error::Api(response)) = err else {
+        return false;
+    };
+    if response.error_code != 400 {
+        return false;
+    }
+    let description = response.description.to_ascii_lowercase();
+    description.contains("parse") || description.contains("too long")
+}
+
+/// Channel-only Markdown delivery through Telegram's Rich Message parser.
+/// A deterministic pre-delivery formatting rejection falls back once to a
+/// regular plain message containing the unchanged original Markdown. Bounded
+/// 429 retries remain internal to `RightBot`; network, timeout, and 5xx failures
+/// never trigger the plain fallback.
+async fn send_channel_post_text(
+    bot: &super::BotType,
+    chat_id: i64,
+    markdown: &str,
+) -> Result<Result<frankenstein::types::Message, TgError>, tokio::time::error::Elapsed> {
+    let outcome = tokio::time::timeout(
+        PROGRESS_SEND_TIMEOUT,
+        bot.send_rich_markdown(chat_id, markdown, None),
+    )
+    .await;
+    match outcome {
+        Ok(Err(e)) if is_retryable_rich_markdown_format_error(&e) => {
+            tracing::warn!(
+                chat_id,
+                "Rich Markdown channel post failed, retrying original text as plain text: {e:#}",
+            );
+            tokio::time::timeout(
+                PROGRESS_SEND_TIMEOUT,
+                bot.send_message_opts(chat_id, markdown, false, None, None, None),
+            )
+            .await
+        }
+        other => other,
+    }
+}
+
 /// Standalone rich-message delivery: optional text content plus zero or more
 /// attachments, sent to the invocation's chat/thread. Reuses `send_text_message`
 /// for text and `attachments::send_attachments` for files.
@@ -464,14 +506,9 @@ async fn handle_channel_post(
         return fail(StatusCode::BAD_REQUEST, "channel_not_opened".to_owned());
     }
 
-    // Reuse the ordinary Markdown renderer and its safe plain-text retry, but
-    // direct the send to the validated channel without a forum thread.
-    let channel_target = ProgressTarget {
-        chat_id: req.chat_id,
-        thread_id: 0,
-        ..target.clone()
-    };
-    match send_text_message(&state.bot, &channel_target, &req.text).await {
+    // Channel posts alone use Telegram's Rich Markdown parser. Deterministic
+    // formatting rejection falls back to the unchanged original text.
+    match send_channel_post_text(&state.bot, req.chat_id, &req.text).await {
         Ok(Ok(message)) => {
             if let Err(e) = crate::telegram::archive::archive_outbound_channel_post(
                 &target.agent_dir,
@@ -992,5 +1029,125 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn channel_rich_markdown_format_rejection_retries_original_text_as_plain_message() {
+        use axum::Router;
+        use axum::body::Bytes;
+        use axum::response::IntoResponse as _;
+        use axum::routing::post;
+
+        const ORIGINAL: &str = "Original *Markdown* with ~$18.5M and <literal>";
+        let (plain_tx, mut plain_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new()
+            .route(
+                "/botTEST-TOKEN/sendRichMessage",
+                post(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        r#"{"ok":false,"error_code":400,"description":"Bad Request: can't parse rich Markdown"}"#,
+                    )
+                        .into_response()
+                }),
+            )
+            .route(
+                "/botTEST-TOKEN/sendMessage",
+                post(move |body: Bytes| {
+                    let plain_tx = plain_tx.clone();
+                    async move {
+                        plain_tx
+                            .send(body)
+                            .expect("test must receive plain fallback request");
+                        (
+                            StatusCode::OK,
+                            r#"{"ok":true,"result":{"message_id":654,"date":0,"chat":{"id":-1001234567890,"type":"channel"}}}"#,
+                        )
+                            .into_response()
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Telegram API");
+        let address = listener.local_addr().expect("read mock API address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock Telegram API");
+        });
+        let bot = crate::telegram::tg_bot::RightBot::new_for_test(format!(
+            "http://{address}/botTEST-TOKEN"
+        ));
+
+        let message = send_channel_post_text(&bot, -1001234567890, ORIGINAL)
+            .await
+            .expect("send must not time out")
+            .expect("plain fallback must succeed");
+
+        assert_eq!(message.message_id, 654);
+        let body = plain_rx.recv().await.expect("receive plain fallback body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("decode plain fallback JSON");
+        assert_eq!(payload["text"], ORIGINAL);
+        assert!(payload.get("parse_mode").is_none());
+    }
+
+    #[tokio::test]
+    async fn channel_rich_markdown_server_error_does_not_retry_plain_message() {
+        use axum::Router;
+        use axum::http::Request;
+        use axum::middleware::{self, Next};
+        use axum::response::IntoResponse as _;
+        use axum::routing::post;
+
+        let request_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count = Arc::clone(&request_count);
+        let app = Router::new()
+            .route(
+                "/botTEST-TOKEN/sendRichMessage",
+                post(|| async {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        r#"{"ok":false,"error_code":500,"description":"Internal Server Error: can't parse entities"}"#,
+                    )
+                        .into_response()
+                }),
+            )
+            .route(
+                "/botTEST-TOKEN/sendMessage",
+                post(|| async { StatusCode::OK }),
+            )
+            .layer(middleware::from_fn(move |request: Request<axum::body::Body>, next: Next| {
+                let count = Arc::clone(&count);
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    next.run(request).await
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Telegram API");
+        let address = listener.local_addr().expect("read mock API address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock Telegram API");
+        });
+        let bot = crate::telegram::tg_bot::RightBot::new_for_test(format!(
+            "http://{address}/botTEST-TOKEN"
+        ));
+
+        let error = send_channel_post_text(&bot, -1001234567890, "*Markdown*")
+            .await
+            .expect("send must not time out")
+            .expect_err("Telegram 5xx must propagate without fallback");
+
+        assert!(matches!(error, TgError::Api(_)));
+        assert_eq!(
+            request_count.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "ambiguous 5xx must not trigger /sendMessage"
+        );
     }
 }
