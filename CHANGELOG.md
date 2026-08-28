@@ -1,4 +1,97 @@
 # Changelog
+## [0.5.0] - 2026-08-28
+
+
+### Bug Fixes
+
+- **codegen**: Tell agents structured content is the only delivered channel
+- **codegen**: Preserve single database owner ([#213](https://github.com/onsails/right-agent/pull/213))
+- **bot**: Strip bot token from download errors; reuse bot client; test with_retry
+- **bot**: Preserve teloxide behavior — ignore edited msgs, restore per-min throttle cap, don't throttle edits, drop dead send_html
+- **bot**: Address code-review findings on frankenstein migration
+- **bot**: Answer channel-confirm callback on persist failure
+- **mcp**: Enable cron channel post registration
+- **bot**: Bound text-class Telegram API calls with 30s attempt timeout
+- **bot**: Self-heal stale CC session on missing-conversation resume failure
+- **bot**: Count system heartbeats as API progress in foreground watchdog
+- **bot**: Rename claude_health to honest right_mcp_init signal with stderr diagnostics
+- **bot**: Skip cron reflection for deterministic failures, not just budget
+- **bot**: Finish MCP probe at terminal result ([#214](https://github.com/onsails/right-agent/pull/214))
+- **cron**: Keep background work synchronous
+- **telegram**: Use rich markdown for channel posts
+- **mcp**: Preserve outbound message_id and harden channel_post taxonomy
+- **bot**: Harden channel confirmation flow and channel_post enforcement
+- **init**: Validate agent readiness before startup
+- **db**: Enforce single-owner Turso recovery ([#211](https://github.com/onsails/right-agent/pull/211))
+
+### Documentation
+
+- Channel tools in prompt system and MCP architecture docs
+- **bot**: Phase3 — refresh stale teloxide references to webhook/Telegram bot
+- Channel scope exception in ARCHITECTURE.md, stdio channel_post caveat
+
+### Features
+
+- **right-db**: Last_n_in_chat chronological conversation query
+- **bot**: Add TgError for frankenstein client wrapper
+- **bot**: Add Throttle (global + per-chat rate gate) for RightBot
+- **bot**: RightBot frankenstein wrapper (send/edit/answer/download/commands/media/forum/webhook)
+- **bot**: Manual BotCommand parser replacing teloxide derive
+- **bot**: Callback-route + webhook-outcome decision fns for the update router
+- **bot**: [**breaking**] Replace teloxide with frankenstein — green build (all targets)
+- **bot**: Repair suspicious null replies with one resume turn
+- **bot**: Subscribe webhook to channel_post and my_chat_member
+- **bot**: Archive posts from opened channels (read-only intake)
+- **bot**: Channel registration via my_chat_member + DM confirm button
+- **bot**: /deny_all accepts optional chat_id from DM (channel close path)
+- **allowlist**: Add kind field to distinguish channels from groups
+- **mcp**: Channel_list and channel_read built-in tools
+- **mcp**: Channel_post tool with per-turn cap and bot UDS delivery
+- **openshell**: OpenShell v0.0.105 compatibility upgrade ([#171](https://github.com/onsails/right-agent/pull/171))
+- **bootstrap**: Model-led gated onboarding interview
+
+### Miscellaneous
+
+- **bot**: Phase2 green gate — visibility + clippy cleanup, no new warnings
+
+### Refactor
+
+- **bot**: Pub(crate) for command/router items (unreachable_pub)
+- **bot**: Drop dead auth-flow HandlerCtx fields + orphan markers; doc fixups
+- **bot**: Pin sender precedence and rename channel archive helper
+- **bot**: Polish channel registration (logging, re-notify guard, docs)
+
+### Testing
+
+- **allowlist**: Pin GroupKind serde edge cases
+- **doctor**: Use realistic agent paths
+- **doctor**: Close seed handles before checks
+- **mcp**: Pin channel_read kind check and truncation contract
+
+### Build
+
+- **bot**: Add frankenstein + governor deps alongside teloxide
+
+### Style
+
+- **bot**: Struct-update syntax in cron registration test
+
+### Wip
+
+- **bot**: Phase2 foundation — RightBot extras, msg_ext helpers, BotType alias flip, build_bot
+- **bot**: Phase2 task 2.2 — mention/session/filter type sweep
+- **bot**: Phase2 task 2.5 — handler.rs to HandlerCtx + frankenstein
+- **bot**: Phase2 task 2.4a — error_details/bootstrap_photo/model_command
+- **bot**: Phase2 task 2.4b — mode_command to HandlerCtx + frankenstein
+- **bot**: Phase2 task 2.4c — debug/allowlist command handlers
+- **bot**: Phase2 task 2.6a — progress.rs to RightBot
+- **bot**: Phase2 task 2.6b — async_delivery.rs to RightBot
+- **bot**: Phase2 task 2.3 — attachments.rs to frankenstein/RightBot; tg_bot media html param
+- **bot**: Phase2 task 2.6c — worker.rs to RightBot/frankenstein
+- **bot**: Phase2 misc — sandbox_runtime/focus to i64/RightBot
+- **bot**: Phase2 task 2.7/2.8 — dispatch setup_telegram split, webhook router, lib.rs wiring, delete shutdown_listener
+- **bot**: Phase2 — lib compiles; archive/menu/Update-path/User-fields fixes
+
 ## [0.4.2] - 2026-06-17
 
 ### Skill Curator
