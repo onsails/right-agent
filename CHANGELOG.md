@@ -1,4 +1,50 @@
 # Changelog
+## [0.5.0] - 2026-08-28
+
+### Sandbox & Providers
+
+- **Breaking:** Right's sandbox backend is now [microsandbox](https://github.com/microsandbox/microsandbox) (a Rust-native microVM runtime) instead of OpenShell. There is no more sandboxless mode — an `agent.yaml` with `sandbox: mode: none` is now a hard startup error — and `right agent ssh` / `--sandbox-mode` are removed along with SSH transport entirely. Existing OpenShell agents are recognized but not started by this release: their files and `agent.yaml` are left untouched until they are moved with the new `right agent migrate-sandbox <name>` command (`mode: openshell` still parses so that command can read the old sandbox).
+- `right agent migrate-sandbox` archives the old sandbox to `~/.right/backups/<agent>/`, creates a microVM in its place, restores every file with corrected ownership, and verifies the full listing made it across before deleting the original — an interrupted or failed migration leaves the OpenShell sandbox and `agent.yaml` untouched. Provider credentials cannot be carried over automatically (OpenShell never exposed them for re-reading); the migration recap names exactly which providers need a credential re-entered via the dashboard afterward.
+- `right up` no longer refuses to start every agent on the host just because one agent hasn't been migrated off OpenShell — it starts the agents that are ready and lists the exact migrate command for the ones sitting out.
+- Provider credentials moved off the OpenShell gateway into a new Right-owned store (`~/.right/providers.db`); the dashboard now reports provider status as ready / needs-value / error instead of a single composed flag.
+- Restrictive-network sandboxes and fresh sandbox images can now get Claude Code without any guest-side internet access: the bot downloads and checksum-verifies the Claude Code build on the host and stages it directly into the sandbox.
+
+### Database Reliability
+
+- Fixed the root cause of intermittent per-agent database hangs and corruption in production (a Turso multiprocess-WAL desync): the shared MCP Aggregator is now the sole process that opens each agent's `data.db` and the shared `providers.db` for writing, and the bot talks to it over a local socket instead of opening the files itself. A database that still desyncs after the existing sidecar-reset recovery now fails fast with a clear error instead of retrying every 30 seconds forever while the process looks healthy.
+- New operator command `right agent db-repair <name>...` recovers a database left corrupted by the old multiprocess-WAL bug: it repairs a staged copy, keeps a byte-for-byte forensic backup of the original files, validates the result with `PRAGMA quick_check` and row-count checks, and only then swaps it in for the live database.
+
+### Telegram Channels
+
+- Right agents can now be added to Telegram channels. Adding the bot as a channel admin triggers a DM confirmation button to a trusted user; once confirmed, the agent archives and can search channel posts (`channel_list`, `channel_read`) and, only when asked in DM, post to the channel (`channel_post`, capped per turn).
+- `/deny_all` now accepts an optional chat ID from DM, so an operator can close a channel the agent should no longer post to without needing to be a member of the channel.
+- Channel posts now render with Telegram's newer Rich Markdown formatting (tables, richer text) and fall back to plain text automatically if the formatted version fails to parse.
+
+### Agents & Reliability
+
+- When an agent's Claude Code session file goes missing from the sandbox (for example, after a sandbox recreation), the affected chat used to fail every turn permanently; the bot now detects this and starts a fresh session automatically instead of staying stuck.
+- When an agent replies with plain text instead of using the structured `content` field the platform requires, the user used to see nothing delivered at all; the bot now detects this null-reply shape and gives the agent one extra turn to re-emit the reply correctly (or confirm it intentionally has nothing to say).
+- Long-thinking turns no longer get killed by the 20-second progress watchdog — "still thinking" heartbeat events from Claude Code now count as progress, not silence.
+- Cron jobs that fail with a deterministic error (rate limit, overload, turn-limit) no longer spend a billable reflection turn that would just fail the exact same way again.
+- Cron runs now disable Claude Code's own background-task tool for the duration of the run, so a cron job's work stays inside that run instead of continuing invisibly after the job's own turn has ended.
+- Health probes and the init-time login check no longer misreport a working agent as broken when Claude hits an authenticated rate limit; failure diagnostics now include the actual error output instead of just an exit code.
+- `right agent restore` now validates the restored agent's Claude credential with a real one-turn call inside its sandbox before finishing; `right init` / `right agent init` defer credential validation to the bot's first bring-up, since no sandbox exists at init time.
+- Telegram API calls for sending/editing messages and typing indicators now time out after 30 seconds instead of the default 500 — a stalled Telegram endpoint no longer wedges an agent's entire message queue until the bot is restarted.
+- The skill curator's idle detection now uses the timestamp of the agent's last real message instead of when the bot process last restarted, so it no longer waits out a full idle window after every restart before it's willing to run.
+
+### Onboarding
+
+- New-agent bootstrap is now a model-led interview: the agent asks each onboarding question itself, in its own words, while the platform tracks stage order and records answers — bootstrap can no longer be marked complete without the interview actually running.
+
+### Platform
+
+- Replaced the underlying Telegram client library (teloxide → frankenstein) to track newer Telegram Bot API versions; a bot-token leak in file-download error messages was fixed as part of the swap.
+
+### Site
+
+- The public website got a visual redesign: calmer, flatter surfaces, reduced motion and background decoration, and tighter typography.
+- The GitHub star count on the landing page is now fetched live in the browser instead of being baked in at deploy time.
+
 ## [0.4.2] - 2026-06-17
 
 ### Skill Curator
