@@ -59,6 +59,12 @@ jobs:
           cache: 'pnpm'
           cache-dependency-path: crates/right-dashboard/frontend/pnpm-lock.yaml
 
+      - name: Install Linux dependencies
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libcap-ng-dev
+
       - name: Build
         run: cargo build --release --locked -p right --target ${{ matrix.target }}
 
