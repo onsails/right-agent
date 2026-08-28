@@ -1,96 +1,50 @@
 # Changelog
 ## [0.5.0] - 2026-08-28
 
+### Sandbox & Providers
 
-### Bug Fixes
+- **Breaking:** Right's sandbox backend is now [microsandbox](https://github.com/microsandbox/microsandbox) (a Rust-native microVM runtime) instead of OpenShell. There is no more sandboxless mode — an `agent.yaml` with `sandbox: mode: none` is now a hard startup error — and `right agent ssh` / `--sandbox-mode` are removed along with SSH transport entirely. Existing agents on OpenShell keep running (`mode: openshell` still parses for this release) but must be moved with the new `right agent migrate-sandbox <name>` command to pick up any further platform updates.
+- `right agent migrate-sandbox` archives the old sandbox to `~/.right/backups/<agent>/`, creates a microVM in its place, restores every file with corrected ownership, and verifies the full listing made it across before deleting the original — an interrupted or failed migration leaves the OpenShell sandbox and `agent.yaml` untouched. Provider credentials cannot be carried over automatically (OpenShell never exposed them for re-reading); the migration recap names exactly which providers need a credential re-entered via the dashboard afterward.
+- `right up` no longer refuses to start every agent on the host just because one agent hasn't been migrated off OpenShell — it starts the agents that are ready and lists the exact migrate command for the ones sitting out.
+- Provider credentials moved off the OpenShell gateway into a new Right-owned store (`~/.right/providers.db`); the dashboard now reports provider status as ready / needs-value / error instead of a single composed flag.
+- Every Agent Sandbox now gets a baseline toolchain — git, python3, ffmpeg, jq, and bun — provisioned automatically at boot, so agents no longer need to install everyday tools themselves before using them.
+- Restrictive-network sandboxes and fresh sandbox images can now get Claude Code without any guest-side internet access: the bot downloads and checksum-verifies the Claude Code build on the host and stages it directly into the sandbox.
 
-- **codegen**: Tell agents structured content is the only delivered channel
-- **codegen**: Preserve single database owner ([#213](https://github.com/onsails/right-agent/pull/213))
-- **bot**: Strip bot token from download errors; reuse bot client; test with_retry
-- **bot**: Preserve teloxide behavior — ignore edited msgs, restore per-min throttle cap, don't throttle edits, drop dead send_html
-- **bot**: Address code-review findings on frankenstein migration
-- **bot**: Answer channel-confirm callback on persist failure
-- **mcp**: Enable cron channel post registration
-- **bot**: Bound text-class Telegram API calls with 30s attempt timeout
-- **bot**: Self-heal stale CC session on missing-conversation resume failure
-- **bot**: Count system heartbeats as API progress in foreground watchdog
-- **bot**: Rename claude_health to honest right_mcp_init signal with stderr diagnostics
-- **bot**: Skip cron reflection for deterministic failures, not just budget
-- **bot**: Finish MCP probe at terminal result ([#214](https://github.com/onsails/right-agent/pull/214))
-- **cron**: Keep background work synchronous
-- **telegram**: Use rich markdown for channel posts
-- **mcp**: Preserve outbound message_id and harden channel_post taxonomy
-- **bot**: Harden channel confirmation flow and channel_post enforcement
-- **init**: Validate agent readiness before startup
-- **db**: Enforce single-owner Turso recovery ([#211](https://github.com/onsails/right-agent/pull/211))
+### Database Reliability
 
-### Documentation
+- Fixed the root cause of intermittent per-agent database hangs and corruption in production (a Turso multiprocess-WAL desync): the shared MCP Aggregator is now the sole process that opens each agent's `data.db` and the shared `providers.db` for writing, and the bot talks to it over a local socket instead of opening the files itself. A database that still desyncs after the existing sidecar-reset recovery now fails fast with a clear error instead of retrying every 30 seconds forever while the process looks healthy.
+- New operator command `right agent db-repair <name>...` recovers a database left corrupted by the old multiprocess-WAL bug: it repairs a staged copy, keeps a byte-for-byte forensic backup of the original files, validates the result with `PRAGMA quick_check` and row-count checks, and only then swaps it in for the live database.
 
-- Channel tools in prompt system and MCP architecture docs
-- **bot**: Phase3 — refresh stale teloxide references to webhook/Telegram bot
-- Channel scope exception in ARCHITECTURE.md, stdio channel_post caveat
+### Telegram Channels
 
-### Features
+- Right agents can now be added to Telegram channels. Adding the bot as a channel admin triggers a DM confirmation button to a trusted user; once confirmed, the agent archives and can search channel posts (`channel_list`, `channel_read`) and, only when asked in DM, post to the channel (`channel_post`, capped per turn).
+- `/deny_all` now accepts an optional chat ID from DM, so an operator can close a channel the agent should no longer post to without needing to be a member of the channel.
+- Channel posts now render with Telegram's newer Rich Markdown formatting (tables, richer text) and fall back to plain text automatically if the formatted version fails to parse.
 
-- **right-db**: Last_n_in_chat chronological conversation query
-- **bot**: Add TgError for frankenstein client wrapper
-- **bot**: Add Throttle (global + per-chat rate gate) for RightBot
-- **bot**: RightBot frankenstein wrapper (send/edit/answer/download/commands/media/forum/webhook)
-- **bot**: Manual BotCommand parser replacing teloxide derive
-- **bot**: Callback-route + webhook-outcome decision fns for the update router
-- **bot**: [**breaking**] Replace teloxide with frankenstein — green build (all targets)
-- **bot**: Repair suspicious null replies with one resume turn
-- **bot**: Subscribe webhook to channel_post and my_chat_member
-- **bot**: Archive posts from opened channels (read-only intake)
-- **bot**: Channel registration via my_chat_member + DM confirm button
-- **bot**: /deny_all accepts optional chat_id from DM (channel close path)
-- **allowlist**: Add kind field to distinguish channels from groups
-- **mcp**: Channel_list and channel_read built-in tools
-- **mcp**: Channel_post tool with per-turn cap and bot UDS delivery
-- **openshell**: OpenShell v0.0.105 compatibility upgrade ([#171](https://github.com/onsails/right-agent/pull/171))
-- **bootstrap**: Model-led gated onboarding interview
+### Agents & Reliability
 
-### Miscellaneous
+- When an agent's Claude Code session file goes missing from the sandbox (for example, after a sandbox recreation), the affected chat used to fail every turn permanently; the bot now detects this and starts a fresh session automatically instead of staying stuck.
+- When an agent replies with plain text instead of using the structured `content` field the platform requires, the user used to see nothing delivered at all; the bot now detects this null-reply shape and gives the agent one extra turn to re-emit the reply correctly (or confirm it intentionally has nothing to say).
+- Long-thinking turns no longer get killed by the 20-second progress watchdog — "still thinking" heartbeat events from Claude Code now count as progress, not silence.
+- Cron jobs that fail with a deterministic error (rate limit, overload, turn-limit) no longer spend a billable reflection turn that would just fail the exact same way again.
+- Cron runs now disable Claude Code's own background-task tool for the duration of the run, so a cron job's work stays inside that run instead of continuing invisibly after the job's own turn has ended.
+- Health probes and the init-time login check no longer misreport a working agent as broken when Claude hits an authenticated rate limit; failure diagnostics now include the actual error output instead of just an exit code.
+- `right init` / `right agent init` now verify the agent's Claude credential actually works before declaring the agent ready, instead of letting a bad login surface only on the agent's first real turn.
+- Telegram API calls for sending/editing messages and typing indicators now time out after 30 seconds instead of the default 500 — a stalled Telegram endpoint no longer wedges an agent's entire message queue until the bot is restarted.
+- The skill curator's idle detection now uses the timestamp of the agent's last real message instead of when the bot process last restarted, so it no longer waits out a full idle window after every restart before it's willing to run.
 
-- **bot**: Phase2 green gate — visibility + clippy cleanup, no new warnings
+### Onboarding
 
-### Refactor
+- New-agent bootstrap is now a model-led interview: the agent asks each onboarding question itself, in its own words, while the platform tracks stage order and records answers — bootstrap can no longer be marked complete without the interview actually running.
 
-- **bot**: Pub(crate) for command/router items (unreachable_pub)
-- **bot**: Drop dead auth-flow HandlerCtx fields + orphan markers; doc fixups
-- **bot**: Pin sender precedence and rename channel archive helper
-- **bot**: Polish channel registration (logging, re-notify guard, docs)
+### Platform
 
-### Testing
+- Replaced the underlying Telegram client library (teloxide → frankenstein) to track newer Telegram Bot API versions; a bot-token leak in file-download error messages was fixed as part of the swap.
 
-- **allowlist**: Pin GroupKind serde edge cases
-- **doctor**: Use realistic agent paths
-- **doctor**: Close seed handles before checks
-- **mcp**: Pin channel_read kind check and truncation contract
+### Site
 
-### Build
-
-- **bot**: Add frankenstein + governor deps alongside teloxide
-
-### Style
-
-- **bot**: Struct-update syntax in cron registration test
-
-### Wip
-
-- **bot**: Phase2 foundation — RightBot extras, msg_ext helpers, BotType alias flip, build_bot
-- **bot**: Phase2 task 2.2 — mention/session/filter type sweep
-- **bot**: Phase2 task 2.5 — handler.rs to HandlerCtx + frankenstein
-- **bot**: Phase2 task 2.4a — error_details/bootstrap_photo/model_command
-- **bot**: Phase2 task 2.4b — mode_command to HandlerCtx + frankenstein
-- **bot**: Phase2 task 2.4c — debug/allowlist command handlers
-- **bot**: Phase2 task 2.6a — progress.rs to RightBot
-- **bot**: Phase2 task 2.6b — async_delivery.rs to RightBot
-- **bot**: Phase2 task 2.3 — attachments.rs to frankenstein/RightBot; tg_bot media html param
-- **bot**: Phase2 task 2.6c — worker.rs to RightBot/frankenstein
-- **bot**: Phase2 misc — sandbox_runtime/focus to i64/RightBot
-- **bot**: Phase2 task 2.7/2.8 — dispatch setup_telegram split, webhook router, lib.rs wiring, delete shutdown_listener
-- **bot**: Phase2 — lib compiles; archive/menu/Update-path/User-fields fixes
+- The public website got a visual redesign: calmer, flatter surfaces, reduced motion and background decoration, and tighter typography.
+- The GitHub star count on the landing page is now fetched live in the browser instead of being baked in at deploy time.
 
 ## [0.4.2] - 2026-06-17
 
