@@ -832,6 +832,7 @@ mod memory_tests {
             .await
             .unwrap();
         }
+        drop(conn);
         let checks = check_memory(&agent_dir).await;
         assert!(
             checks
@@ -859,6 +860,7 @@ mod memory_tests {
             .await
             .unwrap();
         }
+        drop(conn);
         let checks = check_memory(&agent_dir).await;
         assert!(
             checks
@@ -879,6 +881,7 @@ mod memory_tests {
         )
         .await
         .unwrap();
+        drop(conn);
         let checks = check_memory(&agent_dir).await;
         assert!(
             checks
