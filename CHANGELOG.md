@@ -7,7 +7,6 @@
 - `right agent migrate-sandbox` archives the old sandbox to `~/.right/backups/<agent>/`, creates a microVM in its place, restores every file with corrected ownership, and verifies the full listing made it across before deleting the original — an interrupted or failed migration leaves the OpenShell sandbox and `agent.yaml` untouched. Provider credentials cannot be carried over automatically (OpenShell never exposed them for re-reading); the migration recap names exactly which providers need a credential re-entered via the dashboard afterward.
 - `right up` no longer refuses to start every agent on the host just because one agent hasn't been migrated off OpenShell — it starts the agents that are ready and lists the exact migrate command for the ones sitting out.
 - Provider credentials moved off the OpenShell gateway into a new Right-owned store (`~/.right/providers.db`); the dashboard now reports provider status as ready / needs-value / error instead of a single composed flag.
-- Every Agent Sandbox now gets a baseline toolchain — git, python3, ffmpeg, jq, and bun — provisioned automatically at boot, so agents no longer need to install everyday tools themselves before using them.
 - Restrictive-network sandboxes and fresh sandbox images can now get Claude Code without any guest-side internet access: the bot downloads and checksum-verifies the Claude Code build on the host and stages it directly into the sandbox.
 
 ### Database Reliability
