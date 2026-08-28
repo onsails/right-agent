@@ -130,13 +130,15 @@ Per-callsite `--disallowedTools`:
   registers as `Curator` before using the per-invocation MCP config.
 - **Cron** (`bot::cron`): baseline + invocation-scoped tools
   (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
-  `mcp__right__skill_learning_finish`). `Agent`
-  intentionally remains allowed; cron jobs may legitimately fan out to
-  subagents. `send_progress` is foreground-only; learning tools require a
-  registered `Foreground`, `ProbeWriter`, or `Curator` invocation, which cron
-  does not have. Conversation transcript tools are also foreground-scoped and
-  return `conversation_scope_unavailable` outside a registered foreground
-  invocation.
+  `mcp__right__skill_learning_finish`). `Agent` intentionally remains allowed;
+  cron jobs may fan out to subagents. Each cron Claude invocation passes an
+  authoritative `--settings` override with
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so Bash tasks, Agent calls, and
+  forked skills finish synchronously before the terminal result. `send_progress`
+  is foreground-only; learning tools require a registered
+  `Foreground`, `ProbeWriter`, or `Curator` invocation, which cron does not
+  have. Conversation transcript tools are also foreground-scoped and return
+  `conversation_scope_unavailable` outside a registered foreground invocation.
 - **Reflection** (`bot::reflection`): baseline + `Agent` + invocation-scoped
   tools (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
   `mcp__right__skill_learning_finish`).

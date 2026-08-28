@@ -182,6 +182,22 @@ pub(crate) fn is_lock_fresh(
 fn cron_wrapper_script(assembly_script: &str, log_dir: &str, log_filename: &str) -> String {
     format!("mkdir -p {log_dir}\n{assembly_script} | tee {log_dir}/{log_filename}")
 }
+
+/// Per-invocation settings override for cron execution.
+///
+/// `--settings` outranks project and local settings. A shell export would not:
+/// `.claude/settings.local.json` and the generated agent environment may replace
+/// inherited variables when Claude Code starts.
+fn cron_settings_override() -> String {
+    serde_json::json!({
+        "env": { "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1" }
+    })
+    .to_string()
+}
+
+fn cron_extra_args() -> Vec<String> {
+    vec!["--settings".to_owned(), cron_settings_override()]
+}
 /// Age of a job's lock heartbeat, for the skip log line. `None` when the lock
 /// file is missing or unparseable (the caller logs `-1` — lock fresh yet
 /// unreadable is itself a signal).
@@ -883,9 +899,9 @@ async fn execute_job(
         resume_session_id: None,
         new_session_id: Some(run_id.clone()),
         fork_session: false,
+        extra_args: cron_extra_args(),
         allowed_tools: vec![],
         disallowed_tools,
-        extra_args: vec![],
         prompt: Some(prompt_for_cc),
         debug_flag: Some(std::sync::Arc::clone(&debug)),
     };
@@ -2678,6 +2694,28 @@ mod classify_tests {
         assert!(
             !script.contains("pipefail"),
             "cron wrapper must not use bash-only pipefail: {script}"
+        );
+    }
+
+    #[test]
+    fn cron_settings_override_disables_background_tasks() {
+        let settings: serde_json::Value =
+            serde_json::from_str(&cron_settings_override()).expect("valid inline settings JSON");
+        assert_eq!(
+            settings.pointer("/env/CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"),
+            Some(&serde_json::Value::String("1".to_owned()))
+        );
+    }
+
+    #[test]
+    fn cron_extra_args_pass_settings_on_command_line() {
+        let args = cron_extra_args();
+        assert_eq!(args.first().map(String::as_str), Some("--settings"));
+        let settings: serde_json::Value =
+            serde_json::from_str(&args[1]).expect("valid inline settings JSON");
+        assert_eq!(
+            settings.pointer("/env/CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"),
+            Some(&serde_json::Value::String("1".to_owned()))
         );
     }
 
