@@ -2,6 +2,12 @@ use super::*;
 use crate::test_support::setup_crypto;
 use tempfile::tempdir;
 
+fn test_agent_dir(home: &std::path::Path) -> std::path::PathBuf {
+    let agent_dir = home.join("agents").join("test");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    agent_dir
+}
+
 #[tokio::test]
 async fn check_binary_returns_fail_for_missing_binary() {
     let check = check_binary("right-absolutely-nonexistent-binary-xyz", None);
@@ -798,9 +804,10 @@ mod memory_tests {
 
     #[tokio::test]
     async fn check_memory_passes_on_empty_queue() {
-        let dir = tempdir().unwrap();
-        let _ = open_connection(dir.path(), true).await.unwrap();
-        let checks = check_memory(dir.path()).await;
+        let home = tempdir().unwrap();
+        let agent_dir = test_agent_dir(home.path());
+        let _ = open_connection(&agent_dir, true).await.unwrap();
+        let checks = check_memory(&agent_dir).await;
         assert!(
             checks.iter().all(|c| matches!(c.status, CheckStatus::Pass)),
             "expected all pass, got {checks:#?}"
@@ -809,8 +816,9 @@ mod memory_tests {
 
     #[tokio::test]
     async fn check_memory_warns_on_500_rows() {
-        let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).await.unwrap();
+        let home = tempdir().unwrap();
+        let agent_dir = test_agent_dir(home.path());
+        let conn = open_connection(&agent_dir, true).await.unwrap();
         for i in 0..600 {
             right_memory::retain_queue::enqueue(
                 &conn,
@@ -824,7 +832,7 @@ mod memory_tests {
             .await
             .unwrap();
         }
-        let checks = check_memory(dir.path()).await;
+        let checks = check_memory(&agent_dir).await;
         assert!(
             checks
                 .iter()
@@ -835,8 +843,9 @@ mod memory_tests {
 
     #[tokio::test]
     async fn check_memory_fails_on_901_rows() {
-        let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).await.unwrap();
+        let home = tempdir().unwrap();
+        let agent_dir = test_agent_dir(home.path());
+        let conn = open_connection(&agent_dir, true).await.unwrap();
         for i in 0..901 {
             right_memory::retain_queue::enqueue(
                 &conn,
@@ -850,7 +859,7 @@ mod memory_tests {
             .await
             .unwrap();
         }
-        let checks = check_memory(dir.path()).await;
+        let checks = check_memory(&agent_dir).await;
         assert!(
             checks
                 .iter()
@@ -861,15 +870,16 @@ mod memory_tests {
 
     #[tokio::test]
     async fn check_memory_fails_on_24h_auth_alert() {
-        let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).await.unwrap();
+        let home = tempdir().unwrap();
+        let agent_dir = test_agent_dir(home.path());
+        let conn = open_connection(&agent_dir, true).await.unwrap();
         conn.execute(
             "INSERT INTO memory_alerts(alert_type, first_sent_at) VALUES ('auth_failed', datetime('now','-25 hours'))",
             [],
         )
         .await
         .unwrap();
-        let checks = check_memory(dir.path()).await;
+        let checks = check_memory(&agent_dir).await;
         assert!(
             checks
                 .iter()
@@ -883,8 +893,9 @@ mod memory_tests {
 
 #[tokio::test]
 async fn check_cron_runs_lists_running_rows() {
-    let dir = tempfile::tempdir().unwrap();
-    let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let agent_dir = test_agent_dir(home.path());
+    let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
     // Seed a running cron run, a finished cron run, and a running non-cron run;
     // only the running cron one shows (exercises both status and kind filters).
     conn.execute(
@@ -920,7 +931,7 @@ async fn check_cron_runs_lists_running_rows() {
     .unwrap();
     drop(conn);
 
-    let checks = check_cron_runs(dir.path()).await;
+    let checks = check_cron_runs(&agent_dir).await;
     assert_eq!(
         checks.len(),
         1,
@@ -933,9 +944,10 @@ async fn check_cron_runs_lists_running_rows() {
 
 #[tokio::test]
 async fn check_cron_runs_empty_when_none_running() {
-    let dir = tempfile::tempdir().unwrap();
-    let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let agent_dir = test_agent_dir(home.path());
+    let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
     drop(conn);
-    let checks = check_cron_runs(dir.path()).await;
+    let checks = check_cron_runs(&agent_dir).await;
     assert!(checks.is_empty(), "no running runs → no checks: {checks:?}");
 }

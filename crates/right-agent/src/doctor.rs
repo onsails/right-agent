@@ -1523,6 +1523,12 @@ mod cron_target_tests {
         AllowedGroup, AllowedUser, AllowlistFile, GroupKind, ResponseMode,
     };
 
+    fn test_agent_dir(home: &std::path::Path) -> std::path::PathBuf {
+        let agent_dir = home.join("agents").join("test");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        agent_dir
+    }
+
     fn write_allowlist(agent_dir: &std::path::Path, users: &[i64], groups: &[i64]) {
         let now = chrono::Utc::now();
         let mut file = AllowlistFile::default();
@@ -1566,13 +1572,14 @@ mod cron_target_tests {
 
     #[tokio::test]
     async fn null_target_warns() {
-        let dir = tempfile::tempdir().unwrap();
-        write_allowlist(dir.path(), &[100], &[]);
-        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = test_agent_dir(home.path());
+        write_allowlist(&agent_dir, &[100], &[]);
+        let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
         seed_cron(&conn, "j1", None).await;
         drop(conn);
 
-        let checks = check_cron_targets(dir.path()).await;
+        let checks = check_cron_targets(&agent_dir).await;
         let warns: Vec<_> = checks
             .iter()
             .filter(|c| c.status == CheckStatus::Warn)
@@ -1583,13 +1590,14 @@ mod cron_target_tests {
 
     #[tokio::test]
     async fn target_outside_allowlist_warns() {
-        let dir = tempfile::tempdir().unwrap();
-        write_allowlist(dir.path(), &[100], &[]);
-        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = test_agent_dir(home.path());
+        write_allowlist(&agent_dir, &[100], &[]);
+        let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
         seed_cron(&conn, "j1", Some(-999)).await;
         drop(conn);
 
-        let checks = check_cron_targets(dir.path()).await;
+        let checks = check_cron_targets(&agent_dir).await;
         let warns: Vec<_> = checks
             .iter()
             .filter(|c| c.status == CheckStatus::Warn)
@@ -1600,13 +1608,14 @@ mod cron_target_tests {
 
     #[tokio::test]
     async fn valid_target_passes() {
-        let dir = tempfile::tempdir().unwrap();
-        write_allowlist(dir.path(), &[], &[-200]);
-        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = test_agent_dir(home.path());
+        write_allowlist(&agent_dir, &[], &[-200]);
+        let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
         seed_cron(&conn, "j1", Some(-200)).await;
         drop(conn);
 
-        let checks = check_cron_targets(dir.path()).await;
+        let checks = check_cron_targets(&agent_dir).await;
         let warns: Vec<_> = checks
             .iter()
             .filter(|c| c.status == CheckStatus::Warn)
