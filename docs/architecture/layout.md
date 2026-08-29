@@ -24,8 +24,10 @@
 - `run/process-compose.yaml`, `run/state.json` (carries `pc_port` +
   `pc_api_token`), and `run/internal.sock` (mode 0600 typed bot↔Aggregator DB
   and control-plane IPC).
-- `backups/<agent>/<YYYYMMDD-HHMM>/` — `sandbox.tar.gz` plus `backup.json`
-  and optional `agent.yaml`, `allowlist.yaml`, and `data.db` for full backups.
+- `backups/<agent>/<YYYYMMDD-HHMM>/` — full `right agent backup` output:
+  `sandbox.tar.gz`, `backup.json`, and optional `agent.yaml`, `allowlist.yaml`,
+  and `data.db`. Pre-destroy backups omit `backup.json` and may also preserve a
+  legacy `policy.yaml` when an upgraded agent still has that retired file.
   `right agent backup` excludes rebuildable sandbox dirs by default (`.cache`,
   `.venv`, `.npm`, `.uv`); `--include-rebuildable` opts into forensic sandbox
   archives. Normal agent backups contain only the top-level `data.db` snapshot,

@@ -262,7 +262,7 @@ right agent init <name> --from-backup <path>
   ├─ Restore config/control-plane files to the new agent dir
   ├─ Remove copied data.db-* sidecars before opening the DB; discard
   │   tar-extracted data.db and use only backup/data.db as canonical
-  ├─ Normalize agent.yaml and regenerate BOOTSTRAP.md
+  ├─ Normalize and validate agent.yaml
   ├─ Create a timestamped microsandbox through the shared bot sandbox spec,
   │   upload and extract the archive, and reconcile the identity mirror
   ├─ On any later failure, delete the created microsandbox before removing the
