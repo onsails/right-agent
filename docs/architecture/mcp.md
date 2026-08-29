@@ -396,9 +396,9 @@ Scope-from-target invariant: the destination `(chat_id, effective_thread_id)`
 is read server-side from the registered `ProgressTarget`, never from agent
 arguments — identical to the `send_progress` scope rule. The agent cannot
 address another chat or topic. For attachment delivery, `ProgressTarget` also
-carries `agent_dir` and the invocation's live sandbox handle. Files under
-`/sandbox/outbox/` are copied to host staging through the SDK before delivery;
-a missing sandbox handle fails closed instead of falling back to host paths.
+carries `agent_dir` and the sandbox handle captured when the invocation was
+registered. Files under `/sandbox/outbox/` are copied to host staging through
+the SDK before delivery; a missing handle fails closed without a host fallback.
 
 ## Telegram channel tools
 

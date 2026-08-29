@@ -28,8 +28,8 @@
   and optional `agent.yaml`, `allowlist.yaml`, and `data.db` for full backups.
   `right agent backup` excludes rebuildable sandbox dirs by default (`.cache`,
   `.venv`, `.npm`, `.uv`); `--include-rebuildable` opts into forensic sandbox
-  archives. Database sidecars are never backup artifacts; the only durable
-  database backup file is the top-level `data.db` snapshot.
+  archives. Normal agent backups contain only the top-level `data.db` snapshot,
+  never its sidecars; database-repair forensic backups preserve a different set.
 - `logs/<agent>.log.<date>` — per-agent daily log rotation.
   `mcp-aggregator.log` for the shared aggregator.
 - `cache/whisper/ggml-<model>.bin` — STT models (downloaded at `right up`).
