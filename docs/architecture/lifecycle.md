@@ -117,7 +117,7 @@ right bot --agent <name>  (spawned by process-compose)
   ├─ Per-agent codegen:
   │   ├─ settings.json, schemas
   │   ├─ .claude.json, credentials symlink, mcp.json
-  │   ├─ TOOLS.md, skills install, policy.yaml
+  │   ├─ TOOLS.md and bundled skills
   │   └─ filesystem/codegen state only; live database work uses typed IPC
   ├─ Microsandbox lifecycle (`right-sandbox`):
   │   ├─ ensure_runtime_installed + diagnose_host (hypervisor preflight)
@@ -262,7 +262,7 @@ right agent init <name> --from-backup <path>
   ├─ Restore config/control-plane files to the new agent dir
   ├─ Remove copied data.db-* sidecars before opening the DB; discard
   │   tar-extracted data.db and use only backup/data.db as canonical
-  ├─ Normalize agent.yaml and regenerate bootstrap policy
+  ├─ Normalize and validate agent.yaml
   ├─ Create a timestamped microsandbox through the shared bot sandbox spec,
   │   upload and extract the archive, and reconcile the identity mirror
   ├─ On any later failure, delete the created microsandbox before removing the

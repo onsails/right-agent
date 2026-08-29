@@ -526,14 +526,8 @@ defect.
 2. Use the matching helper. No bare `std::fs::write`.
 3. Run `cargo test registry_covers_all_per_agent_writes` to verify the
    registry is complete.
-4. If `Regenerated(SandboxRecreate)` — exercise the migration path
-   manually.
-5. If the new output is policy-related, apply via
-   `write_and_apply_sandbox_policy` only. Adding a new network endpoint
-   is fine; adding a new filesystem rule requires `SandboxRecreate`
-   treatment.
-6. Never require `right agent init` for existing agents to adopt the
-   change. They upgrade via `right restart <agent>`.
+4. Never require `right agent init` for existing agents to adopt the change.
+   They upgrade via `right restart <agent>`.
 
 See: `docs/architecture/upgrades.md` for the upgrade-flow walkthrough,
 identity-mirror semantics, and non-goals.
@@ -542,9 +536,6 @@ identity-mirror semantics, and non-goals.
 
 - `AGENTS.md` → `Upgrade-friendly design`, `Never delete sandboxes for
   recovery`, `Self-healing platform` — conventions this model implements.
-- `docs/architecture/lifecycle.md` → `Sandbox migration (filesystem
-  policy change)` — the migration flow used by
-  `Regenerated(SandboxRecreate)`.
 
 ## Integration Tests Using Live Sandboxes
 

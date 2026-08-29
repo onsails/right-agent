@@ -28,13 +28,12 @@ Replaces the prior fork-probe classifier.
    are computed on demand by `right_agent::usage::turn_baseline::compute`.
 
    The skill index is built by `learning_prefilter::collect_rightx_skill_index`.
-   For sandboxed agents it reads `/sandbox/.claude/skills/rightx-*/SKILL.md`
-   from inside the agent's sandbox via gRPC `exec_in_sandbox` (a `sh -c`
-   frontmatter dump, parsed into name + excerpt). For `sandbox: mode: none`
-   agents it reads the host filesystem. Each mode has exactly one source —
-   there is no fallback path. A sandbox read error returns
-   `PrefilterDecision::Skip` rather than an empty index; an empty index would
-   allow the classifier to recommend creating a skill that already exists.
+   It reads `/sandbox/.claude/skills/rightx-*/SKILL.md` from the agent's
+   microsandbox through the SDK exec stream, then parses each skill's name and
+   excerpt. This guest path is the only source; there is no host fallback. A
+   sandbox read error returns `PrefilterDecision::Skip` rather than an empty
+   index, because an empty index could let the classifier recommend creating a
+   skill that already exists.
 
 3. **Probe-writer** (`bot::learning_probe_writer`): when the prefilter
    returns non-Skip, the worker forks the main CC session with the decision
