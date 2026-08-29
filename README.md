@@ -40,12 +40,12 @@ you manage everything from Telegram: `/mcp` and `/providers` open the dashboard.
 ## docs
 
 full story, install guide, security model, concepts, and commands:
-**https://onsails.github.io/right-agent/**
+**https://right-agent.ai/**
 
-- [Install](https://onsails.github.io/right-agent/docs/install/)
-- [Concepts](https://onsails.github.io/right-agent/docs/concepts/)
-- [Security model](https://onsails.github.io/right-agent/docs/security/)
-- [Telegram commands](https://onsails.github.io/right-agent/docs/commands/)
+- [Install](https://right-agent.ai/docs/install/)
+- [Concepts](https://right-agent.ai/docs/concepts/)
+- [Security model](https://right-agent.ai/docs/security/)
+- [Telegram commands](https://right-agent.ai/docs/commands/)
 
 Contributor docs stay in the repo: [ARCHITECTURE.md](ARCHITECTURE.md),
 [PROMPT_SYSTEM.md](PROMPT_SYSTEM.md).
