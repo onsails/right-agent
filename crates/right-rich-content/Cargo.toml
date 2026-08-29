@@ -1,0 +1,14 @@
+[package]
+name = "right-rich-content"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+schemars = { workspace = true }
+serde = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

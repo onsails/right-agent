@@ -28,9 +28,14 @@ use serde::Deserialize;
 /// stalls.
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// End-to-end timeout for `mcp__right__send_message`. Larger than the progress
-/// timeout because a single call may upload attachments to Telegram.
-const SEND_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
+/// NOTE: `mcp__right__send_message` and `mcp__right__channel_post` have NO
+/// aggregator-side timeout. A single call legitimately waits for the bot to
+/// fan out N rich parts (plus plain-fallback chunks), each spaced by the
+/// per-chat throttle — an 8-part channel post is ~7s of throttle alone, and
+/// any fixed ceiling would truncate the tail after the non-rollbackable
+/// attempt slot was already consumed. Each individual Telegram attempt is
+/// bounded by the bot's 30s `TELEGRAM_TEXT_TIMEOUT`, so the call cannot hang
+/// indefinitely; it can only take as long as its parts require.
 const CONVERSATION_SEARCH_DEFAULT_LIMIT: usize = 10;
 const GET_MESSAGES_BY_ID_MAX_IDS: usize = 50;
 const THREAD_FOCUS_MAX_CHARS: usize = 2000;
@@ -325,8 +330,8 @@ pub(crate) struct ChannelReadParams {
 pub(crate) struct ChannelPostParams {
     /// Channel chat id (from channel_list).
     pub(crate) channel: i64,
-    /// Post text (Markdown).
-    pub(crate) text: String,
+    /// Validated rich post body.
+    pub(crate) content: right_rich_content::RichContent,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -525,12 +530,12 @@ impl RightBackend {
             ),
             Tool::new(
                 right_mcp::internal_client::SEND_MESSAGE_TOOL,
-                "Send a standalone Telegram message (text and/or attachments like photo+caption, document) to the current chat for the current foreground invocation only. Use one call per message to deliver several messages in a turn (e.g. multiple posts). Attachment paths must be under /sandbox/outbox/. Max 20 calls per turn. The terminal reply may then be content:null.",
+                "Send one standalone Telegram message with validated RichContent and/or attachments to the current chat. Attachment paths must be under /sandbox/outbox/. Max 20 calls per foreground turn; the terminal reply may then use content:null.",
                 schema_for_type::<crate::progress::SendMessageParams>(),
             ),
             Tool::new(
                 right_mcp::internal_client::CHANNEL_POST_TOOL,
-                "Publish a post to an opened Telegram channel (see channel_list). Always call channel_read first to match the channel's style and avoid duplicates. Foreground and cron invocations only. Max 10 calls per turn.",
+                "Publish validated RichContent to an opened Telegram channel (see channel_list). Call channel_read first. Foreground and cron only; max 10 calls per turn. Arguments are channel and content (never text).",
                 schema_for_type::<ChannelPostParams>(),
             ),
             Tool::new(
@@ -1223,10 +1228,7 @@ impl RightBackend {
             }
         };
 
-        let has_content = params
-            .content
-            .as_deref()
-            .is_some_and(|c| !c.trim().is_empty());
+        let has_content = params.content.is_some();
         if !has_content && params.attachments.is_empty() {
             return Ok(tool_error(
                 "send_message_empty",
@@ -1289,22 +1291,23 @@ impl RightBackend {
             attachments: params.attachments,
         };
         let client = InternalClient::new(target.bot_socket_path);
-        match tokio::time::timeout(SEND_MESSAGE_TIMEOUT, client.message_send(&request)).await {
-            Ok(Ok(resp)) if resp.ok => Ok(CallToolResult::success(vec![Content::text(
+        match client.message_send(&request).await {
+            Ok(resp) if resp.ok => Ok(CallToolResult::success(vec![Content::text(
                 serde_json::json!({ "status": "sent", "message_ids": resp.message_ids })
                     .to_string(),
             )])),
-            Ok(Ok(_)) => Ok(tool_error(
-                "send_message_failed",
-                "bot reported delivery failure",
+            // Partial publication: some parts reached Telegram before a
+            // terminal failure. The delivered ids are included verbatim so
+            // the agent knows the prefix is live and must not be resent.
+            Ok(resp) => Ok(tool_error(
+                "send_message_partially_sent",
+                format!(
+                    "partially published: message_ids {:?} were delivered, later parts failed; do not resend them",
+                    resp.message_ids
+                ),
                 None,
             )),
-            Ok(Err(e)) => Ok(tool_error("send_message_failed", format!("{e:#}"), None)),
-            Err(_) => Ok(tool_error(
-                "send_message_failed",
-                "send_message timed out",
-                None,
-            )),
+            Err(e) => Ok(tool_error("send_message_failed", format!("{e:#}"), None)),
         }
     }
 
@@ -1324,8 +1327,13 @@ impl RightBackend {
                 ));
             }
         };
-        if params.text.trim().is_empty() {
-            return Ok(tool_error("empty_content", "text must be non-empty", None));
+        let normalized = params.content.normalized_text();
+        if normalized.is_empty() {
+            return Ok(tool_error(
+                "empty_content",
+                "content must be non-empty",
+                None,
+            ));
         }
 
         let file = right_agent::agent::allowlist::read_file(agent_dir)
@@ -1380,24 +1388,36 @@ impl RightBackend {
             invocation_id,
             token: target.bot_send_token,
             chat_id: params.channel,
-            text: params.text,
+            content: params.content,
         };
-        match tokio::time::timeout(SEND_MESSAGE_TIMEOUT, client.channel_post(&request)).await {
-            Ok(Ok(resp)) if resp.ok => Ok(CallToolResult::success(vec![Content::text(
+        match client.channel_post(&request).await {
+            Ok(resp) if resp.ok => Ok(CallToolResult::success(vec![Content::text(
                 serde_json::json!({ "status": "sent", "message_id": resp.message_id }).to_string(),
             )])),
-            Ok(Ok(resp)) => Ok(tool_error(
-                "channel_post_failed",
-                resp.error
-                    .unwrap_or_else(|| "bot rejected channel post".to_owned()),
-                None,
-            )),
-            Ok(Err(e)) => Ok(tool_error("channel_post_failed", format!("{e:#}"), None)),
-            Err(_) => Ok(tool_error(
-                "channel_post_timeout",
-                "bot did not respond in time",
-                None,
-            )),
+            // Partial publication and archive-after-publish failures arrive
+            // here with `message_id` set: the id names the live Telegram
+            // message so the agent does not resend the prefix. A typed code of
+            // its own mirrors `send_message_partially_sent` and makes the
+            // no-resend contract machine-checkable.
+            Ok(resp) => {
+                let (code, id_note) = match resp.message_id {
+                    Some(id) => (
+                        "channel_post_partially_sent",
+                        format!(" (published message_id {id})"),
+                    ),
+                    None => ("channel_post_failed", String::new()),
+                };
+                Ok(tool_error(
+                    code,
+                    format!(
+                        "{}{id_note}",
+                        resp.error
+                            .unwrap_or_else(|| "bot rejected channel post".to_owned())
+                    ),
+                    None,
+                ))
+            }
+            Err(e) => Ok(tool_error("channel_post_failed", format!("{e:#}"), None)),
         }
     }
 

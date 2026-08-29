@@ -156,8 +156,7 @@ the user. Ignore the attachments field.
 Here is the YAML report of the background task:
 ";
 
-/// Platform-rendered status line prepended to a delivered async result.
-/// HTML (matches the delivery send path, which uses `ParseMode::Html`).
+/// Platform-rendered plain status line prepended as its own RichContent block.
 /// Deterministic from the run row — never produced by the relay model.
 pub(crate) fn render_delivery_header(pending: &PendingAsyncResult) -> String {
     let glyph = if pending.status == "failed" {
@@ -173,21 +172,20 @@ pub(crate) fn render_delivery_header(pending: &PendingAsyncResult) -> String {
         Some(name) => name,
         None => "cron",
     };
-    let label = crate::cc::markdown_utils::html_escape(label);
+    let label = label.replace(['\n', '\r'], " ");
     let status_word = if pending.status == "failed" {
         "failed"
     } else {
         "success"
     };
     if pending.force_notify {
-        format!("{glyph} <b>{label}</b> · manual run · {status_word}")
+        format!("{glyph} {label} · manual run · {status_word}")
     } else {
-        format!("{glyph} <b>{label}</b> · {status_word}")
+        format!("{glyph} {label} · {status_word}")
     }
 }
 
-/// Join a platform header above the relayed body. Header is already HTML;
-/// body is the relay model's content (also HTML at the send site).
+/// Join a platform status line above normalized body text for diagnostics/tests.
 pub(crate) fn prepend_delivery_header(header: &str, body: &str) -> String {
     if body.trim().is_empty() {
         header.to_string()
@@ -238,7 +236,7 @@ pub(crate) fn format_async_yaml(
     output.push_str("    notify:\n");
     output.push_str(&format!(
         "      content: \"{}\"\n",
-        crate::telegram::attachments::yaml_escape_string(&notify.content)
+        crate::telegram::attachments::yaml_escape_string(&notify.content.normalized_text())
     ));
     if let Some(ref atts) = notify.attachments
         && !atts.is_empty()
@@ -1108,13 +1106,10 @@ async fn deliver_through_session(
     }
 
     let raw = String::from_utf8_lossy(&output.stdout);
-    let (reply, _) = crate::cc::worker_reply::parse_reply_output(&raw)
+    let (mut reply, _) = crate::cc::worker_reply::parse_reply_output(&raw)
         .map_err(|e| format!("reply parse: {e}"))?;
 
-    let has_content = reply
-        .content
-        .as_deref()
-        .is_some_and(|content| !content.trim().is_empty());
+    let has_content = reply.content.is_some();
     let has_attachments = reply
         .attachments
         .as_ref()
@@ -1132,43 +1127,35 @@ async fn deliver_through_session(
     // turn an attachments-only failure non-fatal.
     let mut body_messages_sent = 0usize;
 
-    if let Some(ref content) = reply.content
-        && !content.trim().is_empty()
-    {
-        let html = crate::telegram::markdown::md_to_telegram_html(content);
-        let html = prepend_delivery_header(header, &html);
-        let parts = crate::telegram::markdown::split_html_message(&html);
+    if let Some(content) = &mut reply.content {
+        let header_plain = strip_html_tags(header);
+        content.prepend_platform_paragraph(header_plain);
         let thread = target_thread_id.map(|t| t as i32);
-        for part in &parts {
-            let send = bot.send_message_opts(target_chat_id, part, true, thread, None, None);
-            if let Err(e) =
-                run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, send).await?
-            {
-                tracing::warn!(
-                    chat_id = target_chat_id,
-                    "async delivery: HTML send failed, retrying plain: {e:#}"
-                );
-                let plain = strip_html_tags(part);
-                let fallback =
-                    bot.send_message_opts(target_chat_id, &plain, false, thread, None, None);
-                if let Err(e2) =
-                    run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, fallback)
-                        .await?
-                {
-                    tracing::error!(
-                        chat_id = target_chat_id,
-                        "async delivery: plain text fallback also failed: {e2:#}"
-                    );
-                    return Err(format!(
-                        "telegram text send failed; html: {e:#}; plain fallback: {e2:#}"
-                    ));
-                }
-                report.text_messages_sent += 1;
-                body_messages_sent += 1;
-            } else {
-                report.text_messages_sent += 1;
-                body_messages_sent += 1;
-            }
+        let send = async {
+            crate::telegram::rich_content::send(bot, target_chat_id, content, thread, None, None)
+                .await
+        };
+        // `send` is infallible at the top level (partial failures are carried
+        // in the outcome), so wrap it in Ok for the Result-typed wrapper.
+        let outcome =
+            run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, async {
+                Ok(send.await)
+            })
+            .await?
+            .map_err(|error: std::convert::Infallible| -> String { match error {} })?;
+        report.text_messages_sent += outcome.delivered.len();
+        body_messages_sent += outcome.delivered.len();
+        if !outcome.is_complete() {
+            // Any delivered text is terminal: failing here would requeue the
+            // delivery and re-send that text, duplicating the post. Log the
+            // omitted fragments and treat the delivered prefix as final.
+            tracing::error!(
+                chat_id = target_chat_id,
+                delivered_messages = outcome.delivered.len(),
+                "async delivery: rich parts failed after text delivered; \
+                 keeping delivered prefix to avoid duplicate re-send: {}",
+                outcome.error_display()
+            );
         }
     }
 

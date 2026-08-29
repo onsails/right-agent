@@ -69,6 +69,10 @@ Telegram transcript archiving is separate from Hindsight memory:
 - Successful assistant replies are archived as assistant rows after Telegram
   delivery succeeds.
 
+Standalone assistant bodies are validated `RichContent` and archived only as
+normalized plain text. Captions and platform-owned UI stay on their separate
+Markdown/HTML paths.
+
 Group response routing is switchable between `addressed` (default: respond only
 when addressed) and `all` (respond to every non-bot message in an open group),
 with per-topic overrides taking precedence in forum groups. Trusted users change

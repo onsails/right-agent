@@ -1221,7 +1221,7 @@ mod tests {
             invocation_id: req.invocation_id.clone(),
             token: "wrong-token".to_owned(),
             chat_id: -100,
-            text: "test".to_owned(),
+            content: right_rich_content::RichContent::literal("test").unwrap(),
         })
         .expect("serialize channel post");
         let response = app

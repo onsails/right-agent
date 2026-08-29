@@ -22,67 +22,61 @@ pub const BOOTSTRAP_INSTRUCTIONS: &str = include_str!("../templates/right/agent/
 /// Source: `templates/right/prompt/CRON_INSTRUCTIONS.md`
 pub const CRON_INSTRUCTIONS: &str = include_str!("../templates/right/prompt/CRON_INSTRUCTIONS.md");
 
-/// JSON schema for the structured reply format used by the Telegram bot (D-02).
+/// JSON schema shared by every agent-authored standalone delivery.
 ///
-/// Agents write replies as JSON conforming to this schema.
-/// `content` is required (may be null for media-only replies).
-/// `used_skill_receipts` is always required; emit an empty array when no
-/// `rightx-*` skills were used in the turn.
-pub const REPLY_SCHEMA_JSON: &str = r#"{
-  "type": "object",
-  "properties": {
-    "content": { "type": ["string", "null"] },
-    "reply_to_message_id": { "type": ["integer", "null"] },
-    "attachments": {
-      "type": ["array", "null"],
-      "items": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "enum": ["photo", "document", "video", "audio", "voice", "video_note", "sticker", "animation"]
-          },
-          "path": { "type": "string" },
-          "filename": { "type": ["string", "null"] },
-          "caption": { "type": ["string", "null"] },
-          "media_group_id": { "type": ["string", "null"] }
-        },
-        "required": ["type", "path"]
-      }
-    },
-    "used_skill_receipts": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "package_name": { "type": "string", "pattern": "^rightx-" },
-          "message": { "type": "string", "minLength": 1 }
-        },
-        "required": ["package_name", "message"]
-      }
-    }
-  },
-  "required": ["content", "used_skill_receipts"]
-}"#;
+/// Compile-time copy of `right_rich_content::rich_content_schema()`. The two
+/// are asserted equivalent by the MCP-side parity test
+/// `standalone_delivery_tools_share_authoritative_rich_constraints`
+/// (crates/right/src/right_backend_tests.rs), which compares the tool schemas
+/// against the authoritative crate schema; change constraints there first and
+/// mirror them here.
+macro_rules! rich_content_schema {
+    () => {
+        r##"{"oneOf":[{"type":"object","additionalProperties":false,"properties":{"text":{"type":"string","minLength":1,"maxLength":32768}},"required":["text"]},{"type":"object","additionalProperties":false,"properties":{"blocks":{"type":"array","minItems":1,"items":{"oneOf":[{"type":"object","additionalProperties":false,"properties":{"type":{"const":"paragraph"},"runs":{"$ref":"#/$defs/runs"}},"required":["type","runs"]},{"type":"object","additionalProperties":false,"properties":{"type":{"const":"heading"},"level":{"type":"integer","minimum":1,"maximum":3},"runs":{"$ref":"#/$defs/runs"}},"required":["type","level","runs"]},{"type":"object","additionalProperties":false,"properties":{"type":{"const":"list"},"ordered":{"type":"boolean"},"items":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"properties":{"runs":{"$ref":"#/$defs/runs"}},"required":["runs"]}}},"required":["type","ordered","items"]},{"type":"object","additionalProperties":false,"properties":{"type":{"const":"quote"},"runs":{"$ref":"#/$defs/runs"}},"required":["type","runs"]},{"type":"object","additionalProperties":false,"properties":{"type":{"const":"code"},"text":{"type":"string","minLength":1,"maxLength":32768},"language":{"type":["string","null"]}},"required":["type","text"]},{"type":"object","additionalProperties":false,"properties":{"type":{"const":"table"},"rows":{"type":"array","minItems":1,"items":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"properties":{"runs":{"type":"array","items":{"$ref":"#/$defs/run"}}},"required":["runs"]}}}},"required":["type","rows"]}]}}},"required":["blocks"]}]}"##
+    };
+}
+
+macro_rules! rich_schema_defs {
+    () => {
+        r##", "$defs":{"run":{"type":"object","additionalProperties":false,"properties":{"text":{"type":"string","minLength":1,"maxLength":32768},"marks":{"type":["array","null"],"uniqueItems":true,"items":{"enum":["bold","italic","strikethrough","code"]}},"link":{"type":["string","null"],"pattern":"^(https?|tg):"}},"required":["text"],"allOf":[{"if":{"properties":{"marks":{"contains":{"const":"code"}}},"required":["marks"]},"then":{"properties":{"marks":{"maxItems":1},"link":{"type":"null"}}}}]},"runs":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/run"}}}"##
+    };
+}
+
+/// JSON schema for the structured reply format used by the Telegram bot.
+pub const REPLY_SCHEMA_JSON: &str = concat!(
+    r#"{"type":"object","additionalProperties":false,"properties":{"content":{"oneOf":["#,
+    rich_content_schema!(),
+    r#",{"type":"null"}]},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}},"used_skill_receipts":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"package_name":{"type":"string","pattern":"^rightx-"},"message":{"type":"string","minLength":1}},"required":["package_name","message"]}}},"required":["content","used_skill_receipts"]"#,
+    rich_schema_defs!(),
+    "}"
+);
 
 /// JSON schema for bootstrap question and finalization modes.
-///
-/// `bootstrap_stage` is authoritative only after the worker validates it against
-/// the durable first-missing stage. File presence still gates final completion.
-pub const BOOTSTRAP_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"content":{"type":["string","null"]},"bootstrap_complete":{"type":"boolean"},"bootstrap_stage":{"enum":["user_name","agent_name","nature","vibe","emoji","final"]},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content","bootstrap_complete","bootstrap_stage"]}"#;
+pub const BOOTSTRAP_SCHEMA_JSON: &str = concat!(
+    r#"{"type":"object","additionalProperties":false,"properties":{"content":{"oneOf":["#,
+    rich_content_schema!(),
+    r#",{"type":"null"}]},"bootstrap_complete":{"type":"boolean"},"bootstrap_stage":{"enum":["user_name","agent_name","nature","vibe","emoji","final"]},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content","bootstrap_complete","bootstrap_stage"]"#,
+    rich_schema_defs!(),
+    "}"
+);
 
 /// JSON schema for cron job structured output.
-///
-/// `delivery` is always required and must choose either a notify branch with
-/// user-facing content or a silent branch with a factual reason. `run_note` is
-/// technical metadata for logs and run history.
-pub const CRON_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"delivery":{"oneOf":[{"type":"object","properties":{"kind":{"const":"notify"},"content":{"type":"string","minLength":1},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["kind","content"]},{"type":"object","properties":{"kind":{"const":"silent"},"reason":{"type":"string","minLength":1}},"required":["kind","reason"]}]},"run_note":{"type":"string"}},"required":["delivery","run_note"]}"#;
+pub const CRON_SCHEMA_JSON: &str = concat!(
+    r#"{"type":"object","additionalProperties":false,"properties":{"delivery":{"oneOf":[{"type":"object","additionalProperties":false,"properties":{"kind":{"const":"notify"},"content":"#,
+    rich_content_schema!(),
+    r#","attachments":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["kind","content"]},{"type":"object","additionalProperties":false,"properties":{"kind":{"const":"silent"},"reason":{"type":"string","minLength":1}},"required":["kind","reason"]}]},"run_note":{"type":"string"}},"required":["delivery","run_note"]"#,
+    rich_schema_defs!(),
+    "}"
+);
 
 /// Structured-output schema for background-continuation cron runs.
-///
-/// `delivery` is required and must be a notify branch with non-empty
-/// user-facing content. Silent output is forbidden because the user is waiting
-/// for the foreground answer that was sent to background.
-pub const BG_CONTINUATION_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"delivery":{"type":"object","properties":{"kind":{"const":"notify"},"content":{"type":"string","minLength":1},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["kind","content"]},"run_note":{"type":"string"}},"required":["delivery","run_note"]}"#;
+pub const BG_CONTINUATION_SCHEMA_JSON: &str = concat!(
+    r#"{"type":"object","additionalProperties":false,"properties":{"delivery":{"type":"object","additionalProperties":false,"properties":{"kind":{"const":"notify"},"content":"#,
+    rich_content_schema!(),
+    r#","attachments":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["kind","content"]},"run_note":{"type":"string"}},"required":["delivery","run_note"]"#,
+    rich_schema_defs!(),
+    "}"
+);
 
 /// First user message delivered to a probe-writer fork. Wraps the captured
 /// anchored exchange and instructs the model to ignore any newer activity
@@ -263,10 +257,10 @@ Identity files are always-loaded durable context. Right Agent explains their pur
 ## Response Rules
 
 Your final response MUST be self-contained. The user ONLY sees your final response — \
-they do NOT see tool calls, intermediate text, or thinking. Only the structured reply's \
-`content` field is delivered: assistant text blocks never reach the user, and \
-`content: null` sends nothing. Never say \"see above\", \"as shown above\", or reference \
-previous output. If you gathered data, include it in your final response.
+they do NOT see tool calls, intermediate text, or thinking. Only structured RichContent \
+`content` is delivered; assistant text blocks never reach the user, and `content: null` \
+sends nothing. Never say \"see above\" or reference previous output. If you gathered \
+data, include it in `content`.
 
 A turn is work done, then reported. When your reply promises an action you can take \
 now, the turn is unfinished: take it with your tools, then report the result. Defer \

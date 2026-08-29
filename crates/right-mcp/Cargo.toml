@@ -18,6 +18,7 @@ rand = { workspace = true }
 reqwest = { workspace = true }
 right-dashboard = { path = "../right-dashboard", version = "*" }
 right-db = { path = "../right-db", version = "*" }
+right-rich-content = { path = "../right-rich-content", version = "*" }
 rmcp = { workspace = true }
 rustls = { workspace = true }
 secrecy = { workspace = true }

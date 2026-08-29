@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/right-rich-content",
     "crates/right-agent",
     "crates/right-config",
     "crates/right-db",
@@ -58,7 +59,7 @@ hyper = { version = "1.10", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 sse-stream = "0.2"
 schemars = "1.1"
-frankenstein = { version = "0.50", features = ["client-reqwest"] }
+frankenstein = { version = "0.52", features = ["client-reqwest"] }
 governor = "0.10"
 uuid = { version = "1", features = ["v4"] }
 dashmap = "6.2"

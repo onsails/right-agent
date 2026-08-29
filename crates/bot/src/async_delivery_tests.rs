@@ -585,10 +585,7 @@ fn test_pending(
 #[test]
 fn header_success_scheduled() {
     let p = test_pending("cron", "success", Some("sources-update"), false);
-    assert_eq!(
-        render_delivery_header(&p),
-        "✓ <b>sources-update</b> · success"
-    );
+    assert_eq!(render_delivery_header(&p), "✓ sources-update · success");
 }
 
 #[test]
@@ -596,26 +593,20 @@ fn header_success_manual() {
     let p = test_pending("cron", "success", Some("sources-update"), true);
     assert_eq!(
         render_delivery_header(&p),
-        "✓ <b>sources-update</b> · manual run · success"
+        "✓ sources-update · manual run · success"
     );
 }
 
 #[test]
 fn header_failed() {
     let p = test_pending("cron", "failed", Some("sources-update"), false);
-    assert_eq!(
-        render_delivery_header(&p),
-        "✗ <b>sources-update</b> · failed"
-    );
+    assert_eq!(render_delivery_header(&p), "✗ sources-update · failed");
 }
 
 #[test]
 fn header_background_label_fallback() {
     let p = test_pending("background", "success", None, false);
-    assert_eq!(
-        render_delivery_header(&p),
-        "✓ <b>background task</b> · success"
-    );
+    assert_eq!(render_delivery_header(&p), "✓ background task · success");
 }
 
 #[test]
@@ -623,29 +614,23 @@ fn header_background_slug_normalized() {
     // Real background runs carry `producer_ref = Some("background")`; the raw
     // slug must not surface — present "background task" instead.
     let p = test_pending("background", "success", Some("background"), false);
-    assert_eq!(
-        render_delivery_header(&p),
-        "✓ <b>background task</b> · success"
-    );
+    assert_eq!(render_delivery_header(&p), "✓ background task · success");
 }
 
 #[test]
-fn header_escapes_label() {
+fn header_preserves_label_as_literal_plain_text() {
     let p = test_pending("cron", "success", Some("a<b>&c"), false);
-    assert_eq!(
-        render_delivery_header(&p),
-        "✓ <b>a&lt;b&gt;&amp;c</b> · success"
-    );
+    assert_eq!(render_delivery_header(&p), "✓ a<b>&c · success");
 }
 
 #[test]
 fn prepend_header_separates_with_blank_lines() {
-    let out = prepend_delivery_header("✓ <b>job</b> · success", "body text");
-    assert_eq!(out, "✓ <b>job</b> · success\n\nbody text");
+    let out = prepend_delivery_header("✓ job · success", "body text");
+    assert_eq!(out, "✓ job · success\n\nbody text");
 }
 
 #[test]
 fn prepend_header_handles_empty_body() {
-    let out = prepend_delivery_header("✓ <b>job</b> · success", "");
-    assert_eq!(out, "✓ <b>job</b> · success");
+    let out = prepend_delivery_header("✓ job · success", "");
+    assert_eq!(out, "✓ job · success");
 }

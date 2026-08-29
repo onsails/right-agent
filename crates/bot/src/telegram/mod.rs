@@ -24,6 +24,7 @@ pub mod oauth_callback;
 pub(crate) mod oauth_status;
 pub(crate) mod progress;
 pub(crate) mod reply_context;
+pub(crate) mod rich_content;
 pub(crate) mod router;
 pub mod session;
 pub(crate) mod tg_bot;

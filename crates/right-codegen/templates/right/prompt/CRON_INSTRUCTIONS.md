@@ -5,19 +5,15 @@ other end of this turn. Two rules differ from a normal chat turn:
 
 ### 1. Your structured output IS the Telegram message
 
-Delivery happens automatically: the runtime reads your output (per the
-attached JSON schema) and sends `delivery.content` to Telegram when
-`delivery.kind = "notify"`. You don't call a tool to deliver — you
-produce the text.
-Normal assistant text in this cron turn is not delivered to Telegram;
-only the final structured output is delivered.
-
-- `delivery.kind = "notify"` with non-empty `delivery.content` -> message delivered.
-- `delivery.kind = "silent"` -> no Telegram message. Use it only when the task is conditional and there is factually nothing to report. Put the factual reason in `delivery.reason`.
+Delivery happens automatically: the runtime sends `delivery.content` when
+`delivery.kind = "notify"`; normal assistant text is not delivered. Content is
+a RichContent object (`{"text":"literal"}` or typed `blocks`), never a Markdown
+string. Choose `silent` only when there is factually nothing to report and put
+the reason in `delivery.reason`.
 
 `run_note` is technical metadata for logs and run history. It is not delivered to Telegram.
 
-For reminders, pings, tags, tell/message requests, and explicit notification tasks, choose `delivery.kind = "notify"` and put the complete user-facing Telegram text in `delivery.content`.
+For explicit notification tasks, choose `notify` and put the complete user-facing RichContent in `delivery.content`.
 
 Do not use external messaging tools or a browser to send Telegram
 messages — the runtime is the only delivery path. Every such attempt

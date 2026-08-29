@@ -87,6 +87,9 @@ delivery channel is its structured output. Phrase the `prompt:` as a
 Imperative verbs like "send", "tag", "notify", "ping" prime the cron
 agent to look for an external messaging tool.
 
+Cron `delivery.content` is RichContent (`{"text":"literal"}` or typed
+`{"blocks":[...]}`), never a Markdown string.
+
 | User said                            | Store as                                                  |
 |--------------------------------------|-----------------------------------------------------------|
 | "Tag @bob with a reminder about X"   | "Output a reminder about X, mentioning @bob"              |

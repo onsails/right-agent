@@ -24,6 +24,7 @@ right-process = { path = "../right-process", version = "*" }
 right-providers = { path = "../right-providers", version = "*" }
 right-runtime-state = { path = "../right-runtime-state", version = "*" }
 right-sandbox = { path = "../right-sandbox", version = "*" }
+right-rich-content = { path = "../right-rich-content", version = "*" }
 right-stt = { path = "../right-stt", version = "*" }
 right-ui = { path = "../right-ui", version = "*" }
 clap = { workspace = true }

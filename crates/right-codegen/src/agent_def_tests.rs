@@ -44,6 +44,40 @@ fn reply_schema_omits_learning_signal_field() {
 }
 
 #[test]
+fn reply_schema_content_is_object_or_null_and_denies_unknown_fields() {
+    let v: serde_json::Value = serde_json::from_str(REPLY_SCHEMA_JSON).unwrap();
+    assert_eq!(v["additionalProperties"], false);
+    let content = v["properties"]["content"]["oneOf"].as_array().unwrap();
+    assert!(content.iter().any(|branch| branch["type"] == "null"));
+    assert!(!content.iter().any(|branch| branch["type"] == "string"));
+}
+
+#[test]
+fn reply_schema_defines_every_rich_block_and_run_constraint() {
+    let schema = REPLY_SCHEMA_JSON;
+    for name in ["paragraph", "heading", "list", "quote", "code", "table"] {
+        assert!(schema.contains(&format!(r#""const":"{name}""#)));
+    }
+    for mark in ["bold", "italic", "strikethrough", "code"] {
+        assert!(schema.contains(&format!(r#""{mark}""#)));
+    }
+    assert!(schema.contains("uniqueItems"));
+    assert!(schema.contains("^(https?|tg):"));
+    assert!(schema.contains("additionalProperties"));
+}
+
+#[test]
+fn reply_and_cron_schemas_expose_rich_character_limit() {
+    for schema in [
+        REPLY_SCHEMA_JSON,
+        CRON_SCHEMA_JSON,
+        BG_CONTINUATION_SCHEMA_JSON,
+    ] {
+        assert!(schema.contains(r#""maxLength":32768"#), "{schema}");
+    }
+}
+
+#[test]
 fn bootstrap_schema_json_is_valid() {
     let parsed: serde_json::Value = serde_json::from_str(BOOTSTRAP_SCHEMA_JSON)
         .expect("BOOTSTRAP_SCHEMA_JSON must be valid JSON");
@@ -680,9 +714,10 @@ fn cron_schema_has_notify_and_silent_delivery_branches() {
         notify_required.iter().filter_map(|x| x.as_str()).collect();
     assert!(notify_required_names.contains(&"kind"));
     assert!(notify_required_names.contains(&"content"));
-    assert_eq!(
-        notify_branch["properties"]["content"]["minLength"].as_i64(),
-        Some(1)
+    let content = &notify_branch["properties"]["content"];
+    assert!(
+        content["oneOf"].is_array(),
+        "notify content must be RichContent"
     );
 
     let silent_branch = branches
@@ -718,10 +753,11 @@ fn bg_continuation_schema_requires_notify_delivery_and_run_note() {
         .unwrap();
     assert_eq!(kind, "notify");
 
-    let min_len = v["properties"]["delivery"]["properties"]["content"]["minLength"]
-        .as_i64()
-        .unwrap();
-    assert_eq!(min_len, 1);
+    let content = &v["properties"]["delivery"]["properties"]["content"];
+    assert!(
+        content["oneOf"].is_array(),
+        "background content must be RichContent"
+    );
 }
 
 #[test]

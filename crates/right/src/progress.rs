@@ -24,10 +24,11 @@ pub(crate) struct SendProgressParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SendMessageParams {
-    /// Optional plain-text body sent as its own message.
+    /// Optional validated rich body sent as its own message.
     #[serde(default)]
-    pub(crate) content: Option<String>,
+    pub(crate) content: Option<right_rich_content::RichContent>,
     /// Standalone rich attachments; each renders as its own Telegram message
     /// (or a media group when `media_group_id` is shared).
     #[serde(default)]

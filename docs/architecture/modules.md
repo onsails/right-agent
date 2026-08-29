@@ -6,6 +6,10 @@
 
 ## Module Map
 
+### right-rich-content
+
+- `RichContent`, `Block`, and `Run` own the validated standalone-message schema, normalized archive text, and platform-owned paragraph composition.
+
 ### right-platform-knobs
 
 - `IDLE_THRESHOLD_SECS` / `IDLE_THRESHOLD_MIN` - UX-politeness gate for cron delivery and matching agent-facing prose.
@@ -126,8 +130,8 @@
 
 - `lib.rs` — constructs `InternalClient`, waits for typed database-owner readiness, then starts sandbox and Telegram runtime without opening `data.db` or `providers.db`.
 - `db.rs`, `provider_bindings.rs` — typed domain IPC adapters; provider secret DTOs are converted immediately into sandbox bindings and dropped.
-- `cc/` — generic Claude Code subprocess plumbing: invocation builder, prompt assembly, stream parser, structured-reply parser, outbound DTOs, and shared markdown helpers.
-- `telegram/` — frankenstein `RightBot` client wrapper (`tg_bot.rs`), update router (`router.rs`), command parser (`command.rs`), `Message` field helpers (`msg_ext.rs`), handler, per-session worker, session table, chat-ID filter, OAuth callback server, Telegram markdown rendering/splitting, dashboard routes, and attachment delivery (with STT integration).
+- `cc/` — Claude Code invocation, prompts, streams, structured-reply parsing, and outbound DTOs.
+- `telegram/` — frankenstein client, update routing, RichContent typed-block delivery with plain fallback, Markdown captions/platform UI, archives, dashboard routes, and attachments.
 - `telegram/dashboard.rs` — Axum route mounting for `/dashboard/<agent>/`, dashboard API handlers, Telegram menu/button setup, and injected bot-owned auth/runtime state.
 - `telegram/dashboard/health.rs` — explicit read-only `/health/*` probes for doctor output and bounded sandbox disk/memory/process snapshots.
 - `telegram/dashboard/identity.rs` — sandbox-first bounded identity file reads with host-mirror fallback.

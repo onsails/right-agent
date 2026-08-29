@@ -9,8 +9,7 @@
 //!   the limits teloxide's `Throttle` adaptor used to enforce.
 //! - A cached `get_me` identity resolved once at [`RightBot::connect`] time,
 //!   replacing teloxide's `CacheMe` adaptor.
-//! - Uniform defaults for regular messages: HTML parse mode, optional thread-id
-//!   threading, and bounded 429 retry; channel Rich Markdown stays unconverted.
+//! - Uniform defaults for regular HTML/plain messages and validated rich-block sends.
 //!
 //! Sibling `telegram::*` modules call into [`RightBot`] rather than touching
 //! `frankenstein` directly.
@@ -507,22 +506,24 @@ impl RightBot {
         Ok(resp.result)
     }
 
-    /// Send Telegram Bot API Rich Markdown without converting it to HTML.
-    /// Throttling and bounded 429 retry behavior match regular text sends.
-    pub(crate) async fn send_rich_markdown(
+    /// Send a validated Telegram rich block tree.
+    pub(crate) async fn send_rich_content(
         &self,
         chat_id: i64,
-        markdown: &str,
+        rich_message: InputRichMessage,
         thread: Option<i32>,
+        reply_to: Option<i32>,
+        markup: Option<InlineKeyboardMarkup>,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
-        let rich_message = InputRichMessage::builder()
-            .markdown(markdown.to_owned())
-            .build();
         let params = frankenstein::methods::SendRichMessageParams::builder()
             .chat_id(chat_id)
             .rich_message(rich_message)
             .maybe_message_thread_id(thread)
+            .maybe_reply_parameters(
+                reply_to.map(|id| ReplyParameters::builder().message_id(id).build()),
+            )
+            .maybe_reply_markup(markup.map(ReplyMarkup::InlineKeyboardMarkup))
             .build();
         let resp = with_retry_text(|| self.bot.send_rich_message(&params)).await?;
         Ok(resp.result)
@@ -1370,64 +1371,181 @@ mod with_retry_tests {
 }
 
 #[cfg(test)]
-mod rich_markdown_tests {
+mod rich_content_tests {
     use super::*;
-    use axum::Router;
-    use axum::body::Bytes;
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-    use axum::routing::post;
-
-    const RISKOFF_CHANNEL_POST: &str = "🔍🐳 #HYPE #Hyperliquid Wallet Lora has topped $100M in total losses on Hyperliquid: it sold part of a 144.58K $HYPE (~$12.1M) transfer and unstaked another 274.93K $HYPE (~$23.12M) batch for sale, still holding 166.97K $HYPE (~$14M) to offload. Its $51.5M $HYPE short carries an unrealized loss of ~$18.5M.";
+    use axum::{Router, body::Bytes, http::StatusCode, response::IntoResponse, routing::post};
 
     #[tokio::test]
-    async fn riskoff_channel_post_uses_telegram_rich_markdown_without_html_conversion() {
+    async fn riskoff_channel_post_uses_typed_rich_blocks_without_markdown_parsing() {
         let (body_tx, mut body_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new().route("/botTEST-TOKEN/sendRichMessage", post(move |body: Bytes| {
+            let body_tx = body_tx.clone();
+            async move {
+                body_tx.send(body).expect("capture request");
+                (StatusCode::OK, r#"{"ok":true,"result":{"message_id":321,"date":0,"chat":{"id":-1001234567890,"type":"channel"}}}"#).into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let bot = RightBot::new_for_test(format!("http://{address}/botTEST-TOKEN"));
+        let content = right_rich_content::RichContent::literal("#HYPE ~$18.5M").unwrap();
+        let outcome =
+            crate::telegram::rich_content::send(&bot, -1001234567890, &content, None, None, None)
+                .await;
+        assert!(outcome.is_complete());
+        assert_eq!(outcome.delivered[0].message_id, 321);
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body_rx.recv().await.unwrap()).unwrap();
+        assert!(payload["rich_message"].get("markdown").is_none());
+        assert_eq!(payload["rich_message"]["blocks"][0]["type"], "paragraph");
+        assert_eq!(
+            payload["rich_message"]["blocks"][0]["text"],
+            "#HYPE ~$18.5M"
+        );
+        assert!(payload.get("parse_mode").is_none());
+        assert!(
+            payload["rich_message"]
+                .get("skip_entity_detection")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn rich_split_replies_each_part_and_attaches_markup_only_to_last() {
+        let (body_tx, mut body_rx) = tokio::sync::mpsc::unbounded_channel();
+        let next_id = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(10));
         let app = Router::new().route(
             "/botTEST-TOKEN/sendRichMessage",
             post(move |body: Bytes| {
                 let body_tx = body_tx.clone();
+                let next_id = next_id.clone();
                 async move {
-                    body_tx
-                        .send(body)
-                        .expect("test must receive request body");
+                    body_tx.send(body).expect("capture request");
+                    let id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     (
                         StatusCode::OK,
-                        r#"{"ok":true,"result":{"message_id":321,"date":0,"chat":{"id":-1001234567890,"type":"channel"}}}"#,
+                        axum::Json(serde_json::json!({
+                            "ok": true,
+                            "result": {"message_id": id, "date": 0, "chat": {"id": 7, "type": "private"}}
+                        })),
                     )
-                        .into_response()
                 }
             }),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind mock Telegram API");
-        let address = listener.local_addr().expect("read mock API address");
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve mock Telegram API");
-        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let bot = RightBot::new_for_test(format!("http://{address}/botTEST-TOKEN"));
+        let text = "界".repeat(20_000);
+        let content: right_rich_content::RichContent = serde_json::from_value(serde_json::json!({
+            "blocks": [
+                {"type":"paragraph", "runs":[{"text": text}]},
+                {"type":"paragraph", "runs":[{"text": text}]}
+            ]
+        }))
+        .unwrap();
+        let markup = InlineKeyboardMarkup::builder()
+            .inline_keyboard(vec![vec![
+                InlineKeyboardButton::builder()
+                    .text("Details")
+                    .callback_data("errdet:9")
+                    .build(),
+            ]])
+            .build();
 
-        let message = bot
-            .send_rich_markdown(-1001234567890, RISKOFF_CHANNEL_POST, None)
-            .await
-            .expect("Rich Markdown send must succeed");
+        let outcome =
+            crate::telegram::rich_content::send(&bot, 7, &content, None, Some(42), Some(markup))
+                .await;
 
-        assert_eq!(message.message_id, 321);
-        let body = body_rx.recv().await.expect("receive captured request body");
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("decode Telegram request JSON");
+        assert!(outcome.is_complete());
         assert_eq!(
-            payload["rich_message"]["markdown"], RISKOFF_CHANNEL_POST,
-            "Telegram must receive the exact original Markdown"
+            outcome
+                .delivered
+                .iter()
+                .map(|message| message.message_id)
+                .collect::<Vec<_>>(),
+            [10, 11]
         );
-        assert_eq!(RISKOFF_CHANNEL_POST.matches('~').count(), 4);
-        assert!(payload.get("parse_mode").is_none());
-        let raw_body = std::str::from_utf8(&body).expect("request body is UTF-8");
-        assert!(!raw_body.contains("<s>"));
-        assert!(!raw_body.contains("HTML"));
+        let first: serde_json::Value =
+            serde_json::from_slice(&body_rx.recv().await.unwrap()).unwrap();
+        let second: serde_json::Value =
+            serde_json::from_slice(&body_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(first["reply_parameters"]["message_id"], 42);
+        assert_eq!(second["reply_parameters"]["message_id"], 42);
+        assert!(first.get("reply_markup").is_none());
+        assert_eq!(
+            second["reply_markup"]["inline_keyboard"][0][0]["callback_data"],
+            "errdet:9"
+        );
+    }
+
+    #[tokio::test]
+    async fn deterministic_rich_rejection_falls_back_to_4096_character_parts() {
+        let (body_tx, mut body_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new()
+            .route(
+                "/botTEST-TOKEN/sendRichMessage",
+                post(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(serde_json::json!({
+                            "ok": false,
+                            "error_code": 400,
+                            "description": "Bad Request: unsupported rich block"
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/botTEST-TOKEN/sendMessage",
+                post(move |body: Bytes| {
+                    let body_tx = body_tx.clone();
+                    async move {
+                        body_tx.send(body).expect("capture fallback");
+                        (
+                            StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "ok": true,
+                                "result": {"message_id": 77, "date": 0, "chat": {"id": 7, "type": "private"}}
+                            })),
+                        )
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let bot = RightBot::new_for_test(format!("http://{address}/botTEST-TOKEN"));
+        let content = right_rich_content::RichContent::literal("🦀".repeat(4_097)).unwrap();
+
+        let outcome =
+            crate::telegram::rich_content::send(&bot, 7, &content, None, Some(42), None).await;
+        // 4,097 astral emoji = 8,194 UTF-16 units → three chunks bounded at
+        // 4,096 units (2,048 emoji) each.
+        assert!(outcome.is_complete());
+        assert_eq!(outcome.delivered.len(), 3);
+        let first: serde_json::Value =
+            serde_json::from_slice(&body_rx.recv().await.unwrap()).unwrap();
+        let second: serde_json::Value =
+            serde_json::from_slice(&body_rx.recv().await.unwrap()).unwrap();
+        let third: serde_json::Value =
+            serde_json::from_slice(&body_rx.recv().await.unwrap()).unwrap();
+        // Plain fallback chunks are bounded in UTF-16 units: 4,096 units of
+        // astral emoji is 2,048 scalars.
+        assert_eq!(
+            first["text"].as_str().unwrap().encode_utf16().count(),
+            4_096
+        );
+        assert_eq!(
+            second["text"].as_str().unwrap().encode_utf16().count(),
+            4_096
+        );
+        assert_eq!(third["text"].as_str().unwrap(), "🦀");
+        assert_eq!(first["reply_parameters"]["message_id"], 42);
+        assert_eq!(third["reply_parameters"]["message_id"], 42);
     }
 }
 

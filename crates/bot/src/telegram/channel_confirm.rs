@@ -364,7 +364,8 @@ mod tests {
                 "can_restrict_members": true,
                 "can_promote_members": false,
                 "can_change_info": true,
-                "can_invite_users": true
+                "can_invite_users": true,
+                "can_send_welcome_messages": false
             }),
             "member" => serde_json::json!({
                 "status": "member",

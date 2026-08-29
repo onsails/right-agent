@@ -244,6 +244,63 @@ fn tools_list_includes_channel_tools() {
     assert!(names.contains(&"channel_post"), "missing channel_post");
 }
 
+#[test]
+fn standalone_delivery_tools_expose_rich_content_not_text() {
+    let (backend, _, _tmp) = make_backend();
+    let tools = backend.tools_list();
+    let channel = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "channel_post")
+        .unwrap();
+    assert!(channel.input_schema["properties"].get("content").is_some());
+    assert!(channel.input_schema["properties"].get("text").is_none());
+    let send = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "send_message")
+        .unwrap();
+    let content = &send.input_schema["properties"]["content"];
+    assert_eq!(content["anyOf"][0]["$ref"], "#/$defs/RichContent");
+    let definitions = &send.input_schema["$defs"];
+    assert!(
+        definitions["block"].to_string().contains("paragraph"),
+        "generated send_message definitions: {definitions}"
+    );
+}
+
+#[test]
+fn standalone_delivery_tools_share_authoritative_rich_constraints() {
+    let (backend, _, _tmp) = make_backend();
+    let tools = backend.tools_list();
+    let expected = right_rich_content::rich_content_schema().to_value();
+    let expected_text = &expected["oneOf"][0]["properties"]["text"];
+    let expected_block = &expected["$defs"]["block"];
+    let expected_run = &expected["$defs"]["run"];
+    for name in ["send_message", "channel_post"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == name)
+            .unwrap();
+        let definitions = &tool.input_schema["$defs"];
+        let rich = &definitions["RichContent"];
+        assert_eq!(&rich["oneOf"][0]["properties"]["text"], expected_text);
+        assert_eq!(&definitions["block"], expected_block);
+        assert_eq!(&definitions["run"], expected_run);
+        let encoded = serde_json::json!({"rich": rich, "defs": definitions}).to_string();
+        for constraint in [
+            r#""maxLength":32768"#,
+            r#""minItems":1"#,
+            r#""uniqueItems":true"#,
+            r#""maximum":3"#,
+            r#""pattern":"^(https?|tg):""#,
+        ] {
+            assert!(
+                encoded.contains(constraint),
+                "{name} missing {constraint}: {encoded}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn channel_list_returns_only_opened_channels() {
     let (backend, agents_dir, _tmp) = make_backend();
@@ -351,7 +408,7 @@ async fn channel_post_rejects_unopened_channel_before_uds() {
             "test-agent",
             &agent_dir,
             "channel_post",
-            json!({ "channel": -200, "text": "hello" }),
+            json!({ "channel": -200, "content": {"text": "hello"} }),
             crate::progress::ToolCallContext {
                 invocation_id: Some("inv".to_owned()),
             },
@@ -375,7 +432,7 @@ async fn channel_post_requires_registered_invocation() {
             "test-agent",
             &agent_dir,
             "channel_post",
-            json!({ "channel": -200, "text": "hello" }),
+            json!({ "channel": -200, "content": {"text": "hello"} }),
             crate::progress::ToolCallContext {
                 invocation_id: Some("unknown".to_owned()),
             },
@@ -406,7 +463,7 @@ async fn channel_post_rejects_nonforeground_noncron_invocation() {
             "test-agent",
             &agent_dir,
             "channel_post",
-            json!({ "channel": -200, "text": "hello" }),
+            json!({ "channel": -200, "content": {"text": "hello"} }),
             crate::progress::ToolCallContext {
                 invocation_id: Some("background".to_owned()),
             },

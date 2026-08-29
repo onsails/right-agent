@@ -409,9 +409,19 @@ sandbox restore, on bot startup, and after normal CC invocations.
 ## JSON Schemas
 
 ### reply-schema.json (normal mode)
-Required: `content` (string|null), `used_skill_receipts` (array; empty
-allowed).
-Optional: `reply_to_message_id`, `attachments`.
+Required: `content` (`RichContent|null`) and `used_skill_receipts` (array; empty
+allowed). Optional: `reply_to_message_id`, `attachments`.
+
+`RichContent` is exactly `{"text": string}` or `{"blocks": Block[]}` with
+unknown fields denied and each source text capped at 32,768 UTF-16 code units
+(Telegram's length unit; the JSON-Schema `maxLength` of 32768 remains a
+code-point upper bound, so astral-heavy text hits the runtime limit first).
+It supports paragraph, heading, list, quote, code, table, and marked/link runs;
+runtime validation enforces visible content, link schemes, mark compatibility,
+and rectangular tables. Delivery batches top-level blocks, and deterministic
+rich-format rejection falls back to normalized plain chunks of at most 4,096
+UTF-16 units. A multi-part send that fails partway preserves every delivered
+message and reports partial publication instead of dropping it.
 
 **Attachments.** Each item in `attachments` accepts an optional `media_group_id`
 (nullable string). Items sharing the same value are delivered as a single
@@ -427,7 +437,7 @@ drive lifecycle usage accounting. Legacy `learning_signal` and
 stale client emits them.
 
 ### bootstrap-schema.json (bootstrap modes)
-Required: `content` (string|null), `bootstrap_complete` (boolean), and
+Required: `content` (`RichContent|null`), `bootstrap_complete` (boolean), and
 `bootstrap_stage` (`user_name|agent_name|nature|vibe|emoji|final`). Optional:
 `reply_to_message_id`, `attachments`.
 
@@ -444,14 +454,14 @@ the final structured output is delivered.
 
 `delivery` is one of:
 
-- `{"kind":"notify","content":"...","attachments":null}` - user-facing Telegram delivery.
+- `{"kind":"notify","content":{"text":"..."},"attachments":null}` - user-facing Telegram delivery.
 - `{"kind":"silent","reason":"..."}` - explicit silent run for conditional checks with nothing to report.
 
 `run_note` is technical history/debug metadata and is never delivered.
 
 ### BG_CONTINUATION_SCHEMA_JSON (Telegram background continuation)
 
-Required: `delivery` and `run_note`. `delivery.kind` is always `"notify"` and `delivery.content` has `minLength: 1`; silent output is forbidden.
+Required: `delivery` and `run_note`. `delivery.kind` is always `"notify"` and `delivery.content` is non-empty RichContent; silent output is forbidden.
 
 ### PREFILTER_SCHEMA_JSON (per-turn Haiku classifier)
 
@@ -580,10 +590,9 @@ Each entry has `package_name` (pattern `^rightx-`) and `message`
 (minLength 1). The `message` is authored in the same language as the reply
 `content` (enforced by prose in `OPERATING_INSTRUCTIONS.md`, not the schema —
 no schema field carries a `description`). The worker filters non-rightx
-package_names and renders each entry as
-`\n\n💡 <message> (<code><package_name></code>)` after the assistant's
-content, and records `use_count` + `last_used_at` for the named skill in the
-skill lifecycle database.
+package names and appends one platform-owned paragraph (`💡 <message>
+(`<package_name>`)`) without modifying the agent's RichContent nodes, then records
+`use_count` + `last_used_at` in the skill lifecycle database.
 
 ## MCP Server Instructions
 
@@ -644,15 +653,12 @@ conversation-scope `mcp__right__thread_search`, `mcp__right__chat_search`,
 learning-invocation-only `mcp__right__skill_learning_start` and
 `mcp__right__skill_learning_finish`.
 
-`mcp__right__send_message` is available only for the current foreground Telegram
-invocation. Each call delivers one standalone Telegram message — text and/or
-attachments (e.g. photo+caption or document) whose paths must live under
-`/sandbox/outbox/`. An agent calls it once per message to emit several messages
-in a turn (e.g. multiple posts), capped at 20 calls per turn; after sending, the
-terminal structured reply may be `content: null` rather than retried to fan out
-more messages. Non-foreground turns are refused with `send_message_forbidden`,
-and other failures surface as `send_message_unavailable`, `send_message_empty`,
-`send_message_bad_path`, `send_message_limit`, or `send_message_failed`.
+`mcp__right__send_message` is foreground-only. Each call delivers one standalone
+validated RichContent body and/or attachments whose paths live under
+`/sandbox/outbox/`, capped at 20 calls per turn. After sending, the terminal
+reply may be `content: null`. Non-foreground turns return
+`send_message_forbidden`; other failures use the existing send-message error
+codes.
 
 `mcp__right__thread_search`, `mcp__right__chat_search`, and
 `mcp__right__get_messages_by_id` are local transcript tools for the current
@@ -675,13 +681,11 @@ allowlist.yaml); the bot archives posts of opened channels (`channel_post`
 updates, never routed to the worker). `channel_list`/`channel_read` are
 read-only and available in every invocation kind; `channel_read` returns posts
 truncated to 180 chars, newest first (default 20, max 100).
-`mcp__right__channel_post` publishes to an opened channel and is
-foreground+cron only, max 10 per turn (`channel_post_limit`); the target
-channel is validated against the allowlist on both the aggregator and bot
-sides (`channel_not_opened`), and non-foreground/non-cron kinds are refused
-with `channel_post_forbidden`. The `channel` argument is the only
-agent-suppliable chat id among built-ins — accepted because channel entries
-are operator-confirmed. Channel posts are untrusted external content.
+`mcp__right__channel_post(channel, content)` publishes validated RichContent to
+an opened channel and is foreground+cron only, max 10 per turn. There is no
+`text` argument. The channel is checked against the allowlist on both aggregator
+and bot sides; normalized text is archived after delivery. Channel posts read
+from Telegram remain untrusted external content.
 
 `mcp__right__cron_trigger` accepts `notify=true` to force a verification
 report — it overrides the run's silent decision and skips the delivery idle

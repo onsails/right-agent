@@ -726,7 +726,9 @@ fn background_failure_payload(
     user_content: &str,
     reason: &str,
 ) -> Result<(String, String, String), right_db::DbError> {
-    let delivery_json = crate::cron::notify_delivery_json(user_content, None)
+    let content = right_rich_content::RichContent::literal(user_content.to_owned())
+        .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
+    let delivery_json = crate::cron::notify_delivery_json(&content, None)
         .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let run_note = format!("Background run `{run_id}` failed before producing a result");
     let error_json = serde_json::json!({

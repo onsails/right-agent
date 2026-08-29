@@ -35,7 +35,7 @@ pub(crate) struct CronReplyOutput {
 /// User-facing notification from a cron job.
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 pub(crate) struct CronNotify {
-    pub content: String,
+    pub content: right_rich_content::RichContent,
     pub attachments: Option<Vec<OutboundAttachment>>,
 }
 
@@ -43,7 +43,7 @@ pub(crate) struct CronNotify {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum CronDeliveryDecision {
     Notify {
-        content: String,
+        content: right_rich_content::RichContent,
         attachments: Option<Vec<OutboundAttachment>>,
     },
     Silent {
@@ -74,26 +74,24 @@ impl CronDeliveryDecision {
 
     fn validate(&self) -> Result<(), String> {
         match self {
-            Self::Notify { content, .. } if content.trim().is_empty() => {
-                Err("empty notify content".to_string())
-            }
+            Self::Notify { content, .. } => content.validate().map_err(|e| e.to_string()),
             Self::Silent { reason } if reason.trim().is_empty() => {
                 Err("empty silent reason".to_string())
             }
-            _ => Ok(()),
+            Self::Silent { .. } => Ok(()),
         }
     }
 }
 
 pub(crate) fn notify_delivery_json(
-    content: &str,
+    content: &right_rich_content::RichContent,
     attachments: Option<&[OutboundAttachment]>,
 ) -> Result<String, serde_json::Error> {
     #[derive(serde::Serialize)]
     #[serde(tag = "kind", rename_all = "snake_case")]
     enum DeliveryRef<'a> {
         Notify {
-            content: &'a str,
+            content: &'a right_rich_content::RichContent,
             attachments: Option<&'a [OutboundAttachment]>,
         },
     }
@@ -104,12 +102,39 @@ pub(crate) fn notify_delivery_json(
 }
 
 pub(crate) fn notify_from_delivery_json(raw: &str) -> Result<CronNotify, String> {
-    let decision: CronDeliveryDecision =
+    let value: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| format!("parse delivery_json: {e}"))?;
+    let value = upgrade_legacy_delivery_content(value)?;
+    let decision: CronDeliveryDecision =
+        serde_json::from_value(value).map_err(|e| format!("parse delivery_json: {e}"))?;
     decision.validate()?;
     decision
         .as_notify()
         .ok_or_else(|| "delivery_json is not a notify decision".to_string())
+}
+
+fn upgrade_legacy_delivery_content(
+    mut value: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    if let Some(content) = value.get_mut("content")
+        && let Some(text) = content.as_str()
+    {
+        // Legacy queued strings predate the rich-content schema and carry no
+        // authoring cap, so they upgrade as platform-owned text and may fan
+        // out over several blocks at delivery time. Whitespace-only content
+        // has no visible body to deliver; the row keeps failing loudly instead
+        // of being upgraded into an object Telegram would reject as empty.
+        if text.trim().is_empty() {
+            return Err(format!(
+                "legacy delivery content: {}",
+                right_rich_content::ValidationError::EmptyContent
+            ));
+        }
+        let rich = right_rich_content::RichContent::platform_text(text.to_owned())
+            .map_err(|e| format!("legacy delivery content: {e}"))?;
+        *content = serde_json::to_value(rich).map_err(|e| e.to_string())?;
+    }
+    Ok(value)
 }
 
 /// Extract the filename component from a sandbox attachment path.
@@ -556,6 +581,8 @@ fn cron_shutdown_failure_payload(
     let content = format!(
         "Cron job `{job_name}` was interrupted because the bot is shutting down. Run `{run_id}` did not finish."
     );
+    let content = right_rich_content::RichContent::paragraph(content)
+        .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let delivery_json = notify_delivery_json(&content, None)
         .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let run_note = format!("Cron job `{job_name}` interrupted by shutdown");
@@ -1149,6 +1176,7 @@ async fn execute_job(
                 job = %job_name,
                 run_id = %run_id,
                 exit_code = ?exit_code,
+
                 stderr_tail = %stderr_tail,
                 "cron job produced no terminal result"
             );
@@ -1230,10 +1258,16 @@ async fn execute_job(
                             if spec.trigger_force_notify
                                 && let Some(reason) = other.silent_reason()
                             {
-                                notify_delivery_json(
-                                    &format!("Verification run — nothing to report. {reason}"),
-                                    None,
-                                )
+                                let content = match right_rich_content::RichContent::literal(
+                                    format!("Verification run — nothing to report. {reason}"),
+                                ) {
+                                    Ok(content) => content,
+                                    Err(error) => {
+                                        tracing::error!(job = %job_name, "verification notice was empty: {error}");
+                                        return;
+                                    }
+                                };
+                                notify_delivery_json(&content, None)
                             } else {
                                 serde_json::to_string(other)
                             }
@@ -1501,7 +1535,11 @@ async fn execute_job(
                             detail = %c.detail,
                             "cron failure classified; skipping futile reflection"
                         );
-                        c.user_message
+                        // user_message embeds unbounded result text; the
+                        // platform constructor splits at the rich limit
+                        // instead of failing (or panicking) on it.
+                        right_rich_content::RichContent::platform_text(c.user_message)
+                            .expect("classified failure message is non-empty")
                     }
                     None => {
                         tracing::info!(
@@ -1509,7 +1547,10 @@ async fn execute_job(
                             detail = %raw_detail,
                             "cron hit budget cap; skipping futile reflection"
                         );
-                        raw_content
+                        // raw_content embeds unbounded raw_detail (terminal
+                        // result text or raw stderr): never length-validated.
+                        right_rich_content::RichContent::platform_text(raw_content.clone())
+                            .expect("cron failure message is non-empty")
                     }
                 }
             } else {
@@ -1555,7 +1596,8 @@ async fn execute_job(
                     }
                     Err(e) => {
                         tracing::warn!(job = %job_name, "cron reflection failed: {e:#}; using raw content");
-                        raw_content
+                        right_rich_content::RichContent::platform_text(raw_content.clone())
+                            .expect("cron failure message is non-empty")
                     }
                 }
             };
@@ -3304,12 +3346,12 @@ mod tests {
     #[test]
     fn parse_cron_output_notify_delivery() {
         let lines = vec![
-            r#"{"type":"result","subtype":"success","structured_output":{"delivery":{"kind":"notify","content":"BTC broke 100k","attachments":null},"run_note":"Checked 5 pairs"}}"#.to_string(),
+            r#"{"type":"result","subtype":"success","structured_output":{"delivery":{"kind":"notify","content":{"text":"BTC broke 100k"},"attachments":null},"run_note":"Checked 5 pairs"}}"#.to_string(),
         ];
         let out = parse_cron_output(&lines).unwrap();
         assert_eq!(out.run_note, "Checked 5 pairs");
         let notify = out.delivery.as_notify().unwrap();
-        assert_eq!(notify.content, "BTC broke 100k");
+        assert_eq!(notify.content.normalized_text(), "BTC broke 100k");
         assert!(notify.attachments.is_none());
     }
 
@@ -3375,16 +3417,52 @@ mod tests {
     #[test]
     fn parse_cron_output_empty_notify_content_is_invalid() {
         let lines = vec![
-            r#"{"type":"result","subtype":"success","structured_output":{"delivery":{"kind":"notify","content":"   "},"run_note":"bad"}}"#.to_string(),
+            r#"{"type":"result","subtype":"success","structured_output":{"delivery":{"kind":"notify","content":{"text":"   "}},"run_note":"bad"}}"#.to_string(),
         ];
         let err = parse_cron_output(&lines).unwrap_err();
-        assert!(err.contains("empty notify content"));
+        assert!(err.contains("visible text"));
     }
 
     #[test]
     fn notify_from_delivery_json_rejects_empty_content() {
         let err = notify_from_delivery_json(r#"{"kind":"notify","content":"   "}"#).unwrap_err();
-        assert!(err.contains("empty notify content"));
+        assert!(err.contains("visible text"));
+    }
+
+    #[test]
+    fn notify_from_delivery_json_upgrades_legacy_string_content() {
+        let notify =
+            notify_from_delivery_json(r#"{"kind":"notify","content":"legacy *literal*"}"#).unwrap();
+        assert_eq!(notify.content.normalized_text(), "legacy *literal*");
+    }
+
+    #[test]
+    fn notify_from_delivery_json_upgrades_oversized_legacy_string() {
+        // A legacy row queued before the rich-content cap must still upgrade
+        // and deliver: 40,001 chars is over `MAX_RICH_MESSAGE_UTF16` but the
+        // platform-owned upgrade fans it out at delivery time.
+        let body = "x".repeat(40_001);
+        let raw = format!(r#"{{"kind":"notify","content":"{body}"}}"#);
+        let notify = notify_from_delivery_json(&raw).unwrap();
+        notify.content.validate().unwrap();
+        let parts = notify.content.delivery_parts();
+        assert!(parts.len() > 1);
+        assert_eq!(
+            parts
+                .iter()
+                .map(right_rich_content::RichContent::normalized_text)
+                .collect::<String>(),
+            body
+        );
+    }
+
+    #[test]
+    fn notify_from_delivery_json_rejects_whitespace_only_legacy_string() {
+        let err = notify_from_delivery_json(r#"{"kind":"notify","content":" \n\t "}"#).unwrap_err();
+        assert!(
+            err.contains("legacy delivery content") && err.contains("visible text"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -3495,7 +3573,7 @@ mod tests {
         .unwrap();
         let output = CronReplyOutput {
             delivery: CronDeliveryDecision::Notify {
-                content: "done".into(),
+                content: right_rich_content::RichContent::literal("done").unwrap(),
                 attachments: None,
             },
             run_note: "checked".into(),
@@ -3516,10 +3594,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(row.0, "checked");
-        assert_eq!(
-            row.1,
-            r#"{"kind":"notify","content":"done","attachments":null}"#
-        );
+        let stored: serde_json::Value = serde_json::from_str(&row.1).unwrap();
+        assert_eq!(stored["kind"], "notify");
+        assert_eq!(stored["content"]["text"], "done");
         assert_eq!(row.2, 1);
         assert_eq!(row.3, "pending");
     }
@@ -4059,8 +4136,11 @@ mod target_snapshot_tests {
             },
             run_note: "checked".into(),
         };
-        let delivery_json =
-            notify_delivery_json("Verification run — nothing to report. no changes", None).unwrap();
+        let content = right_rich_content::RichContent::literal(
+            "Verification run — nothing to report. no changes",
+        )
+        .unwrap();
+        let delivery_json = notify_delivery_json(&content, None).unwrap();
 
         let status =
             persist_successful_cron_output(&conn, "run-fns", &cron_output, &delivery_json, true)

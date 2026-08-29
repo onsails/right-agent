@@ -363,29 +363,23 @@ The learning prefilter is stricter: it omits MCP config and passes
 
 ## Foreground `send_message` delivery
 
-`mcp__right__send_message` lets a foreground agent push one or more
-intermediate messages — text, attachments, or both — to the originating chat
-mid-turn, distinct from the turn's final structured-output deliverable. Like
-`send_progress`, it is a built-in RightBackend tool, foreground-only, and
-disallowed on reflection/cron/delivery/background invocations via
-`--disallowedTools`.
+`mcp__right__send_message` lets a foreground agent push standalone content,
+attachments, or both to the originating chat mid-turn. It is foreground-only
+and disallowed on reflection/cron/delivery/background invocations.
 
-Tool arguments are `content?` (optional message text) and `attachments[]` (zero
-or more files). The shared DTOs live in `right-mcp` so the aggregator and bot
-agree on the wire shape: `SendMessageRequest` carries the agent-supplied
-`content`/`attachments`, and `SendMessageResponse` reports per-call delivery
-status. Each `MessageAttachmentDto` (caption, path, kind/mime hints) maps to a
-bot-side `OutboundAttachment` before delivery. Attachment paths MUST resolve
-under `/sandbox/outbox/`; paths outside that prefix are rejected.
-
-Channel reuse, not a new transport: the aggregator routes `send_message` over
-the same Unix-socket channel as `send_progress`, calling the bot's new
-`POST /message/send` route instead of `/progress/send`. The bot handler shares
-the same delivery internals as `handle_progress_send` — text goes through
-`send_text_message`, and attachments go through `send_attachments` /
-`partition_sends` (the existing path that batches/splits media into
-Telegram-legal groups). This guarantees `send_message` and `send_progress`
-produce identical chat-targeting and formatting behavior.
+Tool arguments are optional validated `RichContent` plus `attachments[]`. The
+shared wire DTO lives in `right-mcp`; attachment paths must be under
+`/sandbox/outbox/`. The aggregator routes the request over the same Unix socket
+as progress to `POST /message/send`. RichContent uses the shared typed-block
+Telegram adapter and normalized plain fallback; attachments use the existing
+Telegram media partitioning path. Progress remains its separate Markdown/UI
+surface. There is deliberately no aggregator-side timeout on this round-trip:
+the bot fans a long `RichContent` out to multiple throttled parts, and each
+individual Telegram attempt is already bounded by the bot's 30s per-attempt
+ceiling. A multi-part send that fails partway returns `ok:false` with every
+delivered `message_ids` and an explicit `partially published` error, which the
+aggregator surfaces to the agent as `send_message_partially_sent` so the live
+prefix is never resent.
 
 Per-turn cap: `ProgressRegistry::begin_message_send` enforces a ceiling of 20
 `send_message` calls per registered invocation; the 21st call is rejected at the
@@ -431,18 +425,42 @@ sides: the aggregator's `ProgressRegistry::begin_channel_post` (Foreground and
 Cron kinds only — others `channel_post_forbidden` — max 10 attempts per
 invocation, `channel_post_limit`, no rollback on delivery failure) and the
 bot's `ProgressState::claim_channel_post` (same 10-attempt cap, authoritative
-for any direct UDS caller). The bot route also rejects empty/whitespace posts
-and posts over 4096 chars before any send. The tool is hidden from
+for any direct UDS caller). Request deserialization rejects empty/whitespace
+content before the per-turn attempt counter is claimed. The tool is hidden from
 background/delivery/reflection turns via `disallow_channel_post` at those call
 sites — deliberately NOT in the shared `disallow_foreground_only_tools*`
-chains, which cron uses. Channel post text is sent through Telegram Bot API
-Rich Markdown (`sendRichMessage`) without local HTML conversion; deterministic
-pre-delivery formatting rejections retry once as a regular plain message with
-the unchanged original Markdown, while ambiguous network/5xx/timeout failures
-do not retry. Delivered posts are archived as assistant rows (preserving the
-Telegram message_id) so `channel_read` sees the agent's own posts; an archive
-failure after a successful Telegram send returns an explicit `published but
-archive failed` error (HTTP 502 with the message_id) instead of silent success.
+chains, which cron uses. Validated `RichContent` is mapped to Telegram typed
+`InputRichMessage.blocks`. Length budgets are measured in **UTF-16 code
+units** — Telegram's unit — not Unicode scalars, so astral-plane characters
+(emoji, 2 units each) cannot produce an oversize chunk: each source text is
+limited to 32,768 UTF-16 units, delivery greedily batches top-level blocks
+within that limit, and an oversized normalized block degrades to literal parts
+split at scalar boundaries within the same unit budget. The JSON Schema
+`maxLength` stays a code-point upper bound (JSON Schema counts scalars);
+runtime validation is the stricter authority for astral text. A known,
+deterministic rich-format/length/unsupported-block 400 retries that part as
+plain chunks of at most 4,096 UTF-16 units; unrelated 400s and ambiguous
+network/429/5xx/timeout failures do not retry.
+
+Multi-part delivery is best-effort to the end: if one part fails
+non-retryably, the remaining parts are still attempted and everything already
+published is preserved rather than discarded. Callers archive the delivered
+prefix under the last delivered Telegram message id, so `channel_read` sees
+exactly what reached the channel. A partial post returns HTTP 200 `ok:false`
+with that `message_id` and an explicit `partially published` error naming the
+omitted parts; a send with zero delivered messages is a normal error-status
+failure, because there is no live message to name. The agent sees partial
+publication as a typed error — `send_message_partially_sent` carrying the
+delivered ids, or `channel_post_partially_sent` carrying the published
+`message_id` — so it never blindly retries the live prefix. Both travel as
+HTTP 200 with `ok:false` precisely so the typed client deserializes them
+instead of collapsing the body into a transport error that loses the ids.
+Neither tool has an aggregator-side timeout:
+a long multi-part send legitimately waits across the per-chat throttle, and
+each individual Telegram attempt is bounded by the bot's 30s per-attempt
+ceiling. The normalized-delivered text is archived as an assistant row so
+`channel_read` sees the agent's own posts; an archive failure after a
+successful send returns `published but archive failed` with that id.
 
 ## Learned Skill MCP Tools
 

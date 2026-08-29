@@ -875,11 +875,12 @@ pub struct MessageAttachmentDto {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
     pub invocation_id: String,
     pub token: String,
     #[serde(default)]
-    pub content: Option<String>,
+    pub content: Option<right_rich_content::RichContent>,
     #[serde(default)]
     pub attachments: Vec<MessageAttachmentDto>,
 }
@@ -900,6 +901,11 @@ pub struct SendMessageResponse {
     pub ok: bool,
     #[serde(default)]
     pub message_ids: Vec<i32>,
+    /// Set when some (but not all) rich parts were published before a
+    /// terminal failure: `message_ids` then names the live prefix and the
+    /// agent must not resend it.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -907,11 +913,12 @@ pub struct SendMessageResponse {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChannelPostRequest {
     pub invocation_id: String,
     pub token: String,
     pub chat_id: i64,
-    pub text: String,
+    pub content: right_rich_content::RichContent,
 }
 
 impl std::fmt::Debug for ChannelPostRequest {
@@ -920,7 +927,7 @@ impl std::fmt::Debug for ChannelPostRequest {
             .field("invocation_id", &self.invocation_id)
             .field("token", &"<redacted>")
             .field("chat_id", &self.chat_id)
-            .field("text", &self.text)
+            .field("content", &self.content)
             .finish()
     }
 }
@@ -1474,12 +1481,12 @@ mod tests {
         let req = SendMessageRequest {
             invocation_id: "inv".into(),
             token: "tok".into(),
-            content: None,
+            content: Some(right_rich_content::RichContent::literal("body").unwrap()),
             attachments: vec![],
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: SendMessageRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.invocation_id, req.invocation_id);
+        assert_eq!(back.content.unwrap().normalized_text(), "body");
     }
 
     #[test]
@@ -1487,12 +1494,94 @@ mod tests {
         let req = SendMessageRequest {
             invocation_id: "inv-1".to_owned(),
             token: "supersecret".to_owned(),
-            content: Some("hi".to_owned()),
+            content: Some(right_rich_content::RichContent::literal("hi").unwrap()),
             attachments: vec![],
         };
         let s = format!("{req:?}");
         assert!(!s.contains("supersecret"), "Debug must redact token: {s}");
         assert!(s.contains("<redacted>"), "Debug must mark redaction: {s}");
+    }
+
+    #[test]
+    fn channel_post_request_roundtrips_content_without_text_field() {
+        let req = ChannelPostRequest {
+            invocation_id: "inv".into(),
+            token: "tok".into(),
+            chat_id: -100,
+            content: right_rich_content::RichContent::literal("post").unwrap(),
+        };
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value["content"]["text"], "post");
+        assert!(value.get("text").is_none());
+        let back: ChannelPostRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(back.content.normalized_text(), "post");
+    }
+
+    #[tokio::test]
+    async fn typed_partial_channel_post_responses_reach_the_aggregator() {
+        // The bot returns HTTP 200 with `ok:false` for partial publication and
+        // for published-but-archive-failed; anything on an error status is
+        // collapsed into `InternalClientError::Server` and the live message id
+        // is lost. Both partial shapes must deserialize through the typed
+        // client so `channel_post_partially_sent` can name the id.
+        for error in [
+            "partially published: delivered 2 message(s), later parts failed: Bad Request",
+            "published but archive failed: db unavailable",
+        ] {
+            let body = serde_json::to_string(&ChannelPostResponse {
+                ok: false,
+                message_id: Some(4242),
+                error: Some(error.to_owned()),
+            })
+            .unwrap();
+            let (_tempdir, socket_path, server) = serve_one_json_response(200, body).await;
+            let client = InternalClient::new(socket_path);
+
+            let response = client
+                .channel_post(&ChannelPostRequest {
+                    invocation_id: "inv".into(),
+                    token: "tok".into(),
+                    chat_id: -100,
+                    content: right_rich_content::RichContent::literal("post").unwrap(),
+                })
+                .await
+                .unwrap();
+            server.await.unwrap();
+
+            assert!(!response.ok);
+            assert_eq!(response.message_id, Some(4242));
+            assert_eq!(response.error.as_deref(), Some(error));
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_channel_post_zero_delivery_failure_stays_an_error_status() {
+        // Genuine zero-delivery: no live message id, so it must NOT arrive as
+        // a typed `ok:false` — the aggregator reports it as `channel_post_failed`.
+        let body = serde_json::to_string(&ChannelPostResponse {
+            ok: false,
+            message_id: None,
+            error: Some("telegram_send_failed".to_owned()),
+        })
+        .unwrap();
+        let (_tempdir, socket_path, server) = serve_one_json_response(502, body).await;
+        let client = InternalClient::new(socket_path);
+
+        let error = client
+            .channel_post(&ChannelPostRequest {
+                invocation_id: "inv".into(),
+                token: "tok".into(),
+                chat_id: -100,
+                content: right_rich_content::RichContent::literal("post").unwrap(),
+            })
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+
+        assert!(matches!(
+            error,
+            InternalClientError::Server { status: 502, .. }
+        ));
     }
 
     #[test]

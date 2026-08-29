@@ -38,6 +38,10 @@ A Provider referenced by an Agent that does not own it. Borrowing grants use, ne
 
 Replacement of a placeholder with the real credential at the sandbox network boundary, only for destinations bound to that Provider. Works in both Egress Modes.
 
+## Rich Content
+
+An Agent-authored standalone Telegram message whose literal text and formatting intent are represented separately. Attachment captions and platform-authored interface text are not Rich Content.
+
 ## Sandbox Migration
 
 The one-time move of an Agent Sandbox from the OpenShell backend to the microsandbox backend: agent-owned filesystem content carried over, platform-owned files regenerated.

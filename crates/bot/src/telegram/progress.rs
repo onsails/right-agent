@@ -22,11 +22,6 @@ use super::tg_bot::TgError;
 /// own timeout — both ends must bound independently.
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Local content ceiling for a channel post, matching Telegram's 4096-char
-/// message limit. Rejected before any send so an oversized post fails with a
-/// deterministic local error instead of a Telegram API rejection.
-const CHANNEL_POST_MAX_CHARS: usize = 4096;
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ProgressState {
     targets: Arc<DashMap<String, ProgressTarget>>,
@@ -275,46 +270,21 @@ async fn send_text_message(
     }
 }
 
-fn is_retryable_rich_markdown_format_error(err: &TgError) -> bool {
-    let TgError::Api(frankenstein::Error::Api(response)) = err else {
-        return false;
-    };
-    if response.error_code != 400 {
-        return false;
-    }
-    let description = response.description.to_ascii_lowercase();
-    description.contains("parse") || description.contains("too long")
-}
-
-/// Channel-only Markdown delivery through Telegram's Rich Message parser.
-/// A deterministic pre-delivery formatting rejection falls back once to a
-/// regular plain message containing the unchanged original Markdown. Bounded
-/// 429 retries remain internal to `RightBot`; network, timeout, and 5xx failures
-/// never trigger the plain fallback.
-async fn send_channel_post_text(
+/// Shared validated-rich send path for final, MCP, channel, and async delivery.
+///
+/// Deliberately NOT wrapped in an outer timeout: a single call fans out to N
+/// rich parts (plus plain-fallback chunks), each gated by the per-chat
+/// throttle and each independently bounded by the bot's per-attempt
+/// `TELEGRAM_TEXT_TIMEOUT`. A fixed 10s ceiling here deterministically
+/// truncated long multi-part sends mid-stream while the channel-post attempt
+/// had already been consumed.
+async fn send_rich_content(
     bot: &super::BotType,
     chat_id: i64,
-    markdown: &str,
-) -> Result<Result<frankenstein::types::Message, TgError>, tokio::time::error::Elapsed> {
-    let outcome = tokio::time::timeout(
-        PROGRESS_SEND_TIMEOUT,
-        bot.send_rich_markdown(chat_id, markdown, None),
-    )
-    .await;
-    match outcome {
-        Ok(Err(e)) if is_retryable_rich_markdown_format_error(&e) => {
-            tracing::warn!(
-                chat_id,
-                "Rich Markdown channel post failed, retrying original text as plain text: {e:#}",
-            );
-            tokio::time::timeout(
-                PROGRESS_SEND_TIMEOUT,
-                bot.send_message_opts(chat_id, markdown, false, None, None, None),
-            )
-            .await
-        }
-        other => other,
-    }
+    content: &right_rich_content::RichContent,
+    thread: Option<i32>,
+) -> super::rich_content::RichSendOutcome {
+    crate::telegram::rich_content::send(bot, chat_id, content, thread, None, None).await
 }
 
 /// Standalone rich-message delivery: optional text content plus zero or more
@@ -344,20 +314,18 @@ async fn handle_message_send(
     }
 
     let mut message_ids: Vec<i32> = Vec::new();
-
-    if let Some(content) = req
-        .content
-        .as_deref()
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-    {
-        match send_text_message(&state.bot, &target, content).await {
-            Ok(Ok(message)) => message_ids.push(message.message_id),
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    invocation_id = %req.invocation_id,
-                    "message_send text failed: {e:#}",
-                );
+    if let Some(content) = req.content.as_ref() {
+        let thread = (target.thread_id != 0).then_some(target.thread_id as i32);
+        let outcome = send_rich_content(&state.bot, target.chat_id, content, thread).await;
+        message_ids.extend(outcome.delivered.iter().map(|message| message.message_id));
+        if !outcome.is_complete() {
+            tracing::warn!(
+                invocation_id = %req.invocation_id,
+                delivered_messages = outcome.delivered.len(),
+                "message_send text failed partway: {}",
+                outcome.error_display()
+            );
+            if outcome.delivered.is_empty() {
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(ProgressErrorResponse {
@@ -366,20 +334,9 @@ async fn handle_message_send(
                 )
                     .into_response();
             }
-            Err(_) => {
-                tracing::warn!(
-                    invocation_id = %req.invocation_id,
-                    "message_send text timed out after {}s",
-                    PROGRESS_SEND_TIMEOUT.as_secs(),
-                );
-                return (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Json(ProgressErrorResponse {
-                        error: "telegram_send_timeout".to_owned(),
-                    }),
-                )
-                    .into_response();
-            }
+            // Partial publication: the delivered ids must travel back so the
+            // agent does not blindly retry and duplicate the prefix.
+            return partial_publication_response(message_ids);
         }
     }
 
@@ -434,14 +391,49 @@ async fn handle_message_send(
         Json(right_mcp::internal_client::SendMessageResponse {
             ok: true,
             message_ids,
+            error: None,
         }),
     )
         .into_response()
 }
 
-/// Publish a Markdown post to an opened Telegram channel. The invocation
-/// token and the current allowlist are both authoritative: the aggregator's
-/// earlier validation is only a fast rejection before the UDS round-trip.
+/// `send_message` partial-publication reply: `ok:false` with every delivered
+/// Telegram message id. Travels as HTTP 200 so the aggregator's typed client
+/// can surface the ids to the agent instead of collapsing them into a
+/// transport error.
+fn partial_publication_response(message_ids: Vec<i32>) -> axum::response::Response {
+    (
+        StatusCode::OK,
+        Json(right_mcp::internal_client::SendMessageResponse {
+            ok: false,
+            message_ids,
+            error: Some(
+                "partially published: some rich parts failed; do not resend the delivered message_ids"
+                    .to_owned(),
+            ),
+        }),
+    )
+        .into_response()
+}
+
+/// `channel_post` partial/`published-but-unarchived` reply: `ok:false` with
+/// the id of the last live Telegram message. Same HTTP-200 contract as
+/// [`partial_publication_response`] — a genuine zero-delivery failure stays on
+/// an error status, because there is no live message to name.
+fn partial_channel_post_response(message_id: i32, error: String) -> axum::response::Response {
+    (
+        StatusCode::OK,
+        Json(right_mcp::internal_client::ChannelPostResponse {
+            ok: false,
+            message_id: Some(message_id),
+            error: Some(error),
+        }),
+    )
+        .into_response()
+}
+
+/// Publish validated rich content to an opened Telegram channel. The invocation
+/// token and the current allowlist are both authoritative.
 async fn handle_channel_post(
     State(state): State<ProgressEndpointState>,
     Json(req): Json<right_mcp::internal_client::ChannelPostRequest>,
@@ -465,16 +457,8 @@ async fn handle_channel_post(
         return fail(StatusCode::FORBIDDEN, "token mismatch".to_owned());
     }
 
-    // Content validation before consuming an attempt slot.
-    if req.text.trim().is_empty() {
-        return fail(StatusCode::BAD_REQUEST, "empty_post".to_owned());
-    }
-    if req.text.chars().count() > CHANNEL_POST_MAX_CHARS {
-        return fail(
-            StatusCode::BAD_REQUEST,
-            format!("post_too_long: exceeds {CHANNEL_POST_MAX_CHARS} chars"),
-        );
-    }
+    // Content validation occurs during request deserialization.
+    let normalized = req.content.normalized_text();
 
     // Bot-side per-turn cap. The aggregator enforces the same cap before the
     // UDS round-trip; this is authoritative for direct UDS callers.
@@ -506,63 +490,78 @@ async fn handle_channel_post(
         return fail(StatusCode::BAD_REQUEST, "channel_not_opened".to_owned());
     }
 
-    // Channel posts alone use Telegram's Rich Markdown parser. Deterministic
-    // formatting rejection falls back to the unchanged original text.
-    match send_channel_post_text(&state.bot, req.chat_id, &req.text).await {
-        Ok(Ok(message)) => {
-            if let Err(e) = crate::telegram::archive::archive_outbound_channel_post(
-                &target.agent_dir,
-                req.chat_id,
-                message.message_id,
-                &req.text,
-            )
-            .await
-            {
-                tracing::warn!(
-                    invocation_id = %req.invocation_id,
-                    chat_id = req.chat_id,
-                    "channel post archive failed: {e:#}",
-                );
-                // The post IS published; report the archive loss explicitly so
-                // the agent knows `channel_read` is missing this message.
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(right_mcp::internal_client::ChannelPostResponse {
-                        ok: false,
-                        message_id: Some(message.message_id),
-                        error: Some(format!("published but archive failed: {e:#}")),
-                    }),
-                )
-                    .into_response();
-            }
-            Json(right_mcp::internal_client::ChannelPostResponse {
-                ok: true,
-                message_id: Some(message.message_id),
-                error: None,
-            })
-            .into_response()
-        }
-        Ok(Err(e)) => {
-            tracing::warn!(
-                invocation_id = %req.invocation_id,
-                chat_id = req.chat_id,
-                "channel post failed: {e:#}",
-            );
-            fail(StatusCode::BAD_GATEWAY, format!("{e:#}"))
-        }
-        Err(_) => {
-            tracing::warn!(
-                invocation_id = %req.invocation_id,
-                chat_id = req.chat_id,
-                "channel post timed out after {}s",
-                PROGRESS_SEND_TIMEOUT.as_secs(),
-            );
-            fail(
-                StatusCode::GATEWAY_TIMEOUT,
-                "telegram_send_timeout".to_owned(),
-            )
-        }
+    let outcome = send_rich_content(&state.bot, req.chat_id, &req.content, None).await;
+    let Some(message_id) = outcome.last_message_id() else {
+        tracing::warn!(
+            invocation_id = %req.invocation_id,
+            chat_id = req.chat_id,
+            "channel post failed: {}",
+            outcome.error_display()
+        );
+        return fail(
+            StatusCode::BAD_GATEWAY,
+            outcome.error_display().into_owned(),
+        );
+    };
+
+    // Zero-delivery failures already returned; a delivered prefix with a
+    // terminal error means the post is PARTIALLY published. Archive exactly
+    // what reached the channel under the last delivered id so `channel_read`
+    // reflects reality, then tell the agent which parts were omitted.
+    let delivered_text = if outcome.is_complete() {
+        normalized
+    } else {
+        tracing::warn!(
+            invocation_id = %req.invocation_id,
+            chat_id = req.chat_id,
+            delivered_messages = outcome.delivered.len(),
+            "channel post partially published: {}",
+            outcome.error_display()
+        );
+        outcome.delivered_text.clone()
+    };
+
+    if let Err(e) = crate::telegram::archive::archive_outbound_channel_post(
+        &target.agent_dir,
+        req.chat_id,
+        message_id,
+        &delivered_text,
+    )
+    .await
+    {
+        tracing::warn!(
+            invocation_id = %req.invocation_id,
+            chat_id = req.chat_id,
+            "channel post archive failed: {e:#}",
+        );
+        // The post IS published; report the archive loss explicitly so the
+        // agent knows `channel_read` is missing this message. Travels as HTTP
+        // 200 like every other typed `ok:false` so the aggregator's client
+        // deserializes the body instead of collapsing it into a transport
+        // error and losing the live message id.
+        return partial_channel_post_response(
+            message_id,
+            format!("published but archive failed: {e:#}"),
+        );
     }
+
+    if !outcome.is_complete() {
+        return partial_channel_post_response(
+            message_id,
+            format!(
+                "partially published: delivered {} message(s), later parts failed: {}",
+                outcome.delivered.len(),
+                outcome.error_display()
+            ),
+        );
+    }
+
+    Json(right_mcp::internal_client::ChannelPostResponse {
+        ok: true,
+        message_id: Some(message_id),
+        error: None,
+    })
+    .into_response()
 }
 
 /// Map a teloxide forum error description to a clear, actionable sentence for
@@ -829,7 +828,7 @@ mod tests {
         let req = right_mcp::internal_client::SendMessageRequest {
             invocation_id: invocation_id.to_owned(),
             token: token.to_owned(),
-            content: Some("hi".to_owned()),
+            content: Some(right_rich_content::RichContent::literal("hi").unwrap()),
             attachments: Vec::new(),
         };
         serde_json::to_vec(&req).expect("serialize SendMessageRequest")
@@ -862,7 +861,7 @@ mod tests {
             invocation_id: invocation_id.to_owned(),
             token: token.to_owned(),
             chat_id,
-            text: text.to_owned(),
+            content: right_rich_content::RichContent::literal(text.to_owned()).unwrap(),
         };
         serde_json::to_vec(&req).expect("serialize ChannelPostRequest")
     }
@@ -878,6 +877,53 @@ mod tests {
             .expect("build request");
         let response = app.oneshot(request).await.expect("router oneshot");
         response.status()
+    }
+
+    /// Post to `/channel/post` and return the status plus the typed body the
+    /// aggregator's client deserializes.
+    async fn post_channel_post_typed(
+        state: ProgressEndpointState,
+        body: Vec<u8>,
+    ) -> (StatusCode, right_mcp::internal_client::ChannelPostResponse) {
+        use tower::ServiceExt as _;
+        let app = build_progress_router(state);
+        let request = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/channel/post")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .expect("build request");
+        let response = app.oneshot(request).await.expect("router oneshot");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        (
+            status,
+            serde_json::from_slice(&bytes).expect("typed channel post body"),
+        )
+    }
+
+    fn channel_allowlisted_agent_dir() -> tempfile::TempDir {
+        let agent_dir = tempfile::tempdir().expect("agent dir");
+        right_agent::agent::allowlist::write_file(
+            agent_dir.path(),
+            &right_agent::agent::allowlist::AllowlistFile {
+                version: right_agent::agent::allowlist::CURRENT_VERSION,
+                users: Vec::new(),
+                groups: vec![right_agent::agent::allowlist::AllowedGroup {
+                    id: -100,
+                    label: None,
+                    opened_by: None,
+                    opened_at: chrono::Utc::now(),
+                    mode: right_agent::agent::allowlist::ResponseMode::Addressed,
+                    topics: Vec::new(),
+                    kind: right_agent::agent::allowlist::GroupKind::Channel,
+                }],
+            },
+        )
+        .expect("write allowlist");
+        agent_dir
     }
 
     #[tokio::test]
@@ -976,13 +1022,16 @@ mod tests {
         let counter = target.channel_post_count.clone();
         progress.register(target);
 
-        let status = post_channel_post(
-            test_state(progress),
-            channel_post_request_json_with_text("inv", "right", -100, "   "),
-        )
-        .await;
+        let body = serde_json::to_vec(&serde_json::json!({
+            "invocation_id": "inv",
+            "token": "right",
+            "chat_id": -100,
+            "content": { "text": "   " }
+        }))
+        .expect("serialize invalid raw request");
+        let status = post_channel_post(test_state(progress), body).await;
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::Relaxed),
             0,
@@ -1031,123 +1080,253 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
-    #[tokio::test]
-    async fn channel_rich_markdown_format_rejection_retries_original_text_as_plain_message() {
-        use axum::Router;
-        use axum::body::Bytes;
-        use axum::response::IntoResponse as _;
-        use axum::routing::post;
+    #[test]
+    fn channel_post_request_uses_content_not_text() {
+        let value: serde_json::Value =
+            serde_json::from_slice(&channel_post_request_json("inv", "token", -100)).unwrap();
+        assert_eq!(value["content"]["text"], "hello");
+        assert!(value.get("text").is_none());
+    }
 
-        const ORIGINAL: &str = "Original *Markdown* with ~$18.5M and <literal>";
-        let (plain_tx, mut plain_rx) = tokio::sync::mpsc::unbounded_channel();
-        let app = Router::new()
-            .route(
-                "/botTEST-TOKEN/sendRichMessage",
-                post(|| async {
+    /// Regression: the rich fan-out must not be wrapped in an outer wall-clock
+    /// timeout. The helper's return type is `RichSendOutcome` — no `Elapsed`
+    /// variant remains — and this test drives a real multi-part send through
+    /// the per-chat throttle to prove every part is awaited to completion. The
+    /// removed 10s wrapper raced exactly this throttle wait and truncated long
+    /// sends mid-stream while the channel-post attempt had been consumed.
+    #[tokio::test]
+    async fn send_rich_content_completes_multi_part_fan_out_without_outer_timeout() {
+        use axum::{body::Bytes, response::IntoResponse, routing::post};
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_handler = attempts.clone();
+        let next_id = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(10));
+        let app = axum::Router::new().route(
+            "/botTEST-TOKEN/sendRichMessage",
+            post(move |_body: Bytes| {
+                let attempts = attempts_for_handler.clone();
+                let next_id = next_id.clone();
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     (
-                        StatusCode::BAD_REQUEST,
-                        r#"{"ok":false,"error_code":400,"description":"Bad Request: can't parse rich Markdown"}"#,
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "ok": true,
+                            "result": {"message_id": id, "date": 0,
+                                       "chat": {"id": 7, "type": "private"}}
+                        })),
                     )
                         .into_response()
-                }),
-            )
-            .route(
-                "/botTEST-TOKEN/sendMessage",
-                post(move |body: Bytes| {
-                    let plain_tx = plain_tx.clone();
-                    async move {
-                        plain_tx
-                            .send(body)
-                            .expect("test must receive plain fallback request");
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let bot = crate::telegram::tg_bot::RightBot::new_for_test(format!(
+            "http://{address}/botTEST-TOKEN"
+        ));
+
+        // Eight code blocks of 5,000 chars each: greedy batching fits ~6 per
+        // part under the 32,768-unit limit, so delivery fans out to 2 parts —
+        // part waits out the per-chat throttle (1s) before its send — exactly
+        // the wait the old wrapper cut off.
+        let blocks: Vec<serde_json::Value> = (0..8)
+            .map(|index| {
+                serde_json::json!({
+                    "type": "code",
+                    "text": format!("part-{index}-{}", "x".repeat(5_000))
+                })
+            })
+            .collect();
+        let content: right_rich_content::RichContent =
+            serde_json::from_value(serde_json::json!({ "blocks": blocks })).unwrap();
+        assert_eq!(content.delivery_parts().len(), 2);
+
+        let outcome = send_rich_content(&bot, 7, &content, None).await;
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "both parts must be attempted and awaited to completion"
+        );
+        assert_eq!(outcome.delivered.len(), 2);
+        assert!(outcome.is_complete());
+    }
+
+    /// Multi-part content plus a mock Telegram API that delivers the first
+    /// part and fails the second: the post is partially published, and the
+    /// response must be HTTP 200 `ok:false` carrying the live `message_id`
+    /// (with the archive written under it) so the aggregator's typed client
+    /// surfaces the id instead of a transport error.
+    #[tokio::test]
+    async fn channel_post_partial_publication_returns_200_with_message_id() {
+        use axum::{body::Bytes, response::IntoResponse, routing::post};
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_handler = attempts.clone();
+        let app = axum::Router::new().route(
+            "/botTEST-TOKEN/sendRichMessage",
+            post(move |_body: Bytes| {
+                let attempts = attempts_for_handler.clone();
+                async move {
+                    let seen = attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if seen == 0 {
                         (
-                            StatusCode::OK,
-                            r#"{"ok":true,"result":{"message_id":654,"date":0,"chat":{"id":-1001234567890,"type":"channel"}}}"#,
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "ok": true,
+                                "result": {"message_id": 777, "date": 0,
+                                           "chat": {"id": -100, "type": "channel"}}
+                            })),
+                        )
+                            .into_response()
+                    } else {
+                        // Not a known rich-content rejection, so it is
+                        // terminal: no plain fallback, no retry.
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(serde_json::json!({
+                                "ok": false,
+                                "error_code": 400,
+                                "description": "Bad Request: reply message not found"
+                            })),
                         )
                             .into_response()
                     }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // The partial branch archives the delivered prefix before replying,
+        // and the archive write derives `<home>/run/internal.sock` from the
+        // agent dir. Stand up a home-shaped layout and serve the archive route
+        // so the response comes from the PARTIAL branch, not the archive-failed
+        // one (both are HTTP 200 `ok:false` with a message_id; only the error
+        // text distinguishes them).
+        let home = tempfile::tempdir().expect("home dir");
+        let agent_path = home.path().join("agents").join("alpha");
+        std::fs::create_dir_all(&agent_path).expect("agent dir");
+        right_agent::agent::allowlist::write_file(
+            &agent_path,
+            &right_agent::agent::allowlist::AllowlistFile {
+                version: right_agent::agent::allowlist::CURRENT_VERSION,
+                users: Vec::new(),
+                groups: vec![right_agent::agent::allowlist::AllowedGroup {
+                    id: -100,
+                    label: None,
+                    opened_by: None,
+                    opened_at: chrono::Utc::now(),
+                    mode: right_agent::agent::allowlist::ResponseMode::Addressed,
+                    topics: Vec::new(),
+                    kind: right_agent::agent::allowlist::GroupKind::Channel,
+                }],
+            },
+        )
+        .expect("write allowlist");
+        let archive_socket = home.path().join("run").join("internal.sock");
+        std::fs::create_dir_all(archive_socket.parent().unwrap()).expect("run dir");
+        let archive_listener =
+            tokio::net::UnixListener::bind(&archive_socket).expect("bind archive socket");
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                right_mcp::internal_db::ROUTE_ARCHIVE_MESSAGE,
+                axum::routing::post(|| async {
+                    axum::Json(serde_json::json!({ "id": 1, "inserted": true }))
                 }),
             );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind mock Telegram API");
-        let address = listener.local_addr().expect("read mock API address");
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve mock Telegram API");
+            if let Err(e) = axum::serve(archive_listener, app).await {
+                tracing::warn!("test archive server ended: {e}");
+            }
         });
-        let bot = crate::telegram::tg_bot::RightBot::new_for_test(format!(
-            "http://{address}/botTEST-TOKEN"
-        ));
 
-        let message = send_channel_post_text(&bot, -1001234567890, ORIGINAL)
-            .await
-            .expect("send must not time out")
-            .expect("plain fallback must succeed");
+        let progress = ProgressState::default();
+        progress.register(ProgressTarget {
+            invocation_id: "inv".to_owned(),
+            token: "right".to_owned(),
+            chat_id: 42,
+            thread_id: 0,
+            agent_dir: agent_path,
+            sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        });
+        let state = ProgressEndpointState {
+            bot: crate::telegram::tg_bot::RightBot::new_for_test(format!(
+                "http://{address}/botTEST-TOKEN"
+            )),
+            progress,
+        };
 
-        assert_eq!(message.message_id, 654);
-        let body = plain_rx.recv().await.expect("receive plain fallback body");
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("decode plain fallback JSON");
-        assert_eq!(payload["text"], ORIGINAL);
-        assert!(payload.get("parse_mode").is_none());
+        // Eight 5,000-char code blocks fan out to two parts (same shape as the
+        // fan-out regression above).
+        let blocks: Vec<serde_json::Value> = (0..8)
+            .map(|index| {
+                serde_json::json!({
+                    "type": "code",
+                    "text": format!("part-{index}-{}", "x".repeat(5_000))
+                })
+            })
+            .collect();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "invocation_id": "inv",
+            "token": "right",
+            "chat_id": -100,
+            "content": { "blocks": blocks }
+        }))
+        .expect("serialize request");
+
+        let (status, response) = post_channel_post_typed(state, body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!response.ok, "partial publication must be ok:false");
+        assert_eq!(response.message_id, Some(777));
+        assert!(
+            response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("partially published")),
+            "error must name the partial publication: {:?}",
+            response.error
+        );
     }
 
+    /// Zero delivered messages is a genuine failure: it must stay on an error
+    /// status, because there is no live message id for the agent to avoid
+    /// resending.
     #[tokio::test]
-    async fn channel_rich_markdown_server_error_does_not_retry_plain_message() {
-        use axum::Router;
-        use axum::http::Request;
-        use axum::middleware::{self, Next};
-        use axum::response::IntoResponse as _;
-        use axum::routing::post;
-
-        let request_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let count = Arc::clone(&request_count);
-        let app = Router::new()
-            .route(
-                "/botTEST-TOKEN/sendRichMessage",
-                post(|| async {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        r#"{"ok":false,"error_code":500,"description":"Internal Server Error: can't parse entities"}"#,
-                    )
-                        .into_response()
-                }),
-            )
-            .route(
-                "/botTEST-TOKEN/sendMessage",
-                post(|| async { StatusCode::OK }),
-            )
-            .layer(middleware::from_fn(move |request: Request<axum::body::Body>, next: Next| {
-                let count = Arc::clone(&count);
-                async move {
-                    count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    next.run(request).await
-                }
-            }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind mock Telegram API");
-        let address = listener.local_addr().expect("read mock API address");
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve mock Telegram API");
-        });
-        let bot = crate::telegram::tg_bot::RightBot::new_for_test(format!(
-            "http://{address}/botTEST-TOKEN"
-        ));
-
-        let error = send_channel_post_text(&bot, -1001234567890, "*Markdown*")
-            .await
-            .expect("send must not time out")
-            .expect_err("Telegram 5xx must propagate without fallback");
-
-        assert!(matches!(error, TgError::Api(_)));
-        assert_eq!(
-            request_count.load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "ambiguous 5xx must not trigger /sendMessage"
+    async fn channel_post_zero_delivery_stays_error_status() {
+        use axum::{body::Bytes, response::IntoResponse, routing::post};
+        let app = axum::Router::new().route(
+            "/botTEST-TOKEN/sendRichMessage",
+            post(|_body: Bytes| async move {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({
+                        "ok": false,
+                        "error_code": 400,
+                        "description": "Bad Request: chat not found"
+                    })),
+                )
+                    .into_response()
+            }),
         );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let agent_dir = channel_allowlisted_agent_dir();
+        let progress = ProgressState::default();
+        progress.register(registered_target(agent_dir.path()));
+        let state = ProgressEndpointState {
+            bot: crate::telegram::tg_bot::RightBot::new_for_test(format!(
+                "http://{address}/botTEST-TOKEN"
+            )),
+            progress,
+        };
+
+        let (status, response) =
+            post_channel_post_typed(state, channel_post_request_json("inv", "right", -100)).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(response.message_id, None);
     }
 }

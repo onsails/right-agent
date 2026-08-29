@@ -124,18 +124,17 @@ async fn webhook_register_loop(
         {
             Ok(()) => {
                 webhook_set.store(true, Ordering::Relaxed);
-                tracing::info!(target: "bot::webhook", url = %url, "webhook registered");
+                tracing::info!(url = %url, "webhook registered");
                 return;
             }
             Err(e) => {
                 if e.is_invalid_token() {
-                    tracing::error!(target: "bot::webhook", "bot token invalid; exiting");
+                    tracing::error!("bot token invalid; exiting");
                     std::process::exit(2);
                 }
                 let jitter_ms = (rand::random::<u64>() % 1000) as i64 - 500;
                 let with_jitter_ms = (delay.as_millis() as i64 + jitter_ms).max(500) as u64;
                 tracing::warn!(
-                    target: "bot::webhook",
                     error = %format!("{e:#}"),
                     retry_in_ms = with_jitter_ms,
                     "setWebhook failed",

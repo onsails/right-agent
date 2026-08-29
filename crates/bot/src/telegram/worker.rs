@@ -868,7 +868,7 @@ async fn finish_verified_bootstrap(
 }
 fn bootstrap_pending_output(message: &str) -> ReplyOutput {
     ReplyOutput {
-        content: Some(message.to_owned()),
+        content: right_rich_content::RichContent::literal(message.to_owned()).ok(),
         reply_to_message_id: None,
         attachments: None,
         used_skill_receipts: None,
@@ -1750,10 +1750,11 @@ fn validate_bootstrap_output(
     }
     let content = output
         .content
-        .as_deref()
-        .filter(|content| !content.trim().is_empty())
+        .as_ref()
+        .map(right_rich_content::RichContent::normalized_text)
+        .filter(|content| !content.is_empty())
         .ok_or_else(|| anyhow::anyhow!("bootstrap model returned empty content"))?;
-    Ok(content.to_owned())
+    Ok(content)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3078,7 +3079,8 @@ pub fn spawn_worker(
                                     ?key,
                                     "null-reply repair failed: {e:#} — delivering raw text block"
                                 );
-                                output.content = Some(discarded);
+                                output.content =
+                                    right_rich_content::RichContent::platform_text(discarded).ok();
                             }
                         }
                     }
@@ -3130,76 +3132,40 @@ pub fn spawn_worker(
                     };
 
                     if let Some(content) = output.content {
-                        reply_text_for_retain = Some(content.clone());
-                        let html = super::markdown::md_to_telegram_html(&content);
-                        let parts = super::markdown::split_html_message(&html);
-                        tracing::info!(
-                            ?key,
-                            chat_id,
-                            eff_thread_id,
-                            session_uuid = %session_uuid,
-                            content_len = content.len(),
-                            html_len = html.len(),
-                            parts = parts.len(),
-                            ?reply_to,
-                            "sending reply to Telegram"
-                        );
+                        let normalized = content.normalized_text();
+                        reply_text_for_retain = Some(normalized.clone());
+                        let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
+                        tracing::info!(?key, chat_id, eff_thread_id, session_uuid = %session_uuid, content_len = normalized.len(), ?reply_to, "sending rich reply to Telegram");
 
-                        // Bootstrap welcome photo — first agent reply only, in
-                        // bootstrap mode only. When caption fits, the first text
-                        // part rides as the photo caption (single Telegram
-                        // message); we then skip it in the text loop below.
-                        let caption_message_id = super::bootstrap_photo::send_if_needed(
+                        // The bootstrap photo cannot carry RichContent as a caption.
+                        // Send it without a caption, then send the rich text separately.
+                        let _ = super::bootstrap_photo::send_if_needed(
                             &ctx.bot,
                             tg_chat_id,
                             eff_thread_id,
                             bootstrap_mode,
                             is_first_call,
-                            parts.first().map(|s| s.as_str()),
+                            None,
                             reply_to,
                         )
                         .await;
 
-                        let start = usize::from(caption_message_id.is_some());
-                        let mut delivered_assistant_message_id = caption_message_id;
-                        let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
-                        for part in &parts[start..] {
-                            match ctx
-                                .bot
-                                .send_message_opts(tg_chat_id, part, true, thread, reply_to, None)
-                                .await
-                            {
-                                Ok(message) => {
-                                    delivered_assistant_message_id = Some(message.message_id);
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        ?key,
-                                        "HTML send failed, retrying plain text: {:#}",
-                                        e
-                                    );
-                                    let plain = strip_html_tags(part);
-                                    match ctx
-                                        .bot
-                                        .send_message_opts(
-                                            tg_chat_id, &plain, false, thread, reply_to, None,
-                                        )
-                                        .await
-                                    {
-                                        Ok(message) => {
-                                            delivered_assistant_message_id =
-                                                Some(message.message_id);
-                                        }
-                                        Err(e2) => {
-                                            tracing::error!(
-                                                ?key,
-                                                "plain text fallback also failed: {:#}",
-                                                e2
-                                            );
-                                        }
-                                    }
-                                }
-                            }
+                        let outcome = super::rich_content::send(
+                            &ctx.bot, tg_chat_id, &content, thread, reply_to, None,
+                        )
+                        .await;
+                        // Partial delivery still reached the user: archive and
+                        // probe-anchor exactly the delivered prefix so nothing
+                        // retries the omitted tail into a duplicate.
+                        let delivered_assistant_message_id = outcome.last_message_id();
+                        let delivered_text = outcome.delivered_text.clone();
+                        if !outcome.is_complete() {
+                            tracing::error!(
+                                ?key,
+                                delivered_messages = outcome.delivered.len(),
+                                "rich reply delivery failed partway (delivered prefix archived): {}",
+                                outcome.error_display()
+                            );
                         }
 
                         if delivered_assistant_message_id.is_some()
@@ -3212,28 +3178,30 @@ pub fn spawn_worker(
                                 eff_thread_id,
                                 &session_uuid,
                                 turn_id,
-                                content.clone(),
+                                delivered_text.clone(),
                             );
                         }
 
-                        // Capture probe anchor; consumed by the post-turn learning
-                        // pipeline (prefilter → probe-writer) below.
-                        post_turn_probe_anchor = Some(ProbeAnchor {
-                            user_msg_text: input.clone(),
-                            assistant_reply_text: content.clone(),
-                            main_session_uuid: session_uuid.clone(),
-                            captured_at: chrono::Utc::now(),
-                            chat_id,
-                            thread_id: eff_thread_id,
-                            num_turns: cc_usage.num_turns,
-                            total_cost_usd: cc_usage.cost_usd,
-                            wall_elapsed_ms: cc_wall_elapsed_ms,
-                            used_skill_receipts: used_skill_names.into_iter().collect::<Vec<_>>(),
-                            learning_invocation_id: cc_learning_invocation_id.clone(),
-                            origin_cron_job: None,
-                        });
+                        if delivered_assistant_message_id.is_some() {
+                            post_turn_probe_anchor = Some(ProbeAnchor {
+                                user_msg_text: input.clone(),
+                                assistant_reply_text: delivered_text,
+                                main_session_uuid: session_uuid.clone(),
+                                captured_at: chrono::Utc::now(),
+                                chat_id,
+                                thread_id: eff_thread_id,
+                                num_turns: cc_usage.num_turns,
+                                total_cost_usd: cc_usage.cost_usd,
+                                wall_elapsed_ms: cc_wall_elapsed_ms,
+                                used_skill_receipts: used_skill_names
+                                    .into_iter()
+                                    .collect::<Vec<_>>(),
+                                learning_invocation_id: cc_learning_invocation_id.clone(),
+                                origin_cron_job: None,
+                            });
+                        }
                     } else {
-                        tracing::warn!(?key, "CC returned content: null -- no text reply sent");
+                        tracing::warn!(?key, "CC returned content: null -- no rich reply sent");
                     }
 
                     // Send outbound attachments
@@ -3361,55 +3329,30 @@ pub fn spawn_worker(
                     match crate::reflection::reflect_on_failure(refl_ctx, kind, ring_buffer_tail)
                         .await
                     {
-                        Ok(reply_text) => {
+                        Ok(reply_content) => {
                             tracing::info!(?key, "reflection reply produced");
-                            // Delete the banner — reply is the substantive update.
                             if let Some(msg_id) = thinking_msg_id {
                                 let _ = ctx.bot.delete_message(tg_chat_id, msg_id).await;
                             }
-                            // Send reply via the same md→html pipeline as the success path.
-                            // Mirror the success path's reply-threading so reflection replies
-                            // don't appear unthreaded in group chats.
                             let reply_to = default_reply_to;
-                            let html = super::markdown::md_to_telegram_html(&reply_text);
-                            let parts = super::markdown::split_html_message(&html);
-                            let keyboard = super::error_details::details_keyboard(details_id);
-                            let last_idx = parts.len().saturating_sub(1);
                             let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
-                            for (idx, part) in parts.iter().enumerate() {
-                                let markup = (idx == last_idx).then(|| keyboard.clone());
-                                if let Err(e) = ctx
-                                    .bot
-                                    .send_message_opts(
-                                        tg_chat_id,
-                                        part,
-                                        true,
-                                        thread,
-                                        reply_to,
-                                        markup.clone(),
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        ?key,
-                                        "reflection HTML send failed, retrying plain: {:#}",
-                                        e
-                                    );
-                                    let plain = strip_html_tags(part);
-                                    if let Err(e2) = ctx
-                                        .bot
-                                        .send_message_opts(
-                                            tg_chat_id, &plain, false, thread, reply_to, markup,
-                                        )
-                                        .await
-                                    {
-                                        tracing::error!(
-                                            ?key,
-                                            "reflection plain-text fallback also failed: {:#}",
-                                            e2
-                                        );
-                                    }
-                                }
+                            let keyboard = super::error_details::details_keyboard(details_id);
+                            let reflection_outcome = super::rich_content::send(
+                                &ctx.bot,
+                                tg_chat_id,
+                                &reply_content,
+                                thread,
+                                reply_to,
+                                Some(keyboard),
+                            )
+                            .await;
+                            if !reflection_outcome.is_complete() {
+                                tracing::error!(
+                                    ?key,
+                                    delivered_messages = reflection_outcome.delivered.len(),
+                                    "reflection rich/plain send failed partway (delivered prefix kept): {}",
+                                    reflection_outcome.error_display()
+                                );
                             }
                         }
                         Err(e) => {
@@ -6503,7 +6446,7 @@ mod tests {
 
     fn question_output(stage: &str, content: &str) -> ReplyOutput {
         ReplyOutput {
-            content: Some(content.to_owned()),
+            content: right_rich_content::RichContent::literal(content.to_owned()).ok(),
             reply_to_message_id: None,
             attachments: None,
             used_skill_receipts: None,

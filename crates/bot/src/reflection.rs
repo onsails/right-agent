@@ -229,7 +229,7 @@ pub(crate) async fn reflect_on_failure(
     ctx: ReflectionContext,
     failure: FailureKind,
     ring_buffer_tail: VecDeque<StreamEvent>,
-) -> Result<String, ReflectionError> {
+) -> Result<right_rich_content::RichContent, ReflectionError> {
     let span = tracing::info_span!(
         "reflection",
         session_uuid = %ctx.session_uuid,
@@ -516,7 +516,7 @@ async fn run_notice_resume(
         ReflectionError::Parse("no `result` stream event on successful exit".into())
     })?;
 
-    // Parse reply via the shared helper (handles content: Option<String>, nested result, etc.).
+    // Parse the shared structured reply, including validated RichContent.
     let (reply_output, _session_id) = crate::cc::worker_reply::parse_reply_output(&result_line)
         .map_err(ReflectionError::Parse)?;
 

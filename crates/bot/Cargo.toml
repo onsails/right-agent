@@ -16,6 +16,7 @@ right-providers = { path = "../right-providers", version = "*" }
 right-process = { path = "../right-process", version = "*" }
 right-db = { path = "../right-db", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
+right-rich-content = { path = "../right-rich-content", version = "*" }
 right-memory = { path = "../right-memory", version = "*" }
 right-prompt-safety = { path = "../right-prompt-safety", version = "*" }
 right-platform-store = { path = "../right-platform-store", version = "*" }

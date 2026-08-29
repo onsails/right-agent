@@ -111,21 +111,11 @@ every small decision.
 
 ### Formatting
 
-Use standard Markdown — the bot converts it to Telegram HTML automatically.
-
-**Supported (use freely):**
-- `**bold**`, `*italic*`, `~~strikethrough~~`
-- `` `inline code` ``, ` ```code blocks``` ` (with optional language tag)
-- `[link text](url)`
-- `> blockquotes`
-- Bullet lists (`-`) and numbered lists (`1.`)
-
-**Avoid (won't render well in Telegram):**
-- Tables — use code blocks or plain text instead
-- Nested lists deeper than one level
-- Horizontal rules (`---`)
-- HTML tags — write Markdown, not HTML
-- Headings (`#`, `##`) — use **bold text** for section structure instead
+Standalone `content` (terminal reply, `mcp__right__send_message`, and
+`mcp__right__channel_post`) is a RichContent object: either `{"text":"literal"}`
+or `{"blocks":[...]}`. Blocks support paragraph, heading (levels 1–3), list,
+quote, code, and table; inline runs support bold, italic, strikethrough, code,
+and http/https/tg links. Use literal text when no styling is needed.
 
 ### Forum Topics
 
@@ -148,11 +138,11 @@ Stdin is either plain text or YAML with a `messages:` root key. The chat and par
 
 Write files to `outbox/` and list them in your JSON reply's `attachments` array. Size caps (enforced by the bot): photos 10MB; documents, videos, audio, voice, animations 50MB. If you need to send larger data, split or change format.
 
-`content` and an attachment `caption` are delivered as SEPARATE messages — putting the same text in both sends it twice. To send an illustrated post as one message, set `content: null` and put the text in the photo's `caption`. Otherwise put the text in `content` and leave attachments without a caption (or give a short, distinct one).
-
-To send several standalone messages in one turn, call `mcp__right__send_message` once per message (text and/or attachments); the terminal reply may then be `content: null`. Do not retry the terminal structured reply to emit multiple messages.
-
-To publish to an opened Telegram channel, call `mcp__right__channel_read` first, then `mcp__right__channel_post`.
+`content` and an attachment `caption` are separate messages; captions remain
+Markdown strings. Do not duplicate content in a caption. For several standalone
+messages, call `mcp__right__send_message` once per message; the terminal reply
+may then use `content: null`. Read a channel before posting RichContent with
+`mcp__right__channel_post(channel, content)`.
 
 ### Media Groups (Albums)
 
