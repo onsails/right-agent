@@ -416,17 +416,24 @@ fn partial_publication_response(message_ids: Vec<i32>) -> axum::response::Respon
         .into_response()
 }
 
-/// `channel_post` partial/`published-but-unarchived` reply: `ok:false` with
-/// the id of the last live Telegram message. Same HTTP-200 contract as
-/// [`partial_publication_response`] — a genuine zero-delivery failure stays on
-/// an error status, because there is no live message to name.
-fn partial_channel_post_response(message_id: i32, error: String) -> axum::response::Response {
+fn channel_attachment_thread_id(_invoking_thread_id: i64) -> i64 {
+    0
+}
+
+fn channel_post_response(
+    status: StatusCode,
+    ok: bool,
+    message_ids: Vec<i32>,
+    delivery_uncertain: bool,
+    error: Option<String>,
+) -> axum::response::Response {
     (
-        StatusCode::OK,
+        status,
         Json(right_mcp::internal_client::ChannelPostResponse {
-            ok: false,
-            message_id: Some(message_id),
-            error: Some(error),
+            ok,
+            message_ids,
+            delivery_uncertain,
+            error,
         }),
     )
         .into_response()
@@ -439,15 +446,7 @@ async fn handle_channel_post(
     Json(req): Json<right_mcp::internal_client::ChannelPostRequest>,
 ) -> axum::response::Response {
     let fail = |status: StatusCode, message: String| {
-        (
-            status,
-            Json(right_mcp::internal_client::ChannelPostResponse {
-                ok: false,
-                message_id: None,
-                error: Some(message),
-            }),
-        )
-            .into_response()
+        channel_post_response(status, false, Vec::new(), false, Some(message))
     };
 
     let Some(target) = state.progress.get(&req.invocation_id) else {
@@ -456,12 +455,12 @@ async fn handle_channel_post(
     if !target.token_matches(&req.token) {
         return fail(StatusCode::FORBIDDEN, "token mismatch".to_owned());
     }
-
-    // Content validation occurs during request deserialization.
-    let normalized = req.content.normalized_text();
-
-    // Bot-side per-turn cap. The aggregator enforces the same cap before the
-    // UDS round-trip; this is authoritative for direct UDS callers.
+    if req.content.is_none() && req.attachments.is_empty() {
+        return fail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "content_or_attachments_required".to_owned(),
+        );
+    }
     if !state.progress.claim_channel_post(&req.invocation_id) {
         return fail(
             StatusCode::TOO_MANY_REQUESTS,
@@ -475,10 +474,10 @@ async fn handle_channel_post(
                 && group.kind == right_agent::agent::allowlist::GroupKind::Channel
         }),
         Ok(None) => false,
-        Err(e) => {
+        Err(error) => {
             tracing::warn!(
                 invocation_id = %req.invocation_id,
-                "channel post allowlist read failed: {e:#}",
+                "channel post allowlist read failed: {error:#}",
             );
             return fail(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -490,78 +489,153 @@ async fn handle_channel_post(
         return fail(StatusCode::BAD_REQUEST, "channel_not_opened".to_owned());
     }
 
-    let outcome = send_rich_content(&state.bot, req.chat_id, &req.content, None).await;
-    let Some(message_id) = outcome.last_message_id() else {
-        tracing::warn!(
-            invocation_id = %req.invocation_id,
-            chat_id = req.chat_id,
-            "channel post failed: {}",
-            outcome.error_display()
-        );
-        return fail(
-            StatusCode::BAD_GATEWAY,
-            outcome.error_display().into_owned(),
-        );
-    };
+    let mut message_ids = Vec::new();
+    let mut archive_fragments = Vec::new();
+    let mut failure: Option<(String, bool)> = None;
 
-    // Zero-delivery failures already returned; a delivered prefix with a
-    // terminal error means the post is PARTIALLY published. Archive exactly
-    // what reached the channel under the last delivered id so `channel_read`
-    // reflects reality, then tell the agent which parts were omitted.
-    let delivered_text = if outcome.is_complete() {
-        normalized
-    } else {
-        tracing::warn!(
-            invocation_id = %req.invocation_id,
-            chat_id = req.chat_id,
-            delivered_messages = outcome.delivered.len(),
-            "channel post partially published: {}",
-            outcome.error_display()
-        );
-        outcome.delivered_text.clone()
-    };
-
-    if let Err(e) = crate::telegram::archive::archive_outbound_channel_post(
-        &target.agent_dir,
-        req.chat_id,
-        message_id,
-        &delivered_text,
-    )
-    .await
-    {
-        tracing::warn!(
-            invocation_id = %req.invocation_id,
-            chat_id = req.chat_id,
-            "channel post archive failed: {e:#}",
-        );
-        // The post IS published; report the archive loss explicitly so the
-        // agent knows `channel_read` is missing this message. Travels as HTTP
-        // 200 like every other typed `ok:false` so the aggregator's client
-        // deserializes the body instead of collapsing it into a transport
-        // error and losing the live message id.
-        return partial_channel_post_response(
-            message_id,
-            format!("published but archive failed: {e:#}"),
-        );
+    if let Some(content) = req.content.as_ref() {
+        let outcome = crate::telegram::rich_content::send_until_failure(
+            &state.bot,
+            req.chat_id,
+            content,
+            None,
+        )
+        .await;
+        message_ids.extend(outcome.delivered.iter().map(|message| message.message_id));
+        if !outcome.delivered_text.is_empty() {
+            archive_fragments.push(outcome.delivered_text.clone());
+        }
+        if !outcome.is_complete() {
+            let uncertain = outcome.error.as_ref().is_some_and(|error| {
+                !matches!(
+                    error,
+                    TgError::Api(frankenstein::Error::Api(response)) if response.error_code == 400
+                )
+            });
+            failure = Some((outcome.error_display().into_owned(), uncertain));
+        }
     }
 
-    if !outcome.is_complete() {
-        return partial_channel_post_response(
-            message_id,
-            format!(
-                "partially published: delivered {} message(s), later parts failed: {}",
-                outcome.delivered.len(),
-                outcome.error_display()
-            ),
-        );
+    if failure.is_none() && !req.attachments.is_empty() {
+        let Some(sandbox) = target.sandbox.as_ref() else {
+            failure = Some(("sandbox_unavailable".to_owned(), false));
+            return finish_channel_post(&req, &target, message_ids, archive_fragments, failure)
+                .await;
+        };
+        let outbound: Vec<_> = req
+            .attachments
+            .iter()
+            .map(message_dto_to_outbound)
+            .collect();
+        let report = crate::telegram::attachments::send_attachments_reported(
+            &outbound,
+            &state.bot,
+            req.chat_id,
+            channel_attachment_thread_id(target.thread_id),
+            &target.agent_dir,
+            sandbox,
+            true,
+        )
+        .await;
+        message_ids.extend(report.confirmed);
+        archive_fragments.extend(report.delivered_fragments);
+        if let Some(send_failure) = report.failure {
+            failure = Some((
+                send_failure.message().to_owned(),
+                send_failure.is_uncertain(),
+            ));
+        }
     }
 
-    Json(right_mcp::internal_client::ChannelPostResponse {
-        ok: true,
-        message_id: Some(message_id),
-        error: None,
-    })
-    .into_response()
+    finish_channel_post(&req, &target, message_ids, archive_fragments, failure).await
+}
+
+async fn finish_channel_post(
+    req: &right_mcp::internal_client::ChannelPostRequest,
+    target: &ProgressTarget,
+    message_ids: Vec<i32>,
+    archive_fragments: Vec<String>,
+    failure: Option<(String, bool)>,
+) -> axum::response::Response {
+    if let Some(&last_id) = message_ids.last() {
+        let publication = archive_fragments
+            .iter()
+            .filter(|fragment| !fragment.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if let Err(error) = crate::telegram::archive::archive_outbound_channel_post(
+            &target.agent_dir,
+            req.chat_id,
+            last_id,
+            &publication,
+        )
+        .await
+        {
+            let (delivery_uncertain, error) = match failure.as_ref() {
+                Some((delivery_error, true)) => (
+                    true,
+                    format!(
+                        "published but archive failed: {error:#}; Telegram may have delivered the failed request: {delivery_error}; do not resend this publication or confirmed message_ids"
+                    ),
+                ),
+                Some((delivery_error, false)) => (
+                    false,
+                    format!(
+                        "published but archive failed: {error:#}; partially published: {delivery_error}; do not resend the confirmed message_ids"
+                    ),
+                ),
+                None => (
+                    false,
+                    format!(
+                        "published but archive failed: {error:#}; do not resend confirmed message_ids"
+                    ),
+                ),
+            };
+            return channel_post_response(
+                StatusCode::OK,
+                false,
+                message_ids,
+                delivery_uncertain,
+                Some(error),
+            );
+        }
+    }
+
+    match failure {
+        None => channel_post_response(StatusCode::OK, true, message_ids, false, None),
+        Some((error, uncertain)) => {
+            if !message_ids.is_empty() || uncertain {
+                channel_post_response(
+                    StatusCode::OK,
+                    false,
+                    message_ids,
+                    uncertain,
+                    Some(if uncertain {
+                        format!(
+                            "Telegram may have delivered the failed request: {error}; do not resend this publication or confirmed message_ids"
+                        )
+                    } else {
+                        format!(
+                            "partially published: {error}; do not resend the confirmed message_ids"
+                        )
+                    }),
+                )
+            } else {
+                channel_post_response(
+                    if error == "sandbox_unavailable" {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    },
+                    false,
+                    message_ids,
+                    false,
+                    Some(error),
+                )
+            }
+        }
+    }
 }
 
 /// Map a teloxide forum error description to a clear, actionable sentence for
@@ -861,7 +935,8 @@ mod tests {
             invocation_id: invocation_id.to_owned(),
             token: token.to_owned(),
             chat_id,
-            content: right_rich_content::RichContent::literal(text.to_owned()).unwrap(),
+            content: Some(right_rich_content::RichContent::literal(text.to_owned()).unwrap()),
+            attachments: Vec::new(),
         };
         serde_json::to_vec(&req).expect("serialize ChannelPostRequest")
     }
@@ -1040,6 +1115,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn channel_post_rejects_missing_content_and_attachments_before_claiming() {
+        let agent_dir = tempfile::tempdir().expect("agent dir");
+        let progress = ProgressState::default();
+        let target = registered_target(agent_dir.path());
+        let counter = target.channel_post_count.clone();
+        progress.register(target);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "invocation_id": "inv",
+            "token": "right",
+            "chat_id": -100
+        }))
+        .unwrap();
+
+        let status = post_channel_post(test_state(progress), body).await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
     async fn handle_channel_post_rejects_non_channel_allowlist_entry() {
         let agent_dir = tempfile::tempdir().expect("agent dir");
         right_agent::agent::allowlist::write_file(
@@ -1086,6 +1181,95 @@ mod tests {
             serde_json::from_slice(&channel_post_request_json("inv", "token", -100)).unwrap();
         assert_eq!(value["content"]["text"], "hello");
         assert!(value.get("text").is_none());
+    }
+
+    #[test]
+    fn channel_post_attachments_ignore_invoking_thread() {
+        let mut target = registered_target(std::path::Path::new("/tmp"));
+        target.thread_id = 73;
+
+        assert_eq!(channel_attachment_thread_id(target.thread_id), 0);
+    }
+
+    #[tokio::test]
+    async fn channel_post_archive_failure_preserves_delivery_uncertainty() {
+        let req = right_mcp::internal_client::ChannelPostRequest {
+            invocation_id: "inv".to_owned(),
+            token: "right".to_owned(),
+            chat_id: -100,
+            content: None,
+            attachments: Vec::new(),
+        };
+        let target = registered_target(std::path::Path::new("/tmp"));
+
+        let response = finish_channel_post(
+            &req,
+            &target,
+            vec![701, 702],
+            vec!["confirmed body".to_owned()],
+            Some(("attachment delivery timed out".to_owned(), true)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let response: right_mcp::internal_client::ChannelPostResponse =
+            serde_json::from_slice(&bytes).expect("typed channel post body");
+
+        assert!(!response.ok);
+        assert_eq!(response.message_ids, vec![701, 702]);
+        assert!(response.delivery_uncertain);
+        let error = response.error.expect("combined delivery and archive error");
+        assert!(
+            error.contains("archive failed"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("Telegram may have delivered"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("do not resend"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn channel_post_archive_only_failure_stays_delivery_certain() {
+        let req = right_mcp::internal_client::ChannelPostRequest {
+            invocation_id: "inv".to_owned(),
+            token: "right".to_owned(),
+            chat_id: -100,
+            content: None,
+            attachments: Vec::new(),
+        };
+        let target = registered_target(std::path::Path::new("/tmp"));
+
+        let response = finish_channel_post(
+            &req,
+            &target,
+            vec![703],
+            vec!["complete publication".to_owned()],
+            None,
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let response: right_mcp::internal_client::ChannelPostResponse =
+            serde_json::from_slice(&bytes).expect("typed channel post body");
+
+        assert!(!response.ok);
+        assert_eq!(response.message_ids, vec![703]);
+        assert!(!response.delivery_uncertain);
+        let error = response.error.expect("archive error");
+        assert!(
+            error.contains("archive failed"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("do not resend"), "unexpected error: {error}");
+        assert!(
+            !error.contains("Telegram may have delivered"),
+            "unexpected error: {error}"
+        );
     }
 
     /// Regression: the rich fan-out must not be wrapped in an outer wall-clock
@@ -1159,7 +1343,7 @@ mod tests {
     /// (with the archive written under it) so the aggregator's typed client
     /// surfaces the id instead of a transport error.
     #[tokio::test]
-    async fn channel_post_partial_publication_returns_200_with_message_id() {
+    async fn channel_post_partial_publication_returns_200_with_message_ids() {
         use axum::{body::Bytes, response::IntoResponse, routing::post};
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let attempts_for_handler = attempts.clone();
@@ -1279,7 +1463,7 @@ mod tests {
         let (status, response) = post_channel_post_typed(state, body).await;
         assert_eq!(status, StatusCode::OK);
         assert!(!response.ok, "partial publication must be ok:false");
-        assert_eq!(response.message_id, Some(777));
+        assert_eq!(response.message_ids, vec![777]);
         assert!(
             response
                 .error
@@ -1327,6 +1511,7 @@ mod tests {
         let (status, response) =
             post_channel_post_typed(state, channel_post_request_json("inv", "right", -100)).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert_eq!(response.message_id, None);
+        assert!(response.message_ids.is_empty());
+        assert!(!response.delivery_uncertain);
     }
 }

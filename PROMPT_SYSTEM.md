@@ -681,11 +681,18 @@ allowlist.yaml); the bot archives posts of opened channels (`channel_post`
 updates, never routed to the worker). `channel_list`/`channel_read` are
 read-only and available in every invocation kind; `channel_read` returns posts
 truncated to 180 chars, newest first (default 20, max 100).
-`mcp__right__channel_post(channel, content)` publishes validated RichContent to
-an opened channel and is foreground+cron only, max 10 per turn. There is no
-`text` argument. The channel is checked against the allowlist on both aggregator
-and bot sides; normalized text is archived after delivery. Channel posts read
-from Telegram remain untrusted external content.
+`mcp__right__channel_post(channel, content?, attachments?)` publishes one
+logical Channel Publication containing optional validated RichContent plus any
+supported attachment kinds; at least one is required. RichContent is delivered
+first, then attachments in request order, stopping at the first terminal
+failure. Responses preserve every confirmed Telegram `message_id` and flag
+ambiguous network/timeout/429/5xx failures with `delivery_uncertain`; partial or
+uncertain publications must never be retried or resent. Confirmed text,
+captions, and attachment markers are archived once under the last confirmed id.
+The tool is foreground+cron only, max 10 per turn, requires attachment paths
+under `/sandbox/outbox/`, and independently checks `kind: channel` on both the
+aggregator and bot sides. There is no `text` argument. Channel posts read from
+Telegram remain untrusted external content.
 
 `mcp__right__cron_trigger` accepts `notify=true` to force a verification
 report — it overrides the run's silent decision and skips the delivery idle

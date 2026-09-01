@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use frankenstein::types::Message;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use super::tg_bot::TgError;
 pub use crate::cc::attachments_dto::{OutboundAttachment, OutboundKind};
@@ -865,28 +865,60 @@ pub(crate) async fn send_attachments(
     agent_dir: &std::path::Path,
     sandbox: &crate::sandbox::Sandbox,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let report = send_attachments_reported(
+        attachments,
+        bot,
+        chat_id,
+        eff_thread_id,
+        agent_dir,
+        sandbox,
+        false,
+    )
+    .await;
+    legacy_send_result(report)
+}
+
+fn legacy_send_result(
+    report: AttachmentSendReport,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(first_failure) = report.failure else {
+        return Ok(());
+    };
+    let mut message = first_failure.into_message();
+    for failure in report.additional_failures {
+        message.push_str("; ");
+        message.push_str(failure.message());
+    }
+    Err(message.into())
+}
+
+pub(crate) async fn send_attachments_reported(
+    attachments: &[OutboundAttachment],
+    bot: &super::BotType,
+    chat_id: i64,
+    eff_thread_id: i64,
+    agent_dir: &std::path::Path,
+    sandbox: &crate::sandbox::Sandbox,
+    stop_on_first_failure: bool,
+) -> AttachmentSendReport {
+    let mut report = AttachmentSendReport::default();
     let host_outbox = agent_dir.join("outbox").to_string_lossy().into_owned();
-
-    // Pre-create tmp/outbox for sandbox downloads (avoids repeated
-    // create_dir_all in the loop).
-    tokio::fs::create_dir_all(agent_dir.join("tmp/outbox")).await?;
-
-    // Canonicalize the host outbox dir once per call. Eliminates N repeated
-    // blocking syscalls in groups of ≤10. Used for host-local resolution:
-    // cron/background deliveries pre-stage files under the host outbox. An
-    // agent with no staged host-local attachments may legitimately lack this
-    // dir, so a missing dir is not an error.
+    if let Err(error) = tokio::fs::create_dir_all(agent_dir.join("tmp/outbox")).await {
+        report.failure = Some(SendFailure::Certain(format!(
+            "failed to prepare attachment outbox: {error}"
+        )));
+        return report;
+    }
     let host_outbox_canonical = match std::fs::canonicalize(agent_dir.join("outbox")) {
-        Ok(p) => Some(p),
-        Err(e) => {
+        Ok(path) => Some(path),
+        Err(error) => {
             tracing::debug!(
-                "Host outbox dir {} not present: {e} — host-local attachments unavailable",
+                "Host outbox dir {} not present: {error} — host-local attachments unavailable",
                 agent_dir.join("outbox").display(),
             );
             None
         }
     };
-
     let ctx = SendCtx {
         bot,
         chat_id,
@@ -895,31 +927,42 @@ pub(crate) async fn send_attachments(
         sandbox,
         host_outbox: &host_outbox,
         host_outbox_canonical,
+        retry_ambiguous: !stop_on_first_failure,
     };
-
     let (sends, warnings) = partition_sends(attachments);
-    for w in &warnings {
-        tracing::warn!("{w}");
+    for warning in &warnings {
+        tracing::warn!("{warning}");
     }
 
-    let mut errors: Vec<String> = Vec::new();
-    for send in &sends {
+    'sends: for send in &sends {
         match send {
-            OutboundSend::Single(att) => {
-                let label = attachment_error_label(att);
-                if let Err(e) = send_single(att, &ctx).await {
-                    if matches!(&e, SendError::Api(_)) {
-                        tracing::error!("failed to send {label}: see SendError::Api");
-                    }
-                    errors.push(e.into_user_msg(&label));
+            OutboundSend::Single(attachment) => match send_single(attachment, &ctx).await {
+                Ok(message) => {
+                    report.confirmed.push(message.message_id);
+                    report
+                        .delivered_fragments
+                        .push(attachment_fragment(attachment));
                 }
-            }
+                Err(error) => {
+                    record_send_failure(&mut report, error, &attachment_error_label(attachment));
+                    if stop_on_first_failure {
+                        break;
+                    }
+                }
+            },
             OutboundSend::Group {
                 kind,
                 items,
                 fallback_items,
             } => match send_group(items, &ctx).await {
-                Ok(()) => {}
+                Ok(messages) => {
+                    report
+                        .confirmed
+                        .extend(messages.into_iter().map(|message| message.message_id));
+                    report
+                        .delivered_fragments
+                        .extend(items.iter().map(attachment_fragment));
+                }
                 Err(SendError::FallbackToSingles { reason }) => {
                     tracing::warn!(
                         group_kind = ?kind,
@@ -927,43 +970,68 @@ pub(crate) async fn send_attachments(
                         reason = %reason,
                         "media group cannot be sent as an album; falling back to individual sends",
                     );
-                    send_group_items_as_singles(fallback_items, &ctx, &mut errors).await;
-                }
-                Err(e) => {
-                    let label = format!("{kind:?} media group of {} items", items.len());
-                    if matches!(&e, SendError::Api(_)) {
-                        tracing::error!("failed to send {label}: see SendError::Api");
+                    for attachment in fallback_items {
+                        match send_single(attachment, &ctx).await {
+                            Ok(message) => {
+                                report.confirmed.push(message.message_id);
+                                report
+                                    .delivered_fragments
+                                    .push(attachment_fragment(attachment));
+                            }
+                            Err(error) => {
+                                record_send_failure(
+                                    &mut report,
+                                    error,
+                                    &attachment_error_label(attachment),
+                                );
+                                if stop_on_first_failure {
+                                    break 'sends;
+                                }
+                            }
+                        }
                     }
-                    errors.push(e.into_user_msg(&label));
+                }
+                Err(error) => {
+                    let label = format!("{kind:?} media group of {} items", items.len());
+                    record_send_failure(&mut report, error, &label);
+                    if stop_on_first_failure {
+                        break;
+                    }
                 }
             },
         }
     }
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; ").into())
-    }
+    report
 }
 
 fn attachment_error_label(att: &OutboundAttachment) -> String {
     format!("{:?} attachment {}", att.kind, att.path)
 }
 
-async fn send_group_items_as_singles(
-    items: &[OutboundAttachment],
-    ctx: &SendCtx<'_>,
-    errors: &mut Vec<String>,
-) {
-    for att in items {
-        let label = attachment_error_label(att);
-        if let Err(e) = send_single(att, ctx).await {
-            if matches!(&e, SendError::Api(_)) {
-                tracing::error!("failed to send {label}: see SendError::Api");
-            }
-            errors.push(e.into_user_msg(&label));
+fn record_send_failure(report: &mut AttachmentSendReport, error: SendError, label: &str) {
+    let prefix = match &error {
+        SendError::Skip(_) => "skipped",
+        SendError::Api(_) => {
+            tracing::error!("failed to send {label}: see SendError::Api");
+            "failed to send"
         }
+        SendError::FallbackToSingles { .. } => {
+            unreachable!("media-group fallback must be handled before terminal classification")
+        }
+    };
+    let failure = classify_send_error(error);
+    let failure = match failure {
+        SendFailure::Certain(message) => {
+            SendFailure::Certain(format!("{prefix} {label}: {message}"))
+        }
+        SendFailure::Uncertain(message) => {
+            SendFailure::Uncertain(format!("{prefix} {label}: {message}"))
+        }
+    };
+    if report.failure.is_none() {
+        report.failure = Some(failure);
+    } else {
+        report.additional_failures.push(failure);
     }
 }
 
@@ -980,6 +1048,7 @@ struct SendCtx<'a> {
     sandbox: &'a crate::sandbox::Sandbox,
     host_outbox: &'a str,
     host_outbox_canonical: Option<PathBuf>,
+    retry_ambiguous: bool,
 }
 
 /// Internal error type for per-send operations in this module.
@@ -995,6 +1064,89 @@ enum SendError {
     Api(TgError),
     /// Media group cannot be sent as an album and should be retried item-by-item.
     FallbackToSingles { reason: String },
+}
+
+/// Classification of the first failed Telegram request in an attachment batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SendFailure {
+    /// Telegram deterministically rejected before delivery (400-class,
+    /// path/validation Skip): the request is certainly NOT published.
+    Certain(String),
+    /// Network/timeout/429/5xx: Telegram may have accepted the request
+    /// without returning a receipt. Never retried.
+    Uncertain(String),
+}
+
+impl SendFailure {
+    pub(crate) fn is_uncertain(&self) -> bool {
+        matches!(self, Self::Uncertain(_))
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::Certain(message) | Self::Uncertain(message) => message,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            Self::Certain(message) | Self::Uncertain(message) => message,
+        }
+    }
+}
+
+/// Telegram receipts, archive fragments, and attachment failures.
+#[derive(Debug, Default)]
+pub(crate) struct AttachmentSendReport {
+    /// Telegram ids of every confirmed message, in delivery order.
+    pub(crate) confirmed: Vec<i32>,
+    /// Archive fragments for confirmed sends, in delivery order.
+    pub(crate) delivered_fragments: Vec<String>,
+    /// First failure, if any. Channel delivery uses this for stop-first semantics.
+    pub(crate) failure: Option<SendFailure>,
+    /// Failures after the first, retained only when the caller continues delivery.
+    additional_failures: Vec<SendFailure>,
+}
+
+fn classify_send_error(error: SendError) -> SendFailure {
+    match error {
+        SendError::Skip(message) => SendFailure::Certain(message),
+        SendError::FallbackToSingles { .. } => {
+            unreachable!("media-group fallback must be handled before terminal classification")
+        }
+        SendError::Api(error) => {
+            let certain = matches!(
+                &error,
+                TgError::Api(frankenstein::Error::Api(response)) if response.error_code == 400
+            );
+            let message = display_error_chain(&error);
+            if certain {
+                SendFailure::Certain(message)
+            } else {
+                SendFailure::Uncertain(message)
+            }
+        }
+    }
+}
+
+fn attachment_fragment(attachment: &OutboundAttachment) -> String {
+    if let Some(caption) = attachment.caption.as_deref() {
+        return caption.to_owned();
+    }
+    let kind = match attachment.kind {
+        OutboundKind::Photo => "photo",
+        OutboundKind::Document => "document",
+        OutboundKind::Video => "video",
+        OutboundKind::Audio => "audio",
+        OutboundKind::Voice => "voice",
+        OutboundKind::VideoNote => "video_note",
+        OutboundKind::Sticker => "sticker",
+        OutboundKind::Animation => "animation",
+    };
+    match attachment.filename.as_deref() {
+        Some(filename) => format!("[{kind}: {filename}]"),
+        None => format!("[{kind}]"),
+    }
 }
 
 fn display_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
@@ -1020,6 +1172,28 @@ fn is_media_group_validation_error_text(text: &str) -> bool {
         || (lower.contains("media group")
             && lower.contains("bad request")
             && (lower.contains("file identifier") || lower.contains("http url")))
+}
+
+/// True only for Telegram's typed 400 media-group validation rejections. Every
+/// other error may represent an album that Telegram delivered without returning
+/// a receipt, even when its text contains the same validation phrase.
+fn is_media_group_validation_error(error: &TgError) -> bool {
+    matches!(
+        error,
+        TgError::Api(frankenstein::Error::Api(response))
+            if response.error_code == 400
+                && is_media_group_validation_error_text(&response.description)
+    )
+}
+
+fn classify_media_group_send_error(error: TgError) -> SendError {
+    if is_media_group_validation_error(&error) {
+        return SendError::FallbackToSingles {
+            reason: display_error_chain(&error),
+        };
+    }
+
+    SendError::Api(error)
 }
 
 /// True when a Telegram send error is a deterministic, pre-delivery rejection of
@@ -1052,8 +1226,8 @@ impl SendError {
         match self {
             Self::Skip(msg) => format!("skipped {label}: {msg}"),
             Self::Api(e) => format!("failed to send {label}: {}", display_error_chain(&e)),
-            Self::FallbackToSingles { reason } => {
-                format!("media group fallback requested for {label}: {reason}")
+            Self::FallbackToSingles { .. } => {
+                unreachable!("media-group fallback must not become a user-visible terminal error")
             }
         }
     }
@@ -1088,18 +1262,32 @@ enum OutboxResolution {
 /// cron/background deliveries pre-stage attachments under `host_outbox` and
 /// must be used as-is — re-downloading a host path from the sandbox fails.
 ///
-/// This is a fast string pre-filter only. The `HostLocal` branch of
-/// `resolve_host_path` canonicalizes the path and re-confines it to the host
-/// outbox; that component-wise containment is the load-bearing security
-/// boundary against traversal/escape, not this function.
+/// The `HostLocal` branch of `resolve_host_path` canonicalizes the path and
+/// re-confines it to the host outbox. Sandbox paths cannot be canonicalized on
+/// the host, so their lexical components are confined here before download.
 fn classify_outbox_path(raw_path: &str, host_outbox: &str) -> OutboxResolution {
     if !host_outbox.is_empty() && path_is_within_dir(raw_path, host_outbox) {
         OutboxResolution::HostLocal
-    } else if raw_path.starts_with(SANDBOX_OUTBOX) {
+    } else if sandbox_outbox_path_is_valid(raw_path) {
         OutboxResolution::SandboxDownload
     } else {
         OutboxResolution::Reject
     }
+}
+
+fn sandbox_outbox_path_is_valid(raw_path: &str) -> bool {
+    let Some(remainder) = raw_path.strip_prefix(SANDBOX_OUTBOX) else {
+        return false;
+    };
+
+    !remainder.is_empty()
+        && !remainder.ends_with('/')
+        && remainder
+            .split('/')
+            .all(|component| !matches!(component, "." | ".."))
+        && Path::new(remainder)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 /// String-level "is `path` inside directory `dir`" check. Requires a `/`
@@ -1232,7 +1420,7 @@ async fn send_single_attempt(
     thread_id: Option<i32>,
     caption: Option<&str>,
     html: bool,
-) -> Result<(), TgError> {
+) -> Result<Message, TgError> {
     use frankenstein::input_file::{FileUpload, InputFile};
 
     let upload = || {
@@ -1243,61 +1431,105 @@ async fn send_single_attempt(
 
     let chat_id = ctx.chat_id;
     match kind {
-        OutboundKind::Photo => ctx
-            .bot
-            .send_photo(chat_id, upload(), caption, html, thread_id, None)
-            .await
-            .map(|_| ()),
-        OutboundKind::Document => ctx
-            .bot
-            .send_document(chat_id, upload(), caption, html, thread_id, None)
-            .await
-            .map(|_| ()),
-        OutboundKind::Video => ctx
-            .bot
-            .send_video(chat_id, upload(), caption, html, thread_id)
-            .await
-            .map(|_| ()),
-        OutboundKind::Audio => ctx
-            .bot
-            .send_audio(chat_id, upload(), caption, html, thread_id)
-            .await
-            .map(|_| ()),
-        OutboundKind::Voice => ctx
-            .bot
-            .send_voice(chat_id, upload(), caption, html, thread_id)
-            .await
-            .map(|_| ()),
-        OutboundKind::Animation => ctx
-            .bot
-            .send_animation(chat_id, upload(), caption, html, thread_id)
-            .await
-            .map(|_| ()),
-        OutboundKind::VideoNote => ctx
-            .bot
-            .send_video_note(chat_id, upload(), thread_id)
-            .await
-            .map(|_| ()),
-        OutboundKind::Sticker => ctx
-            .bot
-            .send_sticker(chat_id, upload(), thread_id)
-            .await
-            .map(|_| ()),
+        OutboundKind::Photo => {
+            ctx.bot
+                .send_photo(
+                    chat_id,
+                    upload(),
+                    caption,
+                    html,
+                    thread_id,
+                    None,
+                    ctx.retry_ambiguous,
+                )
+                .await
+        }
+        OutboundKind::Document => {
+            ctx.bot
+                .send_document(
+                    chat_id,
+                    upload(),
+                    caption,
+                    html,
+                    thread_id,
+                    None,
+                    ctx.retry_ambiguous,
+                )
+                .await
+        }
+        OutboundKind::Video => {
+            ctx.bot
+                .send_video(
+                    chat_id,
+                    upload(),
+                    caption,
+                    html,
+                    thread_id,
+                    ctx.retry_ambiguous,
+                )
+                .await
+        }
+        OutboundKind::Audio => {
+            ctx.bot
+                .send_audio(
+                    chat_id,
+                    upload(),
+                    caption,
+                    html,
+                    thread_id,
+                    ctx.retry_ambiguous,
+                )
+                .await
+        }
+        OutboundKind::Voice => {
+            ctx.bot
+                .send_voice(
+                    chat_id,
+                    upload(),
+                    caption,
+                    html,
+                    thread_id,
+                    ctx.retry_ambiguous,
+                )
+                .await
+        }
+        OutboundKind::Animation => {
+            ctx.bot
+                .send_animation(
+                    chat_id,
+                    upload(),
+                    caption,
+                    html,
+                    thread_id,
+                    ctx.retry_ambiguous,
+                )
+                .await
+        }
+        OutboundKind::VideoNote => {
+            ctx.bot
+                .send_video_note(chat_id, upload(), thread_id, ctx.retry_ambiguous)
+                .await
+        }
+        OutboundKind::Sticker => {
+            ctx.bot
+                .send_sticker(chat_id, upload(), thread_id, ctx.retry_ambiguous)
+                .await
+        }
     }
 }
 
-async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), SendError> {
+async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<Message, SendError> {
     let host_path = resolve_host_path(att, ctx, "skipping")
         .await
         .map_err(SendError::Skip)?;
 
     let thread_id = (ctx.eff_thread_id != 0).then_some(ctx.eff_thread_id as i32);
 
-    let result: Result<(), TgError> = if let Some(raw) = att.caption.as_deref() {
+    let result = if let Some(raw) = att.caption.as_deref() {
         let html_cap = caption_to_html(raw);
         match send_single_attempt(ctx, &host_path, att.kind, thread_id, Some(&html_cap), true).await
         {
-            Ok(()) => Ok(()),
+            Ok(message) => Ok(message),
             Err(e) => {
                 let reason = display_error_chain(&e);
                 if is_retryable_format_error(&e) {
@@ -1313,8 +1545,6 @@ async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), 
                     )
                     .await
                 } else {
-                    // Network / rate-limit / 5xx — the send may have been
-                    // delivered; do not retry (avoids a duplicate message).
                     Err(e)
                 }
             }
@@ -1434,7 +1664,10 @@ fn build_group_input_media(
     }
 }
 
-async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(), SendError> {
+async fn send_group(
+    items: &[OutboundAttachment],
+    ctx: &SendCtx<'_>,
+) -> Result<Vec<Message>, SendError> {
     // All-or-nothing: Telegram's sendMediaGroup requires the full set in one
     // call. If any member fails path validation, download, metadata read, or
     // the size check, the whole group is aborted — already-downloaded temp
@@ -1467,53 +1700,34 @@ async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(
         host_paths: &[PathBuf],
         thread_id: Option<i32>,
         html: bool,
-    ) -> Result<(), TgError> {
+    ) -> Result<Vec<Message>, TgError> {
         let media: Vec<frankenstein::input_media::MediaGroupInputMedia> = items
             .iter()
             .zip(host_paths.iter())
             .map(|(att, host)| build_group_input_media(att, host, html))
             .collect();
         ctx.bot
-            .send_media_group(ctx.chat_id, media, thread_id)
+            .send_media_group(ctx.chat_id, media, thread_id, ctx.retry_ambiguous)
             .await
-            .map(|_| ())
     }
 
     let result = match send_album(ctx, items, &host_paths, thread_id, true).await {
-        Ok(()) => Ok(()),
-        Err(e) => {
+        Ok(messages) => Ok(messages),
+        Err(e) if is_media_group_validation_error(&e) => Err(classify_media_group_send_error(e)),
+        Err(e) if is_retryable_format_error(&e) => {
             let reason = display_error_chain(&e);
-            if is_media_group_validation_error_text(&reason) {
-                // Real album incompatibility — degrade to individual sends
-                // (each send_single then runs its own HTML+plain fallback).
-                Err(SendError::FallbackToSingles { reason })
-            } else if is_retryable_format_error(&e) {
-                // Caption formatting rejection (pre-delivery 400) — retry the
-                // album once with plain captions, preserving the album and
-                // dropping only the caption's formatting.
-                tracing::warn!(
-                    "media-group HTML caption send failed, retrying as plain text: {reason}"
-                );
-                match send_album(ctx, items, &host_paths, thread_id, false).await {
-                    Ok(()) => Ok(()),
-                    Err(e2) => {
-                        // The plain retry can still surface a genuine album
-                        // incompatibility — degrade to singles in that case
-                        // rather than reporting a hard failure.
-                        let reason2 = display_error_chain(&e2);
-                        if is_media_group_validation_error_text(&reason2) {
-                            Err(SendError::FallbackToSingles { reason: reason2 })
-                        } else {
-                            Err(SendError::Api(e2))
-                        }
-                    }
-                }
-            } else {
-                // Network / rate-limit / 5xx — the album may have been
-                // delivered; do not retry (avoids a duplicate album).
-                Err(SendError::Api(e))
+            // Caption formatting rejection (pre-delivery 400) — retry the
+            // album once with plain captions, preserving the album and
+            // dropping only the caption's formatting.
+            tracing::warn!(
+                "media-group HTML caption send failed, retrying as plain text: {reason}"
+            );
+            match send_album(ctx, items, &host_paths, thread_id, false).await {
+                Ok(messages) => Ok(messages),
+                Err(e) => Err(classify_media_group_send_error(e)),
             }
         }
+        Err(e) => Err(classify_media_group_send_error(e)),
     };
 
     cleanup_host_paths(&host_paths).await;
@@ -1740,6 +1954,82 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn send_failure_classification_is_400_certain_else_uncertain() {
+        use frankenstein::response::ErrorResponse;
+
+        fn send_api_error(code: u64) -> super::SendError {
+            super::SendError::Api(TgError::Api(frankenstein::Error::Api(ErrorResponse {
+                ok: false,
+                description: format!("telegram {code}"),
+                error_code: code,
+                parameters: None,
+            })))
+        }
+
+        assert!(matches!(
+            super::classify_send_error(send_api_error(400)),
+            super::SendFailure::Certain(_)
+        ));
+        for error in [send_api_error(429), send_api_error(500)] {
+            assert!(matches!(
+                super::classify_send_error(error),
+                super::SendFailure::Uncertain(_)
+            ));
+        }
+        for error in [
+            super::SendError::Api(TgError::Timeout(std::time::Duration::from_secs(30))),
+            super::SendError::Api(TgError::Other("connection reset".into())),
+        ] {
+            assert!(matches!(
+                super::classify_send_error(error),
+                super::SendFailure::Uncertain(_)
+            ));
+        }
+        assert!(matches!(
+            super::classify_send_error(super::SendError::Skip("invalid path".into())),
+            super::SendFailure::Certain(_)
+        ));
+    }
+
+    #[test]
+    fn legacy_continue_mode_returns_all_failures_in_delivery_order() {
+        let mut report = AttachmentSendReport::default();
+        record_send_failure(
+            &mut report,
+            SendError::Skip("first rejection".into()),
+            "Photo attachment /sandbox/outbox/first.jpg",
+        );
+        record_send_failure(
+            &mut report,
+            SendError::Api(TgError::Other("second rejection".into())),
+            "Document attachment /sandbox/outbox/second.pdf",
+        );
+
+        let error = legacy_send_result(report).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "skipped Photo attachment /sandbox/outbox/first.jpg: first rejection; failed to send Document attachment /sandbox/outbox/second.pdf: second rejection",
+        );
+    }
+
+    #[test]
+    fn attachment_fragments_use_archive_marker_format() {
+        let mut photo = att(OutboundKind::Photo);
+        assert_eq!(super::attachment_fragment(&photo), "[photo]");
+
+        let mut document = att(OutboundKind::Document);
+        document.filename = Some("report.pdf".into());
+        assert_eq!(
+            super::attachment_fragment(&document),
+            "[document: report.pdf]"
+        );
+
+        photo.caption = Some("published caption".into());
+        assert_eq!(super::attachment_fragment(&photo), "published caption");
+    }
+
     const HOST_OUTBOX: &str = "/Users/x/.right/agents/riskoff/outbox";
 
     #[test]
@@ -1756,11 +2046,32 @@ mod tests {
     }
 
     #[test]
-    fn normal_outbox_path_is_sandbox_download() {
+    fn valid_nested_sandbox_outbox_path_is_downloaded() {
         assert_eq!(
-            classify_outbox_path("/sandbox/outbox/img.png", HOST_OUTBOX),
+            classify_outbox_path(
+                "/sandbox/outbox/reports/2026/post_illustration.png",
+                HOST_OUTBOX
+            ),
             OutboxResolution::SandboxDownload
         );
+    }
+
+    #[test]
+    fn invalid_sandbox_outbox_paths_are_rejected() {
+        for path in [
+            "/sandbox/outbox",
+            "/sandbox/outbox/",
+            "/sandbox/outbox/../secret",
+            "/sandbox/outbox/nested/../../secret",
+            "/sandbox/outbox/./secret",
+            "/sandbox/outbox/nested/./secret",
+        ] {
+            assert_eq!(
+                classify_outbox_path(path, HOST_OUTBOX),
+                OutboxResolution::Reject,
+                "path should be rejected: {path}"
+            );
+        }
     }
 
     #[test]
@@ -1828,34 +2139,94 @@ mod tests {
         assert!(!is_webp_file_header(b"RIFF"));
     }
 
-    #[tokio::test]
-    async fn media_group_validation_error_text_matches_wrong_file_identifier() {
-        let err = "Bad Request: failed to send message #1 with the error message \"Wrong file identifier/HTTP URL specified\"";
-        assert!(is_media_group_validation_error_text(err));
+    const MEDIA_GROUP_VALIDATION_DESCRIPTION: &str = "Bad Request: failed to send message #1 with the error message \"Wrong file identifier/HTTP URL specified\"";
+
+    fn media_group_api_error(code: u64, description: &str) -> TgError {
+        TgError::Api(frankenstein::Error::Api(
+            frankenstein::response::ErrorResponse {
+                ok: false,
+                error_code: code,
+                description: description.to_owned(),
+                parameters: None,
+            },
+        ))
     }
 
-    #[tokio::test]
-    async fn media_group_validation_error_text_matches_media_group_invalid() {
-        assert!(is_media_group_validation_error_text(
+    #[test]
+    fn media_group_validation_400_degrades_to_singles() {
+        let error = classify_media_group_send_error(media_group_api_error(
+            400,
+            MEDIA_GROUP_VALIDATION_DESCRIPTION,
+        ));
+
+        assert!(matches!(error, SendError::FallbackToSingles { .. }));
+
+        let error = classify_media_group_send_error(media_group_api_error(
+            400,
             "Bad Request: MEDIA_GROUP_INVALID",
         ));
+        assert!(matches!(error, SendError::FallbackToSingles { .. }));
     }
 
-    #[tokio::test]
-    async fn media_group_validation_error_text_rejects_non_album_errors() {
-        assert!(!is_media_group_validation_error_text(
-            "Too Many Requests: retry after 5",
+    #[test]
+    fn media_group_validation_500_is_uncertain_api_failure() {
+        let error = classify_media_group_send_error(media_group_api_error(
+            500,
+            MEDIA_GROUP_VALIDATION_DESCRIPTION,
         ));
-        assert!(!is_media_group_validation_error_text(
+
+        assert!(matches!(&error, SendError::Api(_)));
+        assert!(matches!(
+            classify_send_error(error),
+            SendFailure::Uncertain(_)
+        ));
+    }
+
+    #[test]
+    fn media_group_validation_timeout_is_uncertain_api_failure() {
+        // A timeout has no server description to inspect; classification must
+        // remain uncertain regardless of the validation phrase in other errors.
+        let error =
+            classify_media_group_send_error(TgError::Timeout(std::time::Duration::from_secs(30)));
+
+        assert!(matches!(&error, SendError::Api(_)));
+        assert!(matches!(
+            classify_send_error(error),
+            SendFailure::Uncertain(_)
+        ));
+    }
+
+    #[test]
+    fn media_group_validation_other_with_identical_phrase_is_uncertain_api_failure() {
+        let error = classify_media_group_send_error(TgError::Other(
+            MEDIA_GROUP_VALIDATION_DESCRIPTION.to_owned(),
+        ));
+
+        assert!(matches!(&error, SendError::Api(_)));
+        assert!(matches!(
+            classify_send_error(error),
+            SendFailure::Uncertain(_)
+        ));
+    }
+
+    #[test]
+    fn media_group_validation_400_rejects_non_album_errors() {
+        let error = classify_media_group_send_error(media_group_api_error(
+            400,
             "Bad Request: message text is empty",
         ));
+
+        assert!(matches!(error, SendError::Api(_)));
     }
 
-    #[tokio::test]
-    async fn media_group_validation_error_text_rejects_bare_wrong_file_identifier() {
-        assert!(!is_media_group_validation_error_text(
+    #[test]
+    fn media_group_validation_400_rejects_bare_wrong_file_identifier() {
+        let error = classify_media_group_send_error(media_group_api_error(
+            400,
             "Bad Request: Wrong file identifier/HTTP URL specified",
         ));
+
+        assert!(matches!(error, SendError::Api(_)));
     }
 
     #[tokio::test]
@@ -2849,19 +3220,6 @@ mod tests {
             }
             _ => panic!("expected document media"),
         }
-    }
-
-    #[tokio::test]
-    async fn fallback_to_singles_error_message_contains_reason_if_leaked() {
-        let msg = SendError::FallbackToSingles {
-            reason: "preflight rejected WebP document group".to_owned(),
-        }
-        .into_user_msg("Document media group of 2 items");
-
-        assert_eq!(
-            msg,
-            "media group fallback requested for Document media group of 2 items: preflight rejected WebP document group",
-        );
     }
 
     #[tokio::test]

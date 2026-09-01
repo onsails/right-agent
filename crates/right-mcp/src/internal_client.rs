@@ -918,7 +918,10 @@ pub struct ChannelPostRequest {
     pub invocation_id: String,
     pub token: String,
     pub chat_id: i64,
-    pub content: right_rich_content::RichContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<right_rich_content::RichContent>,
+    #[serde(default)]
+    pub attachments: Vec<MessageAttachmentDto>,
 }
 
 impl std::fmt::Debug for ChannelPostRequest {
@@ -928,6 +931,7 @@ impl std::fmt::Debug for ChannelPostRequest {
             .field("token", &"<redacted>")
             .field("chat_id", &self.chat_id)
             .field("content", &self.content)
+            .field("attachments", &self.attachments)
             .finish()
     }
 }
@@ -936,7 +940,9 @@ impl std::fmt::Debug for ChannelPostRequest {
 pub struct ChannelPostResponse {
     pub ok: bool,
     #[serde(default)]
-    pub message_id: Option<i32>,
+    pub message_ids: Vec<i32>,
+    #[serde(default)]
+    pub delivery_uncertain: bool,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -1503,18 +1509,53 @@ mod tests {
     }
 
     #[test]
-    fn channel_post_request_roundtrips_content_without_text_field() {
+    fn channel_post_request_carries_optional_content_and_attachments() {
         let req = ChannelPostRequest {
             invocation_id: "inv".into(),
             token: "tok".into(),
             chat_id: -100,
-            content: right_rich_content::RichContent::literal("post").unwrap(),
+            content: None,
+            attachments: vec![MessageAttachmentDto {
+                kind: MessageAttachmentKind::Photo,
+                path: "/sandbox/outbox/a.png".into(),
+                filename: None,
+                caption: Some("caption".into()),
+                media_group_id: None,
+            }],
         };
         let value = serde_json::to_value(&req).unwrap();
-        assert_eq!(value["content"]["text"], "post");
-        assert!(value.get("text").is_none());
+        assert!(value.get("content").is_none());
         let back: ChannelPostRequest = serde_json::from_value(value).unwrap();
-        assert_eq!(back.content.normalized_text(), "post");
+        assert!(back.content.is_none());
+        assert_eq!(back.attachments, req.attachments);
+
+        let legacy: ChannelPostRequest = serde_json::from_value(serde_json::json!({
+            "invocation_id": "inv",
+            "token": "tok",
+            "chat_id": -100,
+            "content": {"text": "post"}
+        }))
+        .unwrap();
+        assert!(legacy.attachments.is_empty());
+    }
+
+    #[test]
+    fn channel_post_response_carries_confirmed_ids_and_uncertainty() {
+        let response = ChannelPostResponse {
+            ok: false,
+            message_ids: vec![10, 11],
+            delivery_uncertain: true,
+            error: Some("ambiguous failure".into()),
+        };
+        let back: ChannelPostResponse =
+            serde_json::from_value(serde_json::to_value(response).unwrap()).unwrap();
+        assert_eq!(back.message_ids, vec![10, 11]);
+        assert!(back.delivery_uncertain);
+
+        let legacy: ChannelPostResponse =
+            serde_json::from_value(serde_json::json!({"ok": true})).unwrap();
+        assert!(legacy.message_ids.is_empty());
+        assert!(!legacy.delivery_uncertain);
     }
 
     #[tokio::test]
@@ -1530,7 +1571,8 @@ mod tests {
         ] {
             let body = serde_json::to_string(&ChannelPostResponse {
                 ok: false,
-                message_id: Some(4242),
+                message_ids: vec![4241, 4242],
+                delivery_uncertain: false,
                 error: Some(error.to_owned()),
             })
             .unwrap();
@@ -1542,14 +1584,15 @@ mod tests {
                     invocation_id: "inv".into(),
                     token: "tok".into(),
                     chat_id: -100,
-                    content: right_rich_content::RichContent::literal("post").unwrap(),
+                    content: Some(right_rich_content::RichContent::literal("post").unwrap()),
+                    attachments: vec![],
                 })
                 .await
                 .unwrap();
             server.await.unwrap();
 
             assert!(!response.ok);
-            assert_eq!(response.message_id, Some(4242));
+            assert_eq!(response.message_ids, vec![4241, 4242]);
             assert_eq!(response.error.as_deref(), Some(error));
         }
     }
@@ -1560,7 +1603,8 @@ mod tests {
         // a typed `ok:false` — the aggregator reports it as `channel_post_failed`.
         let body = serde_json::to_string(&ChannelPostResponse {
             ok: false,
-            message_id: None,
+            message_ids: vec![],
+            delivery_uncertain: false,
             error: Some("telegram_send_failed".to_owned()),
         })
         .unwrap();
@@ -1572,7 +1616,8 @@ mod tests {
                 invocation_id: "inv".into(),
                 token: "tok".into(),
                 chat_id: -100,
-                content: right_rich_content::RichContent::literal("post").unwrap(),
+                content: Some(right_rich_content::RichContent::literal("post").unwrap()),
+                attachments: vec![],
             })
             .await
             .unwrap_err();

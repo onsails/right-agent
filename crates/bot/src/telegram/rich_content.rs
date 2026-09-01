@@ -138,6 +138,64 @@ pub(crate) async fn send(
     }
 }
 
+/// Channel publication variant: stop after the first terminal failure.
+pub(crate) async fn send_until_failure(
+    bot: &RightBot,
+    chat_id: i64,
+    content: &RichContent,
+    thread: Option<i32>,
+) -> RichSendOutcome {
+    let parts = content.delivery_parts();
+    let mut delivered = Vec::with_capacity(parts.len());
+    let mut delivered_text = String::new();
+
+    for part in &parts {
+        match bot
+            .send_rich_content_once(chat_id, to_telegram(part), thread)
+            .await
+        {
+            Ok(message) => {
+                append_delivered_text(&mut delivered_text, &part.normalized_text());
+                delivered.push(message);
+            }
+            Err(error) if is_retryable_rich_content_error(&error) => {
+                tracing::warn!(
+                    chat_id,
+                    "rich content rejected, retrying normalized plain text: {error}"
+                );
+                for chunk in split_plain(&part.normalized_text()) {
+                    match bot.send_message_once(chat_id, &chunk, thread).await {
+                        Ok(message) => {
+                            append_delivered_text(&mut delivered_text, &chunk);
+                            delivered.push(message);
+                        }
+                        Err(error) => {
+                            return RichSendOutcome {
+                                delivered,
+                                delivered_text,
+                                error: Some(error),
+                            };
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                return RichSendOutcome {
+                    delivered,
+                    delivered_text,
+                    error: Some(error),
+                };
+            }
+        }
+    }
+
+    RichSendOutcome {
+        delivered,
+        delivered_text,
+        error: None,
+    }
+}
+
 /// Append one delivered fragment, restoring the `\n\n` separator delivery
 /// removed when it split the content.
 fn append_delivered_text(delivered_text: &mut String, fragment: &str) {

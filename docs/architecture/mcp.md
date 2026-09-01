@@ -425,42 +425,49 @@ sides: the aggregator's `ProgressRegistry::begin_channel_post` (Foreground and
 Cron kinds only — others `channel_post_forbidden` — max 10 attempts per
 invocation, `channel_post_limit`, no rollback on delivery failure) and the
 bot's `ProgressState::claim_channel_post` (same 10-attempt cap, authoritative
-for any direct UDS caller). Request deserialization rejects empty/whitespace
-content before the per-turn attempt counter is claimed. The tool is hidden from
+for any direct UDS caller). Missing/null content plus no attachments is rejected
+before either attempt counter is claimed; content-only and attachments-only are
+valid. Attachment paths are validated under `/sandbox/outbox/` before the
+aggregator allowlist/cap/UDS path. The tool is hidden from
 background/delivery/reflection turns via `disallow_channel_post` at those call
 sites — deliberately NOT in the shared `disallow_foreground_only_tools*`
-chains, which cron uses. Validated `RichContent` is mapped to Telegram typed
-`InputRichMessage.blocks`. Length budgets are measured in **UTF-16 code
-units** — Telegram's unit — not Unicode scalars, so astral-plane characters
-(emoji, 2 units each) cannot produce an oversize chunk: each source text is
-limited to 32,768 UTF-16 units, delivery greedily batches top-level blocks
-within that limit, and an oversized normalized block degrades to literal parts
-split at scalar boundaries within the same unit budget. The JSON Schema
-`maxLength` stays a code-point upper bound (JSON Schema counts scalars);
-runtime validation is the stricter authority for astral text. A known,
-deterministic rich-format/length/unsupported-block 400 retries that part as
-plain chunks of at most 4,096 UTF-16 units; unrelated 400s and ambiguous
-network/429/5xx/timeout failures do not retry.
+chains, which cron uses.
 
-Multi-part delivery is best-effort to the end: if one part fails
-non-retryably, the remaining parts are still attempted and everything already
-published is preserved rather than discarded. Callers archive the delivered
-prefix under the last delivered Telegram message id, so `channel_read` sees
-exactly what reached the channel. A partial post returns HTTP 200 `ok:false`
-with that `message_id` and an explicit `partially published` error naming the
-omitted parts; a send with zero delivered messages is a normal error-status
-failure, because there is no live message to name. The agent sees partial
-publication as a typed error — `send_message_partially_sent` carrying the
-delivered ids, or `channel_post_partially_sent` carrying the published
-`message_id` — so it never blindly retries the live prefix. Both travel as
-HTTP 200 with `ok:false` precisely so the typed client deserializes them
-instead of collapsing the body into a transport error that loses the ids.
-Neither tool has an aggregator-side timeout:
-a long multi-part send legitimately waits across the per-chat throttle, and
-each individual Telegram attempt is bounded by the bot's 30s per-attempt
-ceiling. The normalized-delivered text is archived as an assistant row so
-`channel_read` sees the agent's own posts; an archive failure after a
-successful send returns `published but archive failed` with that id.
+The wire request carries optional `RichContent` plus the existing
+`MessageAttachmentDto` list. RichContent is sent first, then attachments in
+request order; delivery stops at the first terminal failure. Channels have no
+forum topics, so both rich content and attachments are sent without a message
+thread; the invoking conversation's thread never applies to the agent-supplied
+channel destination. Deterministic typed
+400 and pre-request validation failures are certain; network, timeout, 429, 5xx,
+and other transport/API failures are uncertain because Telegram may have
+accepted the request without returning a receipt. Ambiguous failures are never
+retried. The existing HTML/plain fallback remains restricted to deterministic
+typed 400 formatting rejection. Media groups remain one request and their
+receipt ids preserve Telegram response order; deterministic album
+incompatibility can still degrade to singles, which then stop on their first
+failure in channel mode.
+
+The attachment delivery report carries confirmed ids, confirmed caption/marker
+fragments, and the first failure classification. A thin legacy adapter keeps
+`send_message`, worker, and async delivery's existing continue/report behavior;
+the channel endpoint consumes the report in stop-first mode. The rich channel
+adapter likewise stops at its first terminal failure without changing other rich
+callers.
+
+The response carries ordered `message_ids` and `delivery_uncertain`. Complete
+delivery is HTTP 200 `ok:true`; certain zero-delivery remains an error status;
+confirmed partial delivery and uncertain delivery (even with zero confirmed
+ids) are typed HTTP 200 `ok:false` responses so the aggregator can expose
+`channel_post_partially_sent` or `channel_post_delivery_uncertain` without losing
+receipts. Archive failure after delivery is also a typed partial success. Every
+partial/uncertain/archive-failed result explicitly forbids resend.
+
+Confirmed RichContent text, captions, and `[kind]` / `[kind: filename]` markers
+are joined in delivery order and archived once as one Channel Publication under
+the last confirmed Telegram id. Failed or ambiguous pieces are never archived;
+zero confirmed ids create no archive row. Neither channel path has an
+aggregator-side timeout: each Telegram attempt remains independently bounded.
 
 ## Learned Skill MCP Tools
 

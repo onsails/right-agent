@@ -129,6 +129,28 @@ async fn start_progress_sink(dir: &Path) -> PathBuf {
     socket_path
 }
 
+async fn start_channel_post_sink(
+    dir: &Path,
+    response: right_mcp::internal_client::ChannelPostResponse,
+) -> PathBuf {
+    let socket_path = dir.join("channel-post-sink.sock");
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path).expect("remove stale channel sink socket");
+    }
+    let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind channel sink socket");
+    let app = axum::Router::new().route(
+        "/channel/post",
+        axum::routing::post(move || {
+            let response = response.clone();
+            async move { axum::Json(response) }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app.into_make_service()).await;
+    });
+    socket_path
+}
+
 async fn register_foreground_learning(
     backend: &RightBackend,
     invocation_id: &str,
@@ -252,14 +274,34 @@ fn standalone_delivery_tools_expose_rich_content_not_text() {
         .iter()
         .find(|tool| tool.name.as_ref() == "channel_post")
         .unwrap();
-    assert!(channel.input_schema["properties"].get("content").is_some());
+    let channel_content = &channel.input_schema["properties"]["content"];
+    assert_eq!(channel_content["anyOf"][0]["$ref"], "#/$defs/RichContent");
+    assert!(
+        channel_content["anyOf"]
+            .as_array()
+            .is_some_and(|variants| variants.iter().any(|value| value["type"] == "null"))
+    );
+    assert!(
+        channel.input_schema["properties"]
+            .get("attachments")
+            .is_some()
+    );
     assert!(channel.input_schema["properties"].get("text").is_none());
+    let required = channel.input_schema["required"]
+        .as_array()
+        .expect("required array");
+    assert!(!required.iter().any(|value| value == "content"));
+    assert!(!required.iter().any(|value| value == "attachments"));
     let send = tools
         .iter()
         .find(|tool| tool.name.as_ref() == "send_message")
         .unwrap();
     let content = &send.input_schema["properties"]["content"];
     assert_eq!(content["anyOf"][0]["$ref"], "#/$defs/RichContent");
+    assert_eq!(
+        channel.input_schema["$defs"]["MessageAttachmentDto"],
+        send.input_schema["$defs"]["MessageAttachmentDto"]
+    );
     let definitions = &send.input_schema["$defs"];
     assert!(
         definitions["block"].to_string().contains("paragraph"),
@@ -421,6 +463,146 @@ async fn channel_post_rejects_unopened_channel_before_uds() {
     assert_eq!(body["error"]["code"], "channel_not_opened");
 }
 
+#[tokio::test]
+async fn channel_post_requires_content_or_attachments_before_allowlist_and_uds() {
+    for args in [
+        json!({ "channel": -200 }),
+        json!({ "channel": -200, "content": null, "attachments": [] }),
+    ] {
+        let (backend, agents_dir, tmp) = make_backend();
+        let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+        register_foreground_learning(
+            &backend,
+            "inv",
+            tmp.path().join("channel-post-should-not-connect.sock"),
+        )
+        .await;
+        let result = backend
+            .tools_call(
+                "test-agent",
+                &agent_dir,
+                "channel_post",
+                args,
+                crate::progress::ToolCallContext {
+                    invocation_id: Some("inv".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            extract_error_body(&result)["error"]["code"],
+            "empty_content"
+        );
+    }
+}
+
+#[tokio::test]
+async fn channel_post_rejects_invalid_sandbox_outbox_attachment_paths_before_uds() {
+    for path in [
+        "/tmp/a.png",
+        "/sandbox/outbox",
+        "/sandbox/outbox/",
+        "/sandbox/outbox/../secret",
+        "/sandbox/outbox/nested/../../secret",
+        "/sandbox/outbox/./secret",
+        "/sandbox/outbox/nested/./secret",
+        "relative/a.png",
+    ] {
+        let (backend, agents_dir, tmp) = make_backend();
+        let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+        register_foreground_learning(
+            &backend,
+            "inv",
+            tmp.path().join("channel-post-should-not-connect.sock"),
+        )
+        .await;
+        let result = backend
+            .tools_call(
+                "test-agent",
+                &agent_dir,
+                "channel_post",
+                json!({
+                    "channel": -200,
+                    "content": null,
+                    "attachments": [{"type": "photo", "path": path}]
+                }),
+                crate::progress::ToolCallContext {
+                    invocation_id: Some("inv".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            extract_error_body(&result)["error"]["code"],
+            "invalid_argument",
+            "path should be rejected: {path}"
+        );
+    }
+}
+
+#[test]
+fn attachment_path_validation_accepts_valid_nested_file() {
+    assert!(super::attachment_path_is_valid(
+        "/sandbox/outbox/reports/2026/result.pdf"
+    ));
+}
+#[tokio::test]
+async fn channel_post_maps_confirmed_and_uncertain_responses() {
+    for (response, expected_code) in [
+        (
+            right_mcp::internal_client::ChannelPostResponse {
+                ok: false,
+                message_ids: vec![11, 12],
+                delivery_uncertain: false,
+                error: Some("attachment rejected".into()),
+            },
+            "channel_post_partially_sent",
+        ),
+        (
+            right_mcp::internal_client::ChannelPostResponse {
+                ok: false,
+                message_ids: vec![21],
+                delivery_uncertain: true,
+                error: Some("network failure".into()),
+            },
+            "channel_post_delivery_uncertain",
+        ),
+        (
+            right_mcp::internal_client::ChannelPostResponse {
+                ok: false,
+                message_ids: vec![],
+                delivery_uncertain: true,
+                error: Some("timeout".into()),
+            },
+            "channel_post_delivery_uncertain",
+        ),
+    ] {
+        let (backend, agents_dir, tmp) = make_backend();
+        let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+        write_allowlist_with_group_kinds(&agent_dir, &[(-200, GroupKind::Channel)]);
+        let socket = start_channel_post_sink(tmp.path(), response.clone()).await;
+        register_foreground_learning(&backend, "inv", socket).await;
+        let result = backend
+            .tools_call(
+                "test-agent",
+                &agent_dir,
+                "channel_post",
+                json!({ "channel": -200, "content": {"text": "hello"} }),
+                crate::progress::ToolCallContext {
+                    invocation_id: Some("inv".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+        let body = extract_error_body(&result);
+        assert_eq!(body["error"]["code"], expected_code);
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("do not"));
+        for id in response.message_ids {
+            assert!(message.contains(&id.to_string()));
+        }
+    }
+}
 #[tokio::test]
 async fn channel_post_requires_registered_invocation() {
     let (backend, agents_dir, _tmp) = make_backend();
@@ -3091,20 +3273,33 @@ async fn send_message_rejects_empty() {
 }
 
 #[tokio::test]
-async fn send_message_rejects_bad_path() {
-    let (backend, _agents_dir, _tmp) = make_backend();
-    let result = backend
-        .tools_call(
-            "test-agent",
-            Path::new("/tmp/unused"),
-            "send_message",
-            json!({ "attachments": [{ "type": "photo", "path": "/etc/passwd" }] }),
-            crate::progress::ToolCallContext::default(),
-        )
-        .await
-        .expect("dispatch should be Ok with operation error");
+async fn send_message_rejects_invalid_sandbox_outbox_paths() {
+    for path in [
+        "/etc/passwd",
+        "/sandbox/outbox",
+        "/sandbox/outbox/",
+        "/sandbox/outbox/../secret",
+        "/sandbox/outbox/nested/../../secret",
+        "/sandbox/outbox/./secret",
+        "/sandbox/outbox/nested/./secret",
+    ] {
+        let (backend, _agents_dir, _tmp) = make_backend();
+        let result = backend
+            .tools_call(
+                "test-agent",
+                Path::new("/tmp/unused"),
+                "send_message",
+                json!({ "attachments": [{ "type": "photo", "path": path }] }),
+                crate::progress::ToolCallContext::default(),
+            )
+            .await
+            .expect("dispatch should be Ok with operation error");
 
-    assert_eq!(result.is_error, Some(true));
-    let body = extract_error_body(&result);
-    assert_eq!(body["error"]["code"], "send_message_bad_path");
+        assert_eq!(result.is_error, Some(true));
+        let body = extract_error_body(&result);
+        assert_eq!(
+            body["error"]["code"], "send_message_bad_path",
+            "path should be rejected: {path}"
+        );
+    }
 }

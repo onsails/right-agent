@@ -286,6 +286,18 @@ where
     with_retry_bounded(call, None).await
 }
 
+async fn with_optional_retry<F, Fut, T>(call: F, retry_429: bool) -> Result<T, TgError>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<T, frankenstein::Error>>,
+{
+    if retry_429 {
+        with_retry(call).await
+    } else {
+        call().await.map_err(TgError::Api)
+    }
+}
+
 /// [`with_retry`] for text-class calls, with a per-attempt ceiling of
 /// [`TELEGRAM_TEXT_TIMEOUT`] so a stalled api.telegram.org cannot park the
 /// worker. A timed-out attempt is terminal (no retry): retrying a blackholed
@@ -529,6 +541,44 @@ impl RightBot {
         Ok(resp.result)
     }
 
+    /// Channel publication send: one bounded attempt, with no 429 retry.
+    pub(crate) async fn send_rich_content_once(
+        &self,
+        chat_id: i64,
+        rich_message: InputRichMessage,
+        thread: Option<i32>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendRichMessageParams::builder()
+            .chat_id(chat_id)
+            .rich_message(rich_message)
+            .maybe_message_thread_id(thread)
+            .build();
+        let resp = tokio::time::timeout(TELEGRAM_TEXT_TIMEOUT, self.bot.send_rich_message(&params))
+            .await
+            .map_err(|_| TgError::Timeout(TELEGRAM_TEXT_TIMEOUT))??;
+        Ok(resp.result)
+    }
+
+    /// Plain channel fallback: one bounded, non-retried attempt.
+    pub(crate) async fn send_message_once(
+        &self,
+        chat_id: i64,
+        text: &str,
+        thread: Option<i32>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendMessageParams::builder()
+            .chat_id(chat_id)
+            .text(text)
+            .maybe_message_thread_id(thread)
+            .build();
+        let resp = tokio::time::timeout(TELEGRAM_TEXT_TIMEOUT, self.bot.send_message(&params))
+            .await
+            .map_err(|_| TgError::Timeout(TELEGRAM_TEXT_TIMEOUT))??;
+        Ok(resp.result)
+    }
+
     /// Edit an existing message's HTML text and inline keyboard. The edited
     /// payload (`MessageOrBool`) is discarded — callers only care about
     /// success/failure.
@@ -749,6 +799,7 @@ impl RightBot {
         html: bool,
         thread: Option<i32>,
         reply_to: Option<i32>,
+        retry_429: bool,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendPhotoParams::builder()
@@ -761,7 +812,7 @@ impl RightBot {
                 reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
             )
             .build();
-        let resp = with_retry(|| self.bot.send_photo(&params)).await?;
+        let resp = with_optional_retry(|| self.bot.send_photo(&params), retry_429).await?;
         Ok(resp.result)
     }
 
@@ -774,6 +825,7 @@ impl RightBot {
         html: bool,
         thread: Option<i32>,
         reply_to: Option<i32>,
+        retry_429: bool,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendDocumentParams::builder()
@@ -786,7 +838,7 @@ impl RightBot {
                 reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
             )
             .build();
-        let resp = with_retry(|| self.bot.send_document(&params)).await?;
+        let resp = with_optional_retry(|| self.bot.send_document(&params), retry_429).await?;
         Ok(resp.result)
     }
 
@@ -798,6 +850,7 @@ impl RightBot {
         caption: Option<&str>,
         html: bool,
         thread: Option<i32>,
+        retry_429: bool,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendVideoParams::builder()
@@ -807,7 +860,7 @@ impl RightBot {
             .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
             .maybe_message_thread_id(thread)
             .build();
-        let resp = with_retry(|| self.bot.send_video(&params)).await?;
+        let resp = with_optional_retry(|| self.bot.send_video(&params), retry_429).await?;
         Ok(resp.result)
     }
 
@@ -819,6 +872,7 @@ impl RightBot {
         caption: Option<&str>,
         html: bool,
         thread: Option<i32>,
+        retry_429: bool,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendVoiceParams::builder()
@@ -828,7 +882,7 @@ impl RightBot {
             .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
             .maybe_message_thread_id(thread)
             .build();
-        let resp = with_retry(|| self.bot.send_voice(&params)).await?;
+        let resp = with_optional_retry(|| self.bot.send_voice(&params), retry_429).await?;
         Ok(resp.result)
     }
 
@@ -840,6 +894,7 @@ impl RightBot {
         caption: Option<&str>,
         html: bool,
         thread: Option<i32>,
+        retry_429: bool,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendAudioParams::builder()
@@ -849,7 +904,7 @@ impl RightBot {
             .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
             .maybe_message_thread_id(thread)
             .build();
-        let resp = with_retry(|| self.bot.send_audio(&params)).await?;
+        let resp = with_optional_retry(|| self.bot.send_audio(&params), retry_429).await?;
         Ok(resp.result)
     }
 
@@ -861,6 +916,7 @@ impl RightBot {
         caption: Option<&str>,
         html: bool,
         thread: Option<i32>,
+        retry_429: bool,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendAnimationParams::builder()
@@ -870,7 +926,7 @@ impl RightBot {
             .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
             .maybe_message_thread_id(thread)
             .build();
-        let resp = with_retry(|| self.bot.send_animation(&params)).await?;
+        let resp = with_optional_retry(|| self.bot.send_animation(&params), retry_429).await?;
         Ok(resp.result)
     }
 
@@ -880,6 +936,7 @@ impl RightBot {
         chat_id: i64,
         media: FileUpload,
         thread: Option<i32>,
+        retry_429: bool,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendVideoNoteParams::builder()
@@ -887,7 +944,7 @@ impl RightBot {
             .video_note(media)
             .maybe_message_thread_id(thread)
             .build();
-        let resp = with_retry(|| self.bot.send_video_note(&params)).await?;
+        let resp = with_optional_retry(|| self.bot.send_video_note(&params), retry_429).await?;
         Ok(resp.result)
     }
 
@@ -897,6 +954,7 @@ impl RightBot {
         chat_id: i64,
         media: FileUpload,
         thread: Option<i32>,
+        retry_429: bool,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendStickerParams::builder()
@@ -904,7 +962,7 @@ impl RightBot {
             .sticker(media)
             .maybe_message_thread_id(thread)
             .build();
-        let resp = with_retry(|| self.bot.send_sticker(&params)).await?;
+        let resp = with_optional_retry(|| self.bot.send_sticker(&params), retry_429).await?;
         Ok(resp.result)
     }
 
@@ -915,6 +973,7 @@ impl RightBot {
         chat_id: i64,
         media: Vec<MediaGroupInputMedia>,
         thread: Option<i32>,
+        retry_429: bool,
     ) -> Result<Vec<Message>, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendMediaGroupParams::builder()
@@ -922,7 +981,7 @@ impl RightBot {
             .media(media)
             .maybe_message_thread_id(thread)
             .build();
-        let resp = with_retry(|| self.bot.send_media_group(&params)).await?;
+        let resp = with_optional_retry(|| self.bot.send_media_group(&params), retry_429).await?;
         Ok(resp.result)
     }
 
@@ -1032,7 +1091,7 @@ impl RightBot {
         let upload = FileUpload::InputFile(InputFile {
             path: spool.path().to_path_buf(),
         });
-        self.send_photo(chat_id, upload, caption, html, thread, reply_to)
+        self.send_photo(chat_id, upload, caption, html, thread, reply_to, true)
             .await
         // `spool` (the TempDir) drops here, after the multipart upload completes.
     }
@@ -1053,7 +1112,7 @@ impl RightBot {
         let upload = FileUpload::InputFile(InputFile {
             path: spool.path().to_path_buf(),
         });
-        self.send_document(chat_id, upload, caption, html, thread, reply_to)
+        self.send_document(chat_id, upload, caption, html, thread, reply_to, true)
             .await
     }
 }

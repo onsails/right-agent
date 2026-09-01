@@ -179,13 +179,13 @@ pub(crate) fn archive_assistant_message(
     with_archive_permit(meta, move || write_assistant_payload(payload));
 }
 
-/// Archive a channel post sent through the MCP UDS endpoint so `channel_read`
-/// can include the agent's own publication.
+/// Archive one logical Channel Publication sent through the MCP UDS endpoint
+/// so `channel_read` can include the agent's own publication.
 pub(crate) async fn archive_outbound_channel_post(
     agent_dir: &Path,
     chat_id: i64,
     message_id: i32,
-    content: &str,
+    publication_content: &str,
 ) -> anyhow::Result<()> {
     let (client, agent) = crate::db::client_for_agent_dir(agent_dir)?;
     client
@@ -204,7 +204,7 @@ pub(crate) async fn archive_outbound_channel_post(
                 root_session_id: None,
                 turn_id: None,
                 role: "assistant".to_owned(),
-                content: content.to_owned(),
+                content: publication_content.to_owned(),
             },
         })
         .await?;

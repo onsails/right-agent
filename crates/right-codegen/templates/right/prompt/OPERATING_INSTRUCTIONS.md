@@ -138,11 +138,16 @@ Stdin is either plain text or YAML with a `messages:` root key. The chat and par
 
 Write files to `outbox/` and list them in your JSON reply's `attachments` array. Size caps (enforced by the bot): photos 10MB; documents, videos, audio, voice, animations 50MB. If you need to send larger data, split or change format.
 
-`content` and an attachment `caption` are separate messages; captions remain
-Markdown strings. Do not duplicate content in a caption. For several standalone
+`content` and an attachment `caption` are separate messages; attachment captions remain Markdown strings. Do not duplicate content in a caption. For several standalone
 messages, call `mcp__right__send_message` once per message; the terminal reply
-may then use `content: null`. Read a channel before posting RichContent with
-`mcp__right__channel_post(channel, content)`.
+may then use `content: null`.
+
+Read a channel before publishing with
+`mcp__right__channel_post(channel, content?, attachments?)`. A Channel
+Publication needs at least one of content or attachments; content is delivered first,
+then attachments in request order. Attachment paths stay under `/sandbox/outbox/`;
+media groups remain supported. Delivery stops at its first failure: do not resend a
+partial or delivery-uncertain publication.
 
 ### Media Groups (Albums)
 

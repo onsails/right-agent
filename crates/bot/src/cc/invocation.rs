@@ -1221,7 +1221,8 @@ mod tests {
             invocation_id: req.invocation_id.clone(),
             token: "wrong-token".to_owned(),
             chat_id: -100,
-            content: right_rich_content::RichContent::literal("test").unwrap(),
+            content: Some(right_rich_content::RichContent::literal("test").unwrap()),
+            attachments: Vec::new(),
         })
         .expect("serialize channel post");
         let response = app

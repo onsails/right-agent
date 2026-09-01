@@ -330,8 +330,12 @@ pub(crate) struct ChannelReadParams {
 pub(crate) struct ChannelPostParams {
     /// Channel chat id (from channel_list).
     pub(crate) channel: i64,
-    /// Validated rich post body.
-    pub(crate) content: right_rich_content::RichContent,
+    /// Optional validated Rich Content body, delivered before attachments.
+    #[serde(default)]
+    pub(crate) content: Option<right_rich_content::RichContent>,
+    /// Optional attachments delivered in request order.
+    #[serde(default)]
+    pub(crate) attachments: Vec<right_mcp::internal_client::MessageAttachmentDto>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -535,7 +539,7 @@ impl RightBackend {
             ),
             Tool::new(
                 right_mcp::internal_client::CHANNEL_POST_TOOL,
-                "Publish validated RichContent to an opened Telegram channel (see channel_list). Call channel_read first. Foreground and cron only; max 10 calls per turn. Arguments are channel and content (never text).",
+                "Publish validated RichContent and/or attachments to an opened Telegram channel (see channel_list). Call channel_read first. Attachment paths must be under /sandbox/outbox/. Foreground and cron only; max 10 calls per turn. There is no text argument; do not resend partial or delivery-uncertain publications.",
                 schema_for_type::<ChannelPostParams>(),
             ),
             Tool::new(
@@ -1236,10 +1240,11 @@ impl RightBackend {
                 None,
             ));
         }
-        if let Some(bad) = params.attachments.iter().find(|a| {
-            !a.path
-                .starts_with(right_mcp::internal_client::SANDBOX_OUTBOX_PREFIX)
-        }) {
+        if let Some(bad) = params
+            .attachments
+            .iter()
+            .find(|attachment| !attachment_path_is_valid(&attachment.path))
+        {
             return Ok(tool_error(
                 "send_message_bad_path",
                 format!(
@@ -1327,11 +1332,25 @@ impl RightBackend {
                 ));
             }
         };
-        let normalized = params.content.normalized_text();
-        if normalized.is_empty() {
+        if params.content.is_none() && params.attachments.is_empty() {
             return Ok(tool_error(
                 "empty_content",
-                "content must be non-empty",
+                "channel_post requires non-empty content or at least one attachment",
+                None,
+            ));
+        }
+        if let Some(bad) = params
+            .attachments
+            .iter()
+            .find(|attachment| !attachment_path_is_valid(&attachment.path))
+        {
+            return Ok(tool_error(
+                "invalid_argument",
+                format!(
+                    "attachment path must be under {}: {}",
+                    right_mcp::internal_client::SANDBOX_OUTBOX_PREFIX,
+                    bad.path
+                ),
                 None,
             ));
         }
@@ -1389,33 +1408,38 @@ impl RightBackend {
             token: target.bot_send_token,
             chat_id: params.channel,
             content: params.content,
+            attachments: params.attachments,
         };
         match client.channel_post(&request).await {
             Ok(resp) if resp.ok => Ok(CallToolResult::success(vec![Content::text(
-                serde_json::json!({ "status": "sent", "message_id": resp.message_id }).to_string(),
+                serde_json::json!({ "status": "sent", "message_ids": resp.message_ids })
+                    .to_string(),
             )])),
-            // Partial publication and archive-after-publish failures arrive
-            // here with `message_id` set: the id names the live Telegram
-            // message so the agent does not resend the prefix. A typed code of
-            // its own mirrors `send_message_partially_sent` and makes the
-            // no-resend contract machine-checkable.
             Ok(resp) => {
-                let (code, id_note) = match resp.message_id {
-                    Some(id) => (
+                let confirmed = format!("confirmed message_ids {:?}", resp.message_ids);
+                let error = resp
+                    .error
+                    .unwrap_or_else(|| "bot rejected channel post".to_owned());
+                if resp.delivery_uncertain {
+                    Ok(tool_error(
+                        "channel_post_delivery_uncertain",
+                        format!(
+                            "{error}; delivery_uncertain=true; {confirmed}; do not retry or resend the ambiguous request or confirmed ids"
+                        ),
+                        Some(serde_json::json!({
+                            "message_ids": resp.message_ids,
+                            "delivery_uncertain": true
+                        })),
+                    ))
+                } else if !resp.message_ids.is_empty() {
+                    Ok(tool_error(
                         "channel_post_partially_sent",
-                        format!(" (published message_id {id})"),
-                    ),
-                    None => ("channel_post_failed", String::new()),
-                };
-                Ok(tool_error(
-                    code,
-                    format!(
-                        "{}{id_note}",
-                        resp.error
-                            .unwrap_or_else(|| "bot rejected channel post".to_owned())
-                    ),
-                    None,
-                ))
+                        format!("{error}; {confirmed}; do not resend confirmed ids"),
+                        Some(serde_json::json!({ "message_ids": resp.message_ids })),
+                    ))
+                } else {
+                    Ok(tool_error("channel_post_failed", error, None))
+                }
             }
             Err(e) => Ok(tool_error("channel_post_failed", format!("{e:#}"), None)),
         }
@@ -2424,6 +2448,22 @@ impl RightBackend {
             json.to_string(),
         )]))
     }
+}
+
+fn attachment_path_is_valid(path: &str) -> bool {
+    let prefix = right_mcp::internal_client::SANDBOX_OUTBOX_PREFIX;
+    let Some(remainder) = path.strip_prefix(prefix) else {
+        return false;
+    };
+
+    !remainder.is_empty()
+        && !remainder.ends_with('/')
+        && remainder
+            .split('/')
+            .all(|component| !matches!(component, "." | ".."))
+        && Path::new(remainder)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 /// One agent-facing capability record.

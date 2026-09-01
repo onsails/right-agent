@@ -238,6 +238,27 @@ fn operating_instructions_constant_is_non_empty() {
 }
 
 #[test]
+fn operating_instructions_document_channel_post_attachments() {
+    let instructions = crate::OPERATING_INSTRUCTIONS;
+    for expected in [
+        "mcp__right__channel_post(channel, content?, attachments?)",
+        "at least one",
+        "content is delivered first",
+        "/sandbox/outbox/",
+        "media_group_id",
+        "partial",
+        "delivery-uncertain",
+        "do not resend",
+        "captions remain Markdown strings",
+    ] {
+        assert!(
+            instructions.contains(expected),
+            "OPERATING_INSTRUCTIONS missing channel publication guidance {expected:?}"
+        );
+    }
+}
+
+#[test]
 fn operating_instructions_document_inbound_reply_metadata() {
     let ops = crate::OPERATING_INSTRUCTIONS;
     for needle in [
