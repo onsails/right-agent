@@ -1,4 +1,12 @@
 # Changelog
+## [0.5.1] - 2026-09-01
+
+
+### Features
+
+- **rich-content**: Agent-authored messages use validated RichContent blocks
+- **telegram**: Support channel post attachments
+
 ## [0.5.0] - 2026-08-28
 
 ### Sandbox & Providers
