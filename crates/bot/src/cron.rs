@@ -1240,7 +1240,6 @@ async fn execute_job(
                                         .to_string_lossy()
                                         .into_owned(),
                                     filename: att.filename.clone(),
-                                    caption: att.caption.clone(),
                                     media_group_id: att.media_group_id.clone(),
                                 })
                                 .collect();

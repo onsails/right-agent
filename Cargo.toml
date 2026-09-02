@@ -84,7 +84,6 @@ insta = { version = "1.41", features = ["yaml"] }
 notify = "8.0"
 notify-debouncer-mini = "0.7"
 owo-colors = { version = "4.2", features = ["supports-colors"] }
-pulldown-cmark = { version = "0.13", default-features = false }
 url = "2.5"
 anyhow = "1.0"
 fs4 = { version = "1.1", features = ["sync"] }

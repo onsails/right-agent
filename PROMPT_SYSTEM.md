@@ -687,8 +687,8 @@ supported attachment kinds; at least one is required. RichContent is delivered
 first, then attachments in request order, stopping at the first terminal
 failure. Responses preserve every confirmed Telegram `message_id` and flag
 ambiguous network/timeout/429/5xx failures with `delivery_uncertain`; partial or
-uncertain publications must never be retried or resent. Confirmed text,
-captions, and attachment markers are archived once under the last confirmed id.
+uncertain publications must never be retried or resent. Confirmed text and
+attachment markers are archived once under the last confirmed id.
 The tool is foreground+cron only, max 10 per turn, requires attachment paths
 under `/sandbox/outbox/`, and independently checks `kind: channel` on both the
 aggregator and bot sides. There is no `text` argument. Channel posts read from

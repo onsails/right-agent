@@ -131,7 +131,7 @@
 - `lib.rs` — constructs `InternalClient`, waits for typed database-owner readiness, then starts sandbox and Telegram runtime without opening `data.db` or `providers.db`.
 - `db.rs`, `provider_bindings.rs` — typed domain IPC adapters; provider secret DTOs are converted immediately into sandbox bindings and dropped.
 - `cc/` — Claude Code invocation, prompts, streams, structured-reply parsing, and outbound DTOs.
-- `telegram/` — frankenstein client, update routing, RichContent typed-block delivery with plain fallback, Markdown captions/platform UI, archives, dashboard routes, and attachments.
+- `telegram/` — frankenstein client, update routing, RichContent typed-block delivery with plain fallback, typed rich-media/captionless album attachment delivery, platform-owned HTML UI, archives, dashboard routes, and attachments.
 - `telegram/dashboard.rs` — Axum route mounting for `/dashboard/<agent>/`, dashboard API handlers, Telegram menu/button setup, and injected bot-owned auth/runtime state.
 - `telegram/dashboard/health.rs` — explicit read-only `/health/*` probes for doctor output and bounded sandbox disk/memory/process snapshots.
 - `telegram/dashboard/identity.rs` — sandbox-first bounded identity file reads with host-mirror fallback.

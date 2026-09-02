@@ -1,6 +1,6 @@
 # Agent-authored messages carry structured Rich Content, not Markdown
 
-Status: accepted
+Status: superseded by ADR 0005 for attachment captions and progress
 
 Agent-authored Telegram messages were plain Markdown strings. Telegram's Rich
 Markdown parser interpreted financial prose as formatting: paired `$` amounts

@@ -122,7 +122,6 @@ pub(crate) fn message_dto_to_outbound(
         kind,
         path: dto.path.clone(),
         filename: dto.filename.clone(),
-        caption: dto.caption.clone(),
         media_group_id: dto.media_group_id.clone(),
     }
 }
@@ -226,48 +225,22 @@ async fn handle_progress_send(
     }
 }
 
-/// Shared text-send path for the progress and message endpoints.
+/// Shared literal text-send path for the progress endpoint.
 ///
-/// Renders `message` as Telegram HTML and sends it to the target chat/thread.
-/// On a deterministic, pre-delivery formatting rejection (entity/URL parse
-/// failure or too-long) it strips the HTML tags and retries once as plain text;
-/// network/5xx/timeout errors are NOT retried because they may have been
-/// delivered and retrying would double-post. Each attempt is bounded by
-/// `PROGRESS_SEND_TIMEOUT`; the outer `Elapsed` distinguishes a timeout from a
-/// Telegram error so callers can map them to distinct statuses.
+/// Sends the agent-authored message without a parse mode. The single attempt is
+/// bounded by `PROGRESS_SEND_TIMEOUT`; `Elapsed` remains distinct from a
+/// Telegram error so callers can map them to separate statuses.
 async fn send_text_message(
     bot: &super::BotType,
     target: &ProgressTarget,
     message: &str,
 ) -> Result<Result<frankenstein::types::Message, TgError>, tokio::time::error::Elapsed> {
-    let html = crate::telegram::markdown::md_to_telegram_html(message);
     let thread = (target.thread_id != 0).then_some(target.thread_id as i32);
-
-    // First attempt: HTML parse mode.
-    let outcome = tokio::time::timeout(
+    tokio::time::timeout(
         PROGRESS_SEND_TIMEOUT,
-        bot.send_message_opts(target.chat_id, &html, true, thread, None, None),
+        bot.send_message_opts(target.chat_id, message, false, thread, None, None),
     )
-    .await;
-    match outcome {
-        // Only retry on a deterministic, pre-delivery formatting rejection
-        // (entity/URL parse failure or too-long). Network/5xx/timeout errors
-        // may have been delivered, so retrying them would double-post.
-        Ok(Err(e)) if super::attachments::is_retryable_format_error(&e) => {
-            tracing::warn!(
-                invocation_id = %target.invocation_id,
-                "HTML send failed, retrying as plain text: {e:#}",
-            );
-            // Fallback: strip HTML tags and retry without parse mode.
-            let plain = crate::telegram::markdown::strip_html_tags(&html);
-            tokio::time::timeout(
-                PROGRESS_SEND_TIMEOUT,
-                bot.send_message_opts(target.chat_id, &plain, false, thread, None, None),
-            )
-            .await
-        }
-        other => other,
-    }
+    .await
 }
 
 /// Shared validated-rich send path for final, MCP, channel, and async delivery.
@@ -801,14 +774,13 @@ mod tests {
 
     #[test]
     fn maps_message_attachment_dto_to_outbound() {
-        use right_mcp::internal_client::{MessageAttachmentDto, MessageAttachmentKind};
-        let dto = MessageAttachmentDto {
-            kind: MessageAttachmentKind::Document,
-            path: "/sandbox/outbox/r.csv".into(),
-            filename: Some("results.csv".into()),
-            caption: Some("data".into()),
-            media_group_id: None,
-        };
+        let dto: right_mcp::internal_client::MessageAttachmentDto =
+            serde_json::from_value(serde_json::json!({
+                "type": "document",
+                "path": "/sandbox/outbox/r.csv",
+                "filename": "results.csv"
+            }))
+            .unwrap();
         let out = super::message_dto_to_outbound(&dto);
         assert!(matches!(
             out.kind,
@@ -885,6 +857,70 @@ mod tests {
 
         assert!(target.token_matches("secret-token"));
         assert!(!target.token_matches("wrong-token"));
+    }
+
+    #[tokio::test]
+    async fn progress_with_paired_single_tildes_is_sent_as_literal_plain_text() {
+        use axum::{body::Bytes, response::IntoResponse, routing::post};
+
+        let (body_tx, mut body_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/botTEST-TOKEN/sendMessage",
+            post(move |body: Bytes| {
+                let body_tx = body_tx.clone();
+                async move {
+                    body_tx.send(body).expect("capture progress request");
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "ok": true,
+                            "result": {
+                                "message_id": 17,
+                                "date": 0,
+                                "chat": {"id": 42, "type": "private"}
+                            }
+                        })),
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Telegram stub");
+        let address = listener.local_addr().expect("Telegram stub address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve Telegram stub");
+        });
+        let bot = crate::telegram::tg_bot::RightBot::new_for_test(format!(
+            "http://{address}/botTEST-TOKEN"
+        ));
+        let target = ProgressTarget {
+            invocation_id: "inv-tilde".to_owned(),
+            token: "secret-token".to_owned(),
+            chat_id: 42,
+            thread_id: 0,
+            agent_dir: std::path::PathBuf::from("/tmp/agent"),
+            sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        };
+
+        let outcome = send_text_message(&bot, &target, "working on ~riskoff~ now")
+            .await
+            .expect("progress send must not time out")
+            .expect("Telegram must accept progress");
+
+        assert_eq!(outcome.message_id, 17);
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body_rx.recv().await.expect("captured progress request"))
+                .expect("progress request JSON");
+        assert_eq!(payload["text"], "working on ~riskoff~ now");
+        assert!(
+            payload.get("parse_mode").is_none(),
+            "literal progress must not enable HTML parsing: {payload}"
+        );
     }
 
     /// Build a `ProgressEndpointState` with a dummy bot for router tests.

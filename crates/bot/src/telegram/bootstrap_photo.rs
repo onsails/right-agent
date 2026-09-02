@@ -7,55 +7,36 @@
 
 const WELCOME_PNG: &[u8] = include_bytes!("../../assets/character-on-coal.png");
 
-// Telegram caption hard limit; HTML tags count toward it.
-const CAPTION_LIMIT: usize = 1024;
-
 /// Pure predicate. The welcome photo goes out on the *first* CC invocation in
 /// a chat **only when** that invocation is happening in bootstrap mode.
 fn should_send(bootstrap_mode: bool, first_turn_in_chat: bool) -> bool {
     bootstrap_mode && first_turn_in_chat
 }
 
-/// Send the welcome photo, optionally attaching `caption_html` as the photo
-/// caption so image + first reply land as a single Telegram message.
+/// Send the welcome photo without text; the rich first reply follows as its own message.
 ///
-/// Returns the delivered Telegram message ID when the photo carried the
-/// caption. The caller must then skip that text part in its own message loop.
-/// Returns `None` if the photo was skipped, sent without a caption (caption too
-/// long or absent), or failed. Errors remain best-effort presentation failures;
-/// the text reply is the contract.
+/// Returns the delivered Telegram message ID. Returns `None` if the photo was
+/// skipped or failed. Errors remain best-effort presentation failures; the text
+/// reply is the contract.
 pub(crate) async fn send_if_needed(
     bot: &super::BotType,
     chat_id: i64,
     eff_thread_id: i64,
     bootstrap_mode: bool,
     first_turn_in_chat: bool,
-    caption_html: Option<&str>,
     reply_to: Option<i32>,
 ) -> Option<i32> {
     if !should_send(bootstrap_mode, first_turn_in_chat) {
         return None;
     }
 
-    // Attach the caption only when it fits Telegram's caption limit; otherwise
-    // the caller still sends it as a separate text part.
-    let caption = caption_html.filter(|html| html.chars().count() <= CAPTION_LIMIT);
-    let caption_attached = caption.is_some();
     let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
 
     match bot
-        .send_photo_bytes(
-            chat_id,
-            WELCOME_PNG,
-            "welcome.png",
-            caption,
-            true,
-            thread,
-            reply_to,
-        )
+        .send_photo_bytes(chat_id, WELCOME_PNG, "welcome.png", thread, reply_to)
         .await
     {
-        Ok(message) => caption_attached.then_some(message.message_id),
+        Ok(message) => Some(message.message_id),
         Err(e) => {
             tracing::warn!(
                 chat_id,

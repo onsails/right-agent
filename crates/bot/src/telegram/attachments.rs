@@ -149,69 +149,9 @@ pub(crate) fn classify_media_group(items: &[&OutboundAttachment]) -> GroupPlan {
     }
 }
 
-/// Fold every non-empty caption into the first slot, separated by blank lines,
-/// and blank the rest. Telegram only shows the first item's caption in a media
-/// group; without folding, later captions would be silently dropped.
-pub(crate) fn merge_group_captions(captions: &mut [Option<String>]) {
-    let parts: Vec<String> = captions
-        .iter_mut()
-        .filter_map(|c| c.take().filter(|s| !s.is_empty()))
-        .collect();
-    if let Some(slot) = captions.first_mut() {
-        *slot = if parts.is_empty() {
-            None
-        } else {
-            let joined = parts.join("\n\n");
-            let char_count = joined.chars().count();
-            if char_count > TELEGRAM_CAPTION_LIMIT {
-                // Truncate to (limit - 1) chars, then append the ellipsis character.
-                let truncated: String = joined
-                    .char_indices()
-                    .take(TELEGRAM_CAPTION_LIMIT - 1)
-                    .map(|(_, c)| c)
-                    .collect();
-                let result = format!("{truncated}…");
-                tracing::warn!(
-                    original_chars = char_count,
-                    limit = TELEGRAM_CAPTION_LIMIT,
-                    "media-group caption exceeded Telegram limit; truncated to {} chars",
-                    result.chars().count()
-                );
-                Some(result)
-            } else {
-                Some(joined)
-            }
-        };
-    }
-}
-
-/// Truncate a raw caption to at most `TELEGRAM_CAPTION_LIMIT` characters
-/// (char-safe), then convert agent Markdown to Telegram-supported HTML.
-/// Truncating raw before conversion keeps the HTML tag-balanced. Most Markdown
-/// shrinks the visible text (markers and link URLs drop out), so the converted
-/// caption is normally within Telegram's limit (which counts visible text, not
-/// tag characters); a few constructs (e.g. wide tables) can still expand past
-/// it, in which case the send falls back to the length-capped plain text from
-/// [`caption_to_plain`].
-fn caption_to_html(raw: &str) -> String {
-    let truncated: String = raw.chars().take(TELEGRAM_CAPTION_LIMIT).collect();
-    super::markdown::md_to_telegram_html(&truncated)
-}
-
-/// Plain-text form of a caption for the `ParseMode::Html` fallback: visible
-/// text with all formatting removed, hard-capped to `TELEGRAM_CAPTION_LIMIT`
-/// visible characters so the fallback caption is always within Telegram's limit
-/// even when the HTML form expanded past it.
-fn caption_to_plain(raw: &str) -> String {
-    super::markdown::strip_html_tags(&caption_to_html(raw))
-        .chars()
-        .take(TELEGRAM_CAPTION_LIMIT)
-        .collect()
-}
-
 /// One Telegram API call the bot must make to honour a reply's attachments.
-/// `Single` reuses the per-type `send_*` path; `Group` becomes one
-/// `sendMediaGroup`.
+/// `Single` uses a typed rich-media block; `Group` becomes one captionless
+/// `sendMediaGroup` request.
 #[derive(Debug)]
 pub(crate) enum OutboundSend {
     Single(OutboundAttachment),
@@ -283,16 +223,10 @@ pub(crate) fn partition_sends(
                             .iter()
                             .map(|&idx| attachments[idx].clone())
                             .collect();
-                        let mut items: Vec<OutboundAttachment> = indices
+                        let items: Vec<OutboundAttachment> = indices
                             .iter()
                             .map(|&idx| attachments[idx].clone())
                             .collect();
-                        let mut caps: Vec<Option<String>> =
-                            items.iter().map(|it| it.caption.clone()).collect();
-                        merge_group_captions(&mut caps);
-                        for (it, c) in items.iter_mut().zip(caps) {
-                            it.caption = c;
-                        }
                         sends.push(OutboundSend::Group {
                             kind,
                             items,
@@ -317,16 +251,10 @@ pub(crate) fn partition_sends(
                                     .iter()
                                     .map(|&local| attachments[indices[local]].clone())
                                     .collect();
-                                let mut items: Vec<OutboundAttachment> = chunk
+                                let items: Vec<OutboundAttachment> = chunk
                                     .iter()
                                     .map(|&local| attachments[indices[local]].clone())
                                     .collect();
-                                let mut caps: Vec<Option<String>> =
-                                    items.iter().map(|it| it.caption.clone()).collect();
-                                merge_group_captions(&mut caps);
-                                for (it, c) in items.iter_mut().zip(caps) {
-                                    it.caption = c;
-                                }
                                 sends.push(OutboundSend::Group {
                                     kind,
                                     items,
@@ -384,8 +312,6 @@ pub fn mime_to_extension(mime: &str) -> &'static str {
 pub const TELEGRAM_DOWNLOAD_LIMIT: u64 = 20 * 1024 * 1024; // 20 MB
 pub const TELEGRAM_PHOTO_UPLOAD_LIMIT: u64 = 10 * 1024 * 1024; // 10 MB
 pub const TELEGRAM_FILE_UPLOAD_LIMIT: u64 = 50 * 1024 * 1024; // 50 MB
-/// Maximum characters in a Telegram message/media-group caption.
-pub const TELEGRAM_CAPTION_LIMIT: usize = 1024;
 
 /// Default attachment retention in days.
 pub const DEFAULT_RETENTION_DAYS: u32 = 7;
@@ -1130,9 +1056,6 @@ fn classify_send_error(error: SendError) -> SendFailure {
 }
 
 fn attachment_fragment(attachment: &OutboundAttachment) -> String {
-    if let Some(caption) = attachment.caption.as_deref() {
-        return caption.to_owned();
-    }
     let kind = match attachment.kind {
         OutboundKind::Photo => "photo",
         OutboundKind::Document => "document",
@@ -1194,30 +1117,6 @@ fn classify_media_group_send_error(error: TgError) -> SendError {
     }
 
     SendError::Api(error)
-}
-
-/// True when a Telegram send error is a deterministic, pre-delivery rejection of
-/// the caption *formatting* — an HTML entity/URL parse failure or a too-long
-/// caption — i.e. the only errors a plain-text re-send can fix. Network,
-/// rate-limit, auth, and 5xx errors are excluded: those may have been delivered
-/// before the error surfaced, so retrying them would duplicate the message.
-/// Telegram returns formatting errors as a 400 *before* delivery, so a retry is
-/// safe.
-///
-/// Gated on the typed Telegram `error_code == 400` rather than substring-
-/// searching the rendered Display: a 5xx/network/429 error whose text happens to
-/// contain "too long"/"parse entities" must NOT be treated as a safe-to-retry
-/// formatting rejection (the original send may have been delivered, so a retry
-/// would duplicate the message).
-pub(crate) fn is_retryable_format_error(err: &TgError) -> bool {
-    let TgError::Api(frankenstein::Error::Api(resp)) = err else {
-        return false;
-    };
-    if resp.error_code != 400 {
-        return false;
-    }
-    let lower = resp.description.to_ascii_lowercase();
-    lower.contains("parse entities") || lower.contains("too long")
 }
 
 impl SendError {
@@ -1410,111 +1309,98 @@ async fn resolve_host_path(
     Ok(host)
 }
 
-/// One Telegram send for a single attachment. Rebuilds `InputFile` on each call
-/// so a failed send (which consumes the file) can be retried with a different
-/// caption. `html = true` sets `ParseMode::Html`; `false` sends plain text.
-async fn send_single_attempt(
-    ctx: &SendCtx<'_>,
+/// Build the typed rich-media message for a supported standalone attachment.
+/// Captions are absent from both the rich block and embedded input media;
+/// agent-authored text travels as separate `RichContent`.
+fn build_single_rich_media(
     host_path: &std::path::Path,
     kind: OutboundKind,
-    thread_id: Option<i32>,
-    caption: Option<&str>,
-    html: bool,
-) -> Result<Message, TgError> {
+) -> Option<frankenstein::rich_message::InputRichMessage> {
     use frankenstein::input_file::{FileUpload, InputFile};
+    use frankenstein::input_media::{
+        InputMediaAnimation, InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo,
+        InputMediaVoiceNote,
+    };
+    use frankenstein::rich_message::{
+        InputRichBlock, InputRichBlockAnimation, InputRichBlockAudio, InputRichBlockDocument,
+        InputRichBlockPhoto, InputRichBlockVideo, InputRichBlockVoiceNote, InputRichMessage,
+    };
 
     let upload = || {
         FileUpload::InputFile(InputFile {
             path: host_path.to_path_buf(),
         })
     };
+    let block = match kind {
+        OutboundKind::Photo => InputRichBlock::Photo(InputRichBlockPhoto {
+            photo: InputMediaPhoto::builder().media(upload()).build(),
+            caption: None,
+        }),
+        OutboundKind::Document => InputRichBlock::Document(InputRichBlockDocument {
+            document: InputMediaDocument::builder()
+                .media(upload())
+                .disable_content_type_detection(true)
+                .build(),
+            caption: None,
+        }),
+        OutboundKind::Video => InputRichBlock::Video(InputRichBlockVideo {
+            video: InputMediaVideo::builder().media(upload()).build(),
+            caption: None,
+        }),
+        OutboundKind::Audio => InputRichBlock::Audio(InputRichBlockAudio {
+            audio: InputMediaAudio::builder().media(upload()).build(),
+            caption: None,
+        }),
+        OutboundKind::Voice => InputRichBlock::VoiceNote(InputRichBlockVoiceNote {
+            voice_note: InputMediaVoiceNote::builder().media(upload()).build(),
+            caption: None,
+        }),
+        OutboundKind::Animation => InputRichBlock::Animation(InputRichBlockAnimation {
+            animation: InputMediaAnimation::builder().media(upload()).build(),
+            caption: None,
+        }),
+        OutboundKind::VideoNote | OutboundKind::Sticker => return None,
+    };
+    Some(
+        InputRichMessage::builder()
+            .blocks(vec![block])
+            .skip_entity_detection(true)
+            .build(),
+    )
+}
 
-    let chat_id = ctx.chat_id;
+/// Send one attachment. Supported media kinds use `sendRichMessage`; sticker
+/// and video-note remain on their legacy Bot API methods.
+async fn send_single_attempt(
+    ctx: &SendCtx<'_>,
+    host_path: &std::path::Path,
+    kind: OutboundKind,
+    thread_id: Option<i32>,
+) -> Result<Message, TgError> {
+    use frankenstein::input_file::{FileUpload, InputFile};
+
+    if let Some(rich_message) = build_single_rich_media(host_path, kind) {
+        return ctx
+            .bot
+            .send_rich_media(ctx.chat_id, rich_message, thread_id, ctx.retry_ambiguous)
+            .await;
+    }
+
+    let upload = FileUpload::InputFile(InputFile {
+        path: host_path.to_path_buf(),
+    });
     match kind {
-        OutboundKind::Photo => {
-            ctx.bot
-                .send_photo(
-                    chat_id,
-                    upload(),
-                    caption,
-                    html,
-                    thread_id,
-                    None,
-                    ctx.retry_ambiguous,
-                )
-                .await
-        }
-        OutboundKind::Document => {
-            ctx.bot
-                .send_document(
-                    chat_id,
-                    upload(),
-                    caption,
-                    html,
-                    thread_id,
-                    None,
-                    ctx.retry_ambiguous,
-                )
-                .await
-        }
-        OutboundKind::Video => {
-            ctx.bot
-                .send_video(
-                    chat_id,
-                    upload(),
-                    caption,
-                    html,
-                    thread_id,
-                    ctx.retry_ambiguous,
-                )
-                .await
-        }
-        OutboundKind::Audio => {
-            ctx.bot
-                .send_audio(
-                    chat_id,
-                    upload(),
-                    caption,
-                    html,
-                    thread_id,
-                    ctx.retry_ambiguous,
-                )
-                .await
-        }
-        OutboundKind::Voice => {
-            ctx.bot
-                .send_voice(
-                    chat_id,
-                    upload(),
-                    caption,
-                    html,
-                    thread_id,
-                    ctx.retry_ambiguous,
-                )
-                .await
-        }
-        OutboundKind::Animation => {
-            ctx.bot
-                .send_animation(
-                    chat_id,
-                    upload(),
-                    caption,
-                    html,
-                    thread_id,
-                    ctx.retry_ambiguous,
-                )
-                .await
-        }
         OutboundKind::VideoNote => {
             ctx.bot
-                .send_video_note(chat_id, upload(), thread_id, ctx.retry_ambiguous)
+                .send_video_note(ctx.chat_id, upload, thread_id, ctx.retry_ambiguous)
                 .await
         }
         OutboundKind::Sticker => {
             ctx.bot
-                .send_sticker(chat_id, upload(), thread_id, ctx.retry_ambiguous)
+                .send_sticker(ctx.chat_id, upload, thread_id, ctx.retry_ambiguous)
                 .await
         }
+        _ => unreachable!("supported media kinds return through sendRichMessage"),
     }
 }
 
@@ -1522,36 +1408,8 @@ async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<Mess
     let host_path = resolve_host_path(att, ctx, "skipping")
         .await
         .map_err(SendError::Skip)?;
-
     let thread_id = (ctx.eff_thread_id != 0).then_some(ctx.eff_thread_id as i32);
-
-    let result = if let Some(raw) = att.caption.as_deref() {
-        let html_cap = caption_to_html(raw);
-        match send_single_attempt(ctx, &host_path, att.kind, thread_id, Some(&html_cap), true).await
-        {
-            Ok(message) => Ok(message),
-            Err(e) => {
-                let reason = display_error_chain(&e);
-                if is_retryable_format_error(&e) {
-                    tracing::warn!("caption HTML send failed, retrying as plain text: {reason}");
-                    let plain_cap = caption_to_plain(raw);
-                    send_single_attempt(
-                        ctx,
-                        &host_path,
-                        att.kind,
-                        thread_id,
-                        Some(&plain_cap),
-                        false,
-                    )
-                    .await
-                } else {
-                    Err(e)
-                }
-            }
-        }
-    } else {
-        send_single_attempt(ctx, &host_path, att.kind, thread_id, None, false).await
-    };
+    let result = send_single_attempt(ctx, &host_path, att.kind, thread_id).await;
 
     if let Err(e) = tokio::fs::remove_file(&host_path).await
         && e.kind() != std::io::ErrorKind::NotFound
@@ -1599,12 +1457,12 @@ async fn file_has_webp_header(path: &std::path::Path) -> bool {
     }
 }
 
+/// Build one captionless `sendMediaGroup` member. Captions were removed from
+/// the outbound contract, so every album is sent without per-item text.
 fn build_group_input_media(
     att: &OutboundAttachment,
     host_path: &std::path::Path,
-    html: bool,
 ) -> frankenstein::input_media::MediaGroupInputMedia {
-    use frankenstein::ParseMode;
     use frankenstein::input_file::{FileUpload, InputFile};
     use frankenstein::input_media::{
         InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo, MediaGroupInputMedia,
@@ -1615,44 +1473,22 @@ fn build_group_input_media(
             path: host_path.to_path_buf(),
         })
     };
-    let cap = att.caption.as_deref().map(|raw| {
-        if html {
-            caption_to_html(raw)
-        } else {
-            caption_to_plain(raw)
-        }
-    });
-    let parse_mode = (cap.is_some() && html).then_some(ParseMode::Html);
     match att.kind {
-        OutboundKind::Photo => MediaGroupInputMedia::Photo(
-            InputMediaPhoto::builder()
-                .media(file())
-                .maybe_caption(cap)
-                .maybe_parse_mode(parse_mode)
-                .build(),
-        ),
-        OutboundKind::Video => MediaGroupInputMedia::Video(
-            InputMediaVideo::builder()
-                .media(file())
-                .maybe_caption(cap)
-                .maybe_parse_mode(parse_mode)
-                .build(),
-        ),
+        OutboundKind::Photo => {
+            MediaGroupInputMedia::Photo(InputMediaPhoto::builder().media(file()).build())
+        }
+        OutboundKind::Video => {
+            MediaGroupInputMedia::Video(InputMediaVideo::builder().media(file()).build())
+        }
         OutboundKind::Document => MediaGroupInputMedia::Document(
             InputMediaDocument::builder()
                 .media(file())
                 .disable_content_type_detection(true)
-                .maybe_caption(cap)
-                .maybe_parse_mode(parse_mode)
                 .build(),
         ),
-        OutboundKind::Audio => MediaGroupInputMedia::Audio(
-            InputMediaAudio::builder()
-                .media(file())
-                .maybe_caption(cap)
-                .maybe_parse_mode(parse_mode)
-                .build(),
-        ),
+        OutboundKind::Audio => {
+            MediaGroupInputMedia::Audio(InputMediaAudio::builder().media(file()).build())
+        }
         _ => {
             tracing::error!(
                 "send_group received ungroupable kind {:?} for {} - classifier bug",
@@ -1693,40 +1529,17 @@ async fn send_group(
 
     let thread_id = (ctx.eff_thread_id != 0).then_some(ctx.eff_thread_id as i32);
 
-    // Send an album once with the given caption rendering.
-    async fn send_album(
-        ctx: &SendCtx<'_>,
-        items: &[OutboundAttachment],
-        host_paths: &[PathBuf],
-        thread_id: Option<i32>,
-        html: bool,
-    ) -> Result<Vec<Message>, TgError> {
-        let media: Vec<frankenstein::input_media::MediaGroupInputMedia> = items
-            .iter()
-            .zip(host_paths.iter())
-            .map(|(att, host)| build_group_input_media(att, host, html))
-            .collect();
-        ctx.bot
-            .send_media_group(ctx.chat_id, media, thread_id, ctx.retry_ambiguous)
-            .await
-    }
-
-    let result = match send_album(ctx, items, &host_paths, thread_id, true).await {
+    let media: Vec<frankenstein::input_media::MediaGroupInputMedia> = items
+        .iter()
+        .zip(host_paths.iter())
+        .map(|(att, host)| build_group_input_media(att, host))
+        .collect();
+    let result = match ctx
+        .bot
+        .send_media_group(ctx.chat_id, media, thread_id, ctx.retry_ambiguous)
+        .await
+    {
         Ok(messages) => Ok(messages),
-        Err(e) if is_media_group_validation_error(&e) => Err(classify_media_group_send_error(e)),
-        Err(e) if is_retryable_format_error(&e) => {
-            let reason = display_error_chain(&e);
-            // Caption formatting rejection (pre-delivery 400) — retry the
-            // album once with plain captions, preserving the album and
-            // dropping only the caption's formatting.
-            tracing::warn!(
-                "media-group HTML caption send failed, retrying as plain text: {reason}"
-            );
-            match send_album(ctx, items, &host_paths, thread_id, false).await {
-                Ok(messages) => Ok(messages),
-                Err(e) => Err(classify_media_group_send_error(e)),
-            }
-        }
         Err(e) => Err(classify_media_group_send_error(e)),
     };
 
@@ -1886,75 +1699,6 @@ mod tests {
     }
 
     #[test]
-    fn caption_to_html_renders_bold() {
-        assert_eq!(super::caption_to_html("**x**"), "<b>x</b>");
-    }
-
-    #[test]
-    fn caption_to_plain_is_capped_to_limit() {
-        // The plain fallback caption must always be within Telegram's visible
-        // caption limit (HTML-string length is irrelevant — Telegram counts
-        // visible text). Use a raw input over the limit.
-        let raw = "a".repeat(super::TELEGRAM_CAPTION_LIMIT + 50);
-        let plain = super::caption_to_plain(&raw);
-        assert!(
-            plain.chars().count() <= super::TELEGRAM_CAPTION_LIMIT,
-            "plain caption length {} exceeds limit",
-            plain.chars().count()
-        );
-    }
-
-    #[test]
-    fn caption_to_plain_strips_formatting() {
-        assert_eq!(super::caption_to_plain("**x**"), "x");
-    }
-
-    #[test]
-    fn is_retryable_format_error_gates_retry_correctly() {
-        use frankenstein::response::ErrorResponse;
-        fn api_err(code: u64, desc: &str) -> TgError {
-            TgError::Api(frankenstein::Error::Api(ErrorResponse {
-                ok: false,
-                description: desc.to_string(),
-                error_code: code,
-                parameters: None,
-            }))
-        }
-        // Deterministic pre-delivery 400 formatting rejections → retry is safe.
-        assert!(super::is_retryable_format_error(&api_err(
-            400,
-            "Bad Request: can't parse entities: Unsupported start tag \"x\""
-        )));
-        assert!(super::is_retryable_format_error(&api_err(
-            400,
-            "Bad Request: can't parse entities: Unsupported URL protocol"
-        )));
-        assert!(super::is_retryable_format_error(&api_err(
-            400,
-            "Bad Request: message caption is too long"
-        )));
-        // A 400 unrelated to caption formatting → not retryable.
-        assert!(!super::is_retryable_format_error(&api_err(
-            400,
-            "Bad Request: chat not found"
-        )));
-        // 5xx / 429 even if the text contains the phrases → must NOT retry (the
-        // send may have been delivered, so a retry would duplicate the message).
-        assert!(!super::is_retryable_format_error(&api_err(
-            429,
-            "Too Many Requests: retry after 5"
-        )));
-        assert!(!super::is_retryable_format_error(&api_err(
-            500,
-            "Internal Server Error: caption is too long"
-        )));
-        // Non-API (transport/other) error → not retryable.
-        assert!(!super::is_retryable_format_error(&TgError::Other(
-            "connection reset by peer".to_string()
-        )));
-    }
-
-    #[test]
     fn send_failure_classification_is_400_certain_else_uncertain() {
         use frankenstein::response::ErrorResponse;
 
@@ -2016,7 +1760,7 @@ mod tests {
 
     #[test]
     fn attachment_fragments_use_archive_marker_format() {
-        let mut photo = att(OutboundKind::Photo);
+        let photo = att(OutboundKind::Photo);
         assert_eq!(super::attachment_fragment(&photo), "[photo]");
 
         let mut document = att(OutboundKind::Document);
@@ -2025,9 +1769,6 @@ mod tests {
             super::attachment_fragment(&document),
             "[document: report.pdf]"
         );
-
-        photo.caption = Some("published caption".into());
-        assert_eq!(super::attachment_fragment(&photo), "published caption");
     }
 
     const HOST_OUTBOX: &str = "/Users/x/.right/agents/riskoff/outbox";
@@ -2484,7 +2225,6 @@ mod tests {
             kind,
             path: format!("/sandbox/outbox/{}.bin", kind_to_ext(kind)),
             filename: None,
-            caption: None,
             media_group_id: Some("g".into()),
         }
     }
@@ -2636,89 +2376,6 @@ mod tests {
             GroupPlan::Degrade { reason } => assert!(reason.contains("incompatible")),
             other => panic!("expected Degrade, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn merge_captions_first_only_is_preserved() {
-        let mut caps = vec![Some("first".to_owned()), None, None];
-        merge_group_captions(&mut caps);
-        assert_eq!(caps, vec![Some("first".to_owned()), None, None]);
-    }
-
-    #[tokio::test]
-    async fn merge_captions_all_none_stays_none() {
-        let mut caps: Vec<Option<String>> = vec![None, None, None];
-        merge_group_captions(&mut caps);
-        assert_eq!(caps, vec![None, None, None]);
-    }
-
-    #[tokio::test]
-    async fn merge_captions_later_items_fold_into_first() {
-        let mut caps = vec![Some("a".to_owned()), None, Some("b".to_owned())];
-        merge_group_captions(&mut caps);
-        assert_eq!(caps, vec![Some("a\n\nb".to_owned()), None, None]);
-    }
-
-    #[tokio::test]
-    async fn merge_captions_only_later_item_moves_to_first() {
-        let mut caps = vec![None, Some("only".to_owned())];
-        merge_group_captions(&mut caps);
-        assert_eq!(caps, vec![Some("only".to_owned()), None]);
-    }
-
-    #[tokio::test]
-    async fn merge_captions_all_three_set_joined() {
-        let mut caps = vec![
-            Some("a".to_owned()),
-            Some("b".to_owned()),
-            Some("c".to_owned()),
-        ];
-        merge_group_captions(&mut caps);
-        assert_eq!(caps, vec![Some("a\n\nb\n\nc".to_owned()), None, None]);
-    }
-
-    #[tokio::test]
-    async fn merge_captions_truncates_when_over_telegram_limit() {
-        // 10 captions × 150 chars each → 1500 chars of content + 9 "\n\n" = 1518
-        // Well over the 1024 limit; should be truncated with ellipsis.
-        let mut caps: Vec<Option<String>> = (0..10)
-            .map(|i| Some("x".repeat(150) + &format!("#{i}")))
-            .collect();
-        merge_group_captions(&mut caps);
-        let first = caps[0].as_deref().expect("first slot must be set");
-        assert!(
-            first.chars().count() <= TELEGRAM_CAPTION_LIMIT,
-            "caption too long: {} chars",
-            first.chars().count()
-        );
-        assert!(first.ends_with('…'), "truncated caption must end with …");
-        for tail in &caps[1..] {
-            assert!(tail.is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn merge_captions_under_limit_is_not_truncated() {
-        let mut caps = vec![Some("short".to_owned()), Some("also short".to_owned())];
-        merge_group_captions(&mut caps);
-        assert_eq!(caps[0].as_deref(), Some("short\n\nalso short"));
-        assert!(!caps[0].as_deref().unwrap().ends_with('…'));
-    }
-
-    #[tokio::test]
-    async fn merge_captions_truncation_is_char_safe() {
-        // Russian / emoji caption, each copy is 500+ chars via chars().count() —
-        // byte length is 2-4x that. Byte-slice truncation would panic mid-codepoint.
-        let cyrillic: String = "а".repeat(600);
-        let mut caps = vec![
-            Some(cyrillic.clone()),
-            Some(cyrillic.clone()),
-            Some(cyrillic),
-        ];
-        merge_group_captions(&mut caps);
-        let first = caps[0].as_deref().unwrap();
-        assert!(first.chars().count() <= TELEGRAM_CAPTION_LIMIT);
-        // No panic = char-boundary-safe truncation.
     }
 
     #[tokio::test]
@@ -3139,23 +2796,17 @@ mod tests {
         assert!(result.contains("          filename: \"edf.pdf\"\n"));
     }
 
-    fn att_with(
-        kind: OutboundKind,
-        group: Option<&str>,
-        caption: Option<&str>,
-    ) -> OutboundAttachment {
+    fn att_with(kind: OutboundKind, group: Option<&str>, label: &str) -> OutboundAttachment {
         OutboundAttachment {
             kind,
             path: format!(
-                "/sandbox/outbox/{}-{}.bin",
+                "/sandbox/outbox/{}-{label}.bin",
                 match kind {
                     OutboundKind::Document => "document",
                     _ => kind_to_ext(kind),
                 },
-                caption.unwrap_or("x")
             ),
             filename: None,
-            caption: caption.map(str::to_owned),
             media_group_id: group.map(str::to_owned),
         }
     }
@@ -3173,8 +2824,8 @@ mod tests {
             .unwrap();
 
         let items = vec![
-            att_with(OutboundKind::Document, Some("logos"), Some("webp")),
-            att_with(OutboundKind::Document, Some("logos"), Some("png")),
+            att_with(OutboundKind::Document, Some("logos"), "webp"),
+            att_with(OutboundKind::Document, Some("logos"), "png"),
         ];
         let host_paths = vec![webp, png];
 
@@ -3197,8 +2848,8 @@ mod tests {
         tokio::fs::write(&b, b"plain text").await.unwrap();
 
         let items = vec![
-            att_with(OutboundKind::Document, Some("docs"), Some("a")),
-            att_with(OutboundKind::Document, Some("docs"), Some("b")),
+            att_with(OutboundKind::Document, Some("docs"), "a"),
+            att_with(OutboundKind::Document, Some("docs"), "b"),
         ];
         let host_paths = vec![a, b];
 
@@ -3211,8 +2862,8 @@ mod tests {
 
     #[tokio::test]
     async fn build_group_input_media_document_disables_content_type_detection() {
-        let att = att_with(OutboundKind::Document, Some("docs"), Some("report"));
-        let media = build_group_input_media(&att, std::path::Path::new("/tmp/report.pdf"), true);
+        let att = att_with(OutboundKind::Document, Some("docs"), "report");
+        let media = build_group_input_media(&att, std::path::Path::new("/tmp/report.pdf"));
 
         match media {
             frankenstein::input_media::MediaGroupInputMedia::Document(document) => {
@@ -3224,7 +2875,7 @@ mod tests {
 
     #[tokio::test]
     async fn attachment_error_label_names_kind_and_path() {
-        let att = att_with(OutboundKind::Document, Some("docs"), Some("report"));
+        let att = att_with(OutboundKind::Document, Some("docs"), "report");
 
         assert_eq!(
             attachment_error_label(&att),
@@ -3235,8 +2886,8 @@ mod tests {
     #[tokio::test]
     async fn partition_no_group_ids_produces_all_singles() {
         let atts = vec![
-            att_with(OutboundKind::Photo, None, None),
-            att_with(OutboundKind::Document, None, None),
+            att_with(OutboundKind::Photo, None, "photo"),
+            att_with(OutboundKind::Document, None, "document"),
         ];
         let (sends, warnings) = partition_sends(&atts);
         assert_eq!(sends.len(), 2);
@@ -3248,8 +2899,8 @@ mod tests {
     #[tokio::test]
     async fn partition_two_photo_group_produces_one_group_send() {
         let atts = vec![
-            att_with(OutboundKind::Photo, Some("shots"), Some("a")),
-            att_with(OutboundKind::Photo, Some("shots"), Some("b")),
+            att_with(OutboundKind::Photo, Some("shots"), "a"),
+            att_with(OutboundKind::Photo, Some("shots"), "b"),
         ];
         let (sends, warnings) = partition_sends(&atts);
         assert!(warnings.is_empty());
@@ -3258,34 +2909,6 @@ mod tests {
             OutboundSend::Group { kind, items, .. } => {
                 assert_eq!(*kind, GroupKind::PhotoVideo);
                 assert_eq!(items.len(), 2);
-                assert_eq!(items[0].caption.as_deref(), Some("a\n\nb"));
-                assert!(items[1].caption.is_none());
-            }
-            other => panic!("expected OutboundSend::Group, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn partition_group_preserves_original_captions_for_fallback_singles() {
-        let atts = vec![
-            att_with(OutboundKind::Document, Some("docs"), Some("first")),
-            att_with(OutboundKind::Document, Some("docs"), Some("second")),
-        ];
-
-        let (sends, warnings) = partition_sends(&atts);
-        assert!(warnings.is_empty());
-        assert_eq!(sends.len(), 1);
-
-        match &sends[0] {
-            OutboundSend::Group {
-                items,
-                fallback_items,
-                ..
-            } => {
-                assert_eq!(items[0].caption.as_deref(), Some("first\n\nsecond"));
-                assert!(items[1].caption.is_none());
-                assert_eq!(fallback_items[0].caption.as_deref(), Some("first"));
-                assert_eq!(fallback_items[1].caption.as_deref(), Some("second"));
             }
             other => panic!("expected OutboundSend::Group, got {other:?}"),
         }
@@ -3295,11 +2918,11 @@ mod tests {
     async fn partition_group_preserves_first_occurrence_order() {
         // Reply order: group A item, single, group A item, group B item, group B item
         let atts = vec![
-            att_with(OutboundKind::Photo, Some("a"), None),
-            att_with(OutboundKind::Document, None, None),
-            att_with(OutboundKind::Photo, Some("a"), None),
-            att_with(OutboundKind::Document, Some("b"), None),
-            att_with(OutboundKind::Document, Some("b"), None),
+            att_with(OutboundKind::Photo, Some("a"), "first"),
+            att_with(OutboundKind::Document, None, "middle"),
+            att_with(OutboundKind::Photo, Some("a"), "second"),
+            att_with(OutboundKind::Document, Some("b"), "third"),
+            att_with(OutboundKind::Document, Some("b"), "fourth"),
         ];
         let (sends, warnings) = partition_sends(&atts);
         assert!(warnings.is_empty());
@@ -3326,8 +2949,8 @@ mod tests {
     #[tokio::test]
     async fn partition_incompatible_group_degrades_and_warns() {
         let atts = vec![
-            att_with(OutboundKind::Photo, Some("bad"), None),
-            att_with(OutboundKind::Voice, Some("bad"), None),
+            att_with(OutboundKind::Photo, Some("bad"), "photo"),
+            att_with(OutboundKind::Voice, Some("bad"), "voice"),
         ];
         let (sends, warnings) = partition_sends(&atts);
         assert_eq!(warnings.len(), 1);
@@ -3343,8 +2966,8 @@ mod tests {
     #[tokio::test]
     async fn partition_lone_group_member_degrades_and_warns() {
         let atts = vec![
-            att_with(OutboundKind::Photo, Some("only"), None),
-            att_with(OutboundKind::Document, None, None),
+            att_with(OutboundKind::Photo, Some("only"), "only"),
+            att_with(OutboundKind::Document, None, "document"),
         ];
         let (sends, warnings) = partition_sends(&atts);
         assert_eq!(warnings.len(), 1);
@@ -3356,7 +2979,7 @@ mod tests {
     #[tokio::test]
     async fn partition_split_oversize_group_yields_multiple_group_sends_plus_trailing_single() {
         let atts: Vec<OutboundAttachment> = (0..11)
-            .map(|_| att_with(OutboundKind::Photo, Some("big"), None))
+            .map(|i| att_with(OutboundKind::Photo, Some("big"), &format!("photo-{i}")))
             .collect();
         let (sends, warnings) = partition_sends(&atts);
         assert_eq!(warnings.len(), 1);
@@ -3368,46 +2991,6 @@ mod tests {
             other => panic!("expected Group first, got {other:?}"),
         }
         assert!(matches!(sends[1], OutboundSend::Single(_)));
-    }
-
-    #[tokio::test]
-    async fn partition_split_oversize_group_merges_captions_per_chunk() {
-        // 11 photos in a group — split into a chunk of 10 + 1 trailing single.
-        // Give every photo a distinct caption and assert the first item of the
-        // 10-chunk carries all 10 captions joined with "\n\n" and the trailing
-        // single retains only its own caption.
-        let captions: Vec<String> = (0..11).map(|i| format!("c{i}")).collect();
-        let atts: Vec<OutboundAttachment> = captions
-            .iter()
-            .map(|c| att_with(OutboundKind::Photo, Some("big"), Some(c)))
-            .collect();
-        let (sends, warnings) = partition_sends(&atts);
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(sends.len(), 2);
-
-        // First send: 10-item Group, first item's caption = "c0\n\nc1\n\n...\n\nc9".
-        match &sends[0] {
-            OutboundSend::Group { items, .. } => {
-                assert_eq!(items.len(), 10);
-                let expected: String = (0..10)
-                    .map(|i| format!("c{i}"))
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                assert_eq!(items[0].caption.as_deref(), Some(expected.as_str()));
-                for it in &items[1..] {
-                    assert!(it.caption.is_none(), "non-first items must be blanked");
-                }
-            }
-            other => panic!("expected Group, got {other:?}"),
-        }
-
-        // Second send: trailing Single for the 11th photo — caption "c10".
-        match &sends[1] {
-            OutboundSend::Single(att) => {
-                assert_eq!(att.caption.as_deref(), Some("c10"));
-            }
-            other => panic!("expected Single, got {other:?}"),
-        }
     }
 
     #[tokio::test]

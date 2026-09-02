@@ -442,13 +442,13 @@ channel destination. Deterministic typed
 400 and pre-request validation failures are certain; network, timeout, 429, 5xx,
 and other transport/API failures are uncertain because Telegram may have
 accepted the request without returning a receipt. Ambiguous failures are never
-retried. The existing HTML/plain fallback remains restricted to deterministic
-typed 400 formatting rejection. Media groups remain one request and their
+retried. Typed rich-content and captionless media delivery carry no formatting
+retry branch. Media groups remain one request and their
 receipt ids preserve Telegram response order; deterministic album
 incompatibility can still degrade to singles, which then stop on their first
 failure in channel mode.
 
-The attachment delivery report carries confirmed ids, confirmed caption/marker
+The attachment delivery report carries confirmed ids, confirmed marker
 fragments, and the first failure classification. A thin legacy adapter keeps
 `send_message`, worker, and async delivery's existing continue/report behavior;
 the channel endpoint consumes the report in stop-first mode. The rich channel
@@ -463,7 +463,7 @@ ids) are typed HTTP 200 `ok:false` responses so the aggregator can expose
 receipts. Archive failure after delivery is also a typed partial success. Every
 partial/uncertain/archive-failed result explicitly forbids resend.
 
-Confirmed RichContent text, captions, and `[kind]` / `[kind: filename]` markers
+Confirmed RichContent text and `[kind]` / `[kind: filename]` markers
 are joined in delivery order and archived once as one Channel Publication under
 the last confirmed Telegram id. Failed or ambiguous pieces are never archived;
 zero confirmed ids create no archive row. Neither channel path has an

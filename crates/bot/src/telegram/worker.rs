@@ -3145,7 +3145,6 @@ pub fn spawn_worker(
                             eff_thread_id,
                             bootstrap_mode,
                             is_first_call,
-                            None,
                             reply_to,
                         )
                         .await;

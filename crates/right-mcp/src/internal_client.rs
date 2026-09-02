@@ -861,6 +861,7 @@ pub enum MessageAttachmentKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MessageAttachmentDto {
     #[serde(rename = "type")]
     pub kind: MessageAttachmentKind,
@@ -868,8 +869,6 @@ pub struct MessageAttachmentDto {
     pub path: String,
     #[serde(default)]
     pub filename: Option<String>,
-    #[serde(default)]
-    pub caption: Option<String>,
     #[serde(default)]
     pub media_group_id: Option<String>,
 }
@@ -1468,18 +1467,35 @@ mod tests {
     }
 
     #[test]
-    fn message_attachment_dto_roundtrips_snake_case() {
-        let dto = MessageAttachmentDto {
-            kind: MessageAttachmentKind::Photo,
-            path: "/sandbox/outbox/a.png".into(),
-            filename: None,
-            caption: Some("hi".into()),
-            media_group_id: None,
-        };
-        let json = serde_json::to_string(&dto).unwrap();
-        assert!(json.contains("\"photo\""), "{json}");
-        let back: MessageAttachmentDto = serde_json::from_str(&json).unwrap();
+    fn message_attachment_dto_serializes_without_legacy_caption() {
+        let dto: MessageAttachmentDto = serde_json::from_value(serde_json::json!({
+            "type": "photo",
+            "path": "/sandbox/outbox/a.png"
+        }))
+        .unwrap();
+        let value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(value["type"], "photo");
+        assert!(
+            value.get("caption").is_none(),
+            "attachment DTO must not expose a legacy caption: {value}"
+        );
+        let back: MessageAttachmentDto = serde_json::from_value(value).unwrap();
         assert_eq!(back, dto);
+    }
+
+    #[test]
+    fn message_attachment_dto_rejects_legacy_caption_field() {
+        let error = serde_json::from_value::<MessageAttachmentDto>(serde_json::json!({
+            "type": "photo",
+            "path": "/sandbox/outbox/a.png",
+            "caption": "legacy markdown caption"
+        }))
+        .expect_err("attachment captions are not part of the cutover DTO");
+
+        assert!(
+            error.to_string().contains("unknown field `caption`"),
+            "unexpected deserialization error: {error}"
+        );
     }
 
     #[test]
@@ -1515,13 +1531,13 @@ mod tests {
             token: "tok".into(),
             chat_id: -100,
             content: None,
-            attachments: vec![MessageAttachmentDto {
-                kind: MessageAttachmentKind::Photo,
-                path: "/sandbox/outbox/a.png".into(),
-                filename: None,
-                caption: Some("caption".into()),
-                media_group_id: None,
-            }],
+            attachments: vec![
+                serde_json::from_value(serde_json::json!({
+                    "type": "photo",
+                    "path": "/sandbox/outbox/a.png"
+                }))
+                .unwrap(),
+            ],
         };
         let value = serde_json::to_value(&req).unwrap();
         assert!(value.get("content").is_none());

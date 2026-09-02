@@ -17,6 +17,7 @@ pub(crate) fn to_telegram(content: &RichContent) -> InputRichMessage {
             RichContentRef::Text(text) => vec![paragraph_text(text)],
             RichContentRef::Blocks(blocks) => blocks.iter().map(map_block).collect(),
         })
+        .skip_entity_detection(true)
         .build()
 }
 

@@ -40,7 +40,7 @@ Replacement of a placeholder with the real credential at the sandbox network bou
 
 ## Rich Content
 
-An Agent-authored standalone Telegram message whose literal text and formatting intent are represented separately. Attachment captions and platform-authored interface text are not Rich Content.
+Agent-authored Telegram text whose literal content and formatting intent are represented separately. Attachments carry no text; platform-authored interface text is outside this type.
 
 ## Channel Publication
 

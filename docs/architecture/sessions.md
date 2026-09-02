@@ -70,8 +70,7 @@ Telegram transcript archiving is separate from Hindsight memory:
   delivery succeeds.
 
 Standalone assistant bodies are validated `RichContent` and archived only as
-normalized plain text. Captions and platform-owned UI stay on their separate
-Markdown/HTML paths.
+normalized plain text. Attachments carry marker-only archive fragments.
 
 Group response routing is switchable between `addressed` (default: respond only
 when addressed) and `all` (respond to every non-bot message in an open group),

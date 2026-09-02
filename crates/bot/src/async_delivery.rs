@@ -111,7 +111,7 @@ The `content` field below is the FINAL user-facing message — place it VERBATIM
 Do NOT summarize, rephrase, or omit any part of the content.
 You MAY prepend a short contextual intro (1 sentence max) if recent conversation was on a different topic, so the message feels natural.
 Do NOT call `mcp__right__send_message` or any other send/notify tool. The platform delivers your reply to Telegram itself — writing `content` (and optionally `attachments`) is the only way to reach the user.
-Re-emit any attachments from the report in your reply's `attachments` array. `content` and an attachment `caption` are delivered as SEPARATE messages — never repeat the content text in a caption.
+Re-emit any attachments from the report in your reply's `attachments` array. Attachments carry no text; the user-facing text belongs only in `content`.
 
 Here is the YAML report of the cron job:
 ";
@@ -140,7 +140,7 @@ The `content` field below is the FINAL user-facing message - place it VERBATIM i
 Do NOT summarize, rephrase, or omit any part of the content.
 You MAY prepend a short contextual intro (1 sentence max) if recent conversation was on a different topic, so the message feels natural.
 Do NOT call `mcp__right__send_message` or any other send/notify tool. The platform delivers your reply to Telegram itself - writing `content` (and optionally `attachments`) is the only way to reach the user.
-Re-emit any attachments from the report in your reply's `attachments` array. `content` and an attachment `caption` are delivered as SEPARATE messages - never repeat the content text in a caption.
+Re-emit any attachments from the report in your reply's `attachments` array. Attachments carry no text; the user-facing text belongs only in `content`.
 
 Here is the YAML report of the background task:
 ";
@@ -255,12 +255,6 @@ pub(crate) fn format_async_yaml(
                 "          path: \"{}\"\n",
                 crate::telegram::attachments::yaml_escape_string(&att.path)
             ));
-            if let Some(ref caption) = att.caption {
-                output.push_str(&format!(
-                    "          caption: \"{}\"\n",
-                    crate::telegram::attachments::yaml_escape_string(caption)
-                ));
-            }
         }
     }
     output.push_str(&format!(

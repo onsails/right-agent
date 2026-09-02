@@ -73,6 +73,8 @@ const THROTTLE_PRUNE_INTERVAL: u64 = 256;
 /// deadline was even armed, wedging the chat queue until restart
 /// (riskoff, 2026-07-19). Media uploads keep the client's 500s cap.
 const TELEGRAM_TEXT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-attempt ceiling for typed rich-media uploads.
+const TELEGRAM_MEDIA_TIMEOUT: Duration = Duration::from_secs(500);
 
 /// Maximum automatic retries on a 429 `retry_after` response. teloxide re-queued
 /// throttled sends until success; we bound it so a persistent 429 cannot block a
@@ -559,6 +561,35 @@ impl RightBot {
             .map_err(|_| TgError::Timeout(TELEGRAM_TEXT_TIMEOUT))??;
         Ok(resp.result)
     }
+    /// Send one typed rich-media message. Every attempt is bounded; ordinary
+    /// delivery retries Telegram 429 responses, while channel delivery makes a
+    /// single attempt because an ambiguous result must not be duplicated.
+    pub(crate) async fn send_rich_media(
+        &self,
+        chat_id: i64,
+        rich_message: InputRichMessage,
+        thread: Option<i32>,
+        retry_429: bool,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendRichMessageParams::builder()
+            .chat_id(chat_id)
+            .rich_message(rich_message)
+            .maybe_message_thread_id(thread)
+            .build();
+        let resp = if retry_429 {
+            with_retry_bounded(
+                || self.bot.send_rich_message(&params),
+                Some(TELEGRAM_MEDIA_TIMEOUT),
+            )
+            .await?
+        } else {
+            tokio::time::timeout(TELEGRAM_MEDIA_TIMEOUT, self.bot.send_rich_message(&params))
+                .await
+                .map_err(|_| TgError::Timeout(TELEGRAM_MEDIA_TIMEOUT))??
+        };
+        Ok(resp.result)
+    }
 
     /// Plain channel fallback: one bounded, non-retried attempt.
     pub(crate) async fn send_message_once(
@@ -790,13 +821,11 @@ impl RightBot {
     // a local-file upload (sandbox-outbox paths), or a `String` for a Telegram
     // `file_id`/URL. `&str` does NOT auto-convert.
 
-    /// Send a photo, optional HTML caption, threaded, replying.
+    /// Send a photo, threaded, replying, without a caption.
     pub(crate) async fn send_photo(
         &self,
         chat_id: i64,
         media: FileUpload,
-        caption: Option<&str>,
-        html: bool,
         thread: Option<i32>,
         reply_to: Option<i32>,
         retry_429: bool,
@@ -805,8 +834,6 @@ impl RightBot {
         let params = frankenstein::methods::SendPhotoParams::builder()
             .chat_id(chat_id)
             .photo(media)
-            .maybe_caption(caption)
-            .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
             .maybe_message_thread_id(thread)
             .maybe_reply_parameters(
                 reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
@@ -816,13 +843,11 @@ impl RightBot {
         Ok(resp.result)
     }
 
-    /// Send a document, optional HTML caption, threaded, replying.
+    /// Send a document, threaded, replying, without a caption.
     pub(crate) async fn send_document(
         &self,
         chat_id: i64,
         media: FileUpload,
-        caption: Option<&str>,
-        html: bool,
         thread: Option<i32>,
         reply_to: Option<i32>,
         retry_429: bool,
@@ -831,8 +856,6 @@ impl RightBot {
         let params = frankenstein::methods::SendDocumentParams::builder()
             .chat_id(chat_id)
             .document(media)
-            .maybe_caption(caption)
-            .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
             .maybe_message_thread_id(thread)
             .maybe_reply_parameters(
                 reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
@@ -842,95 +865,7 @@ impl RightBot {
         Ok(resp.result)
     }
 
-    /// Send a video, optional HTML caption, threaded.
-    pub(crate) async fn send_video(
-        &self,
-        chat_id: i64,
-        media: FileUpload,
-        caption: Option<&str>,
-        html: bool,
-        thread: Option<i32>,
-        retry_429: bool,
-    ) -> Result<Message, TgError> {
-        self.rate.acquire(chat_id).await;
-        let params = frankenstein::methods::SendVideoParams::builder()
-            .chat_id(chat_id)
-            .video(media)
-            .maybe_caption(caption)
-            .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
-            .maybe_message_thread_id(thread)
-            .build();
-        let resp = with_optional_retry(|| self.bot.send_video(&params), retry_429).await?;
-        Ok(resp.result)
-    }
-
-    /// Send a voice message, optional HTML caption, threaded.
-    pub(crate) async fn send_voice(
-        &self,
-        chat_id: i64,
-        media: FileUpload,
-        caption: Option<&str>,
-        html: bool,
-        thread: Option<i32>,
-        retry_429: bool,
-    ) -> Result<Message, TgError> {
-        self.rate.acquire(chat_id).await;
-        let params = frankenstein::methods::SendVoiceParams::builder()
-            .chat_id(chat_id)
-            .voice(media)
-            .maybe_caption(caption)
-            .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
-            .maybe_message_thread_id(thread)
-            .build();
-        let resp = with_optional_retry(|| self.bot.send_voice(&params), retry_429).await?;
-        Ok(resp.result)
-    }
-
-    /// Send an audio file, optional HTML caption, threaded.
-    pub(crate) async fn send_audio(
-        &self,
-        chat_id: i64,
-        media: FileUpload,
-        caption: Option<&str>,
-        html: bool,
-        thread: Option<i32>,
-        retry_429: bool,
-    ) -> Result<Message, TgError> {
-        self.rate.acquire(chat_id).await;
-        let params = frankenstein::methods::SendAudioParams::builder()
-            .chat_id(chat_id)
-            .audio(media)
-            .maybe_caption(caption)
-            .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
-            .maybe_message_thread_id(thread)
-            .build();
-        let resp = with_optional_retry(|| self.bot.send_audio(&params), retry_429).await?;
-        Ok(resp.result)
-    }
-
-    /// Send an animation (GIF/MP4), optional HTML caption, threaded.
-    pub(crate) async fn send_animation(
-        &self,
-        chat_id: i64,
-        media: FileUpload,
-        caption: Option<&str>,
-        html: bool,
-        thread: Option<i32>,
-        retry_429: bool,
-    ) -> Result<Message, TgError> {
-        self.rate.acquire(chat_id).await;
-        let params = frankenstein::methods::SendAnimationParams::builder()
-            .chat_id(chat_id)
-            .animation(media)
-            .maybe_caption(caption)
-            .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
-            .maybe_message_thread_id(thread)
-            .build();
-        let resp = with_optional_retry(|| self.bot.send_animation(&params), retry_429).await?;
-        Ok(resp.result)
-    }
-
-    /// Send a video note (round video). No caption / parse mode in the API.
+    /// Send a video note (round video), threaded.
     pub(crate) async fn send_video_note(
         &self,
         chat_id: i64,
@@ -948,7 +883,7 @@ impl RightBot {
         Ok(resp.result)
     }
 
-    /// Send a sticker. No caption / parse mode in the API.
+    /// Send a sticker, threaded.
     pub(crate) async fn send_sticker(
         &self,
         chat_id: i64,
@@ -966,8 +901,7 @@ impl RightBot {
         Ok(resp.result)
     }
 
-    /// Send a media group (album). Captions / parse modes / keyboards live on
-    /// each `MediaGroupInputMedia` member, not at the top level.
+    /// Send a captionless media group (album).
     pub(crate) async fn send_media_group(
         &self,
         chat_id: i64,
@@ -1076,14 +1010,11 @@ impl RightBot {
     // then drop it (which deletes it).
 
     /// Send an in-memory photo (spooled to a temp file for the upload).
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_photo_bytes(
         &self,
         chat_id: i64,
         bytes: &[u8],
         filename: &str,
-        caption: Option<&str>,
-        html: bool,
         thread: Option<i32>,
         reply_to: Option<i32>,
     ) -> Result<Message, TgError> {
@@ -1091,20 +1022,17 @@ impl RightBot {
         let upload = FileUpload::InputFile(InputFile {
             path: spool.path().to_path_buf(),
         });
-        self.send_photo(chat_id, upload, caption, html, thread, reply_to, true)
+        self.send_photo(chat_id, upload, thread, reply_to, true)
             .await
         // `spool` (the TempDir) drops here, after the multipart upload completes.
     }
 
     /// Send an in-memory document (spooled to a temp file for the upload).
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_document_bytes(
         &self,
         chat_id: i64,
         bytes: &[u8],
         filename: &str,
-        caption: Option<&str>,
-        html: bool,
         thread: Option<i32>,
         reply_to: Option<i32>,
     ) -> Result<Message, TgError> {
@@ -1112,7 +1040,7 @@ impl RightBot {
         let upload = FileUpload::InputFile(InputFile {
             path: spool.path().to_path_buf(),
         });
-        self.send_document(chat_id, upload, caption, html, thread, reply_to, true)
+        self.send_document(chat_id, upload, thread, reply_to, true)
             .await
     }
 }
@@ -1465,10 +1393,9 @@ mod rich_content_tests {
             "#HYPE ~$18.5M"
         );
         assert!(payload.get("parse_mode").is_none());
-        assert!(
-            payload["rich_message"]
-                .get("skip_entity_detection")
-                .is_none()
+        assert_eq!(
+            payload["rich_message"]["skip_entity_detection"], true,
+            "typed rich text must disable Telegram entity detection",
         );
     }
 

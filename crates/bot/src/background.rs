@@ -690,7 +690,6 @@ async fn serialize_notify_delivery_for_host(
             kind: attachment.kind,
             path: dest.to_string_lossy().into_owned(),
             filename: attachment.filename.clone(),
-            caption: attachment.caption.clone(),
             media_group_id: attachment.media_group_id.clone(),
         });
     }

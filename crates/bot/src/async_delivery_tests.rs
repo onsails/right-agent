@@ -347,7 +347,10 @@ async fn format_async_yaml_basic_cron() {
     assert!(output.starts_with("You are delivering a cron job result"));
     assert!(output.contains("place it VERBATIM in your reply's `content` field"));
     assert!(output.contains("Do NOT call `mcp__right__send_message`"));
-    assert!(output.contains("never repeat the content text in a caption"));
+    assert!(
+        output
+            .contains("Attachments carry no text; the user-facing text belongs only in `content`")
+    );
     assert!(output.contains("Here is the YAML report of the cron job:"));
     // YAML content assertions
     assert!(output.contains("job: \"health-check\""));

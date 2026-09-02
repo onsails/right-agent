@@ -3,6 +3,7 @@
 //! writes a `kind: channel` entry to allowlist.yaml. Bot demotion/removal
 //! revokes the entry and drops any pending confirmation.
 
+use crate::cc::markdown_utils::html_escape;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -143,7 +144,7 @@ pub(crate) async fn handle_my_chat_member(
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let text = format!(
         "I was added as admin to channel <b>{}</b>.\nOpen it for read + post access?",
-        super::markdown::html_escape(&title)
+        html_escape(&title)
     );
     let sent = ctx
         .bot

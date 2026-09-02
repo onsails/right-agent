@@ -7,7 +7,6 @@ pub struct OutboundAttachment {
     pub kind: OutboundKind,
     pub path: String,
     pub filename: Option<String>,
-    pub caption: Option<String>,
     #[serde(default)]
     pub media_group_id: Option<String>,
 }
@@ -37,16 +36,15 @@ mod tests {
         assert_eq!(att.kind, OutboundKind::Photo);
         assert_eq!(att.path, "/sandbox/outbox/img.png");
         assert!(att.filename.is_none());
-        assert!(att.caption.is_none());
     }
 
     #[tokio::test]
-    async fn outbound_kind_deserialize_with_all_fields() {
-        let json = r#"{"type":"document","path":"/sandbox/outbox/data.csv","filename":"results.csv","caption":"Here's the data"}"#;
+    async fn outbound_kind_deserialize_with_filename() {
+        let json =
+            r#"{"type":"document","path":"/sandbox/outbox/data.csv","filename":"results.csv"}"#;
         let att: OutboundAttachment = serde_json::from_str(json).unwrap();
         assert_eq!(att.kind, OutboundKind::Document);
         assert_eq!(att.filename.as_deref(), Some("results.csv"));
-        assert_eq!(att.caption.as_deref(), Some("Here's the data"));
     }
 
     #[tokio::test]

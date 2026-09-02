@@ -249,13 +249,16 @@ fn operating_instructions_document_channel_post_attachments() {
         "partial",
         "delivery-uncertain",
         "do not resend",
-        "captions remain Markdown strings",
     ] {
         assert!(
             instructions.contains(expected),
             "OPERATING_INSTRUCTIONS missing channel publication guidance {expected:?}"
         );
     }
+    assert!(
+        !instructions.contains("caption"),
+        "OPERATING_INSTRUCTIONS must not document attachment captions"
+    );
 }
 
 #[test]

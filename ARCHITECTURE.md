@@ -621,7 +621,7 @@ setting `ParseMode::Html`. Shared send helpers should preserve effective
 topic thread ids. Do not send raw CLI-style prefixes such as `Warning:`
 or `Failed:` when a clear user-facing sentence is available.
 
-Agent-authored standalone Telegram bodies MUST use validated `right_rich_content::RichContent` and Telegram typed blocks, never Markdown or HTML source. Attachment captions, progress, and platform-authored interface text remain on their documented regular-message paths.
+Agent-authored standalone Telegram bodies MUST use validated `right_rich_content::RichContent` and Telegram typed blocks, never Markdown or HTML source. Attachments carry no text; progress is literal plain text; platform-authored interface text stays on its documented HTML paths.
 
 ## Dashboard frontend primitives
 

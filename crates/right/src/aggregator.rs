@@ -620,7 +620,7 @@ impl rmcp::ServerHandler for Aggregator {
                  short tasks. Rate limited to one message every 30 seconds. Cron, \
                  delivery, reflection, and background-continuation turns must not use it.\n\
                  - mcp__right__send_message: Send standalone validated RichContent and/or \
-                 attachments such as photo+caption or document for the current foreground \
+                 attachments such as a photo or document for the current foreground \
                  invocation only. Call once per message; attachment paths must be under \
                  /sandbox/outbox/. Max 20 calls per turn. After sending, the terminal reply \
                  may be content:null.\n\n\

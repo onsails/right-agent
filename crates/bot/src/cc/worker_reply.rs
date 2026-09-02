@@ -74,7 +74,7 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
 
     // CC sometimes returns a plain string after tool use. Treat it as literal
     // content for delivery compatibility; schema-compliant outputs are objects.
-    let mut output: ReplyOutput = if let Some(text) = result_val.as_str() {
+    let output: ReplyOutput = if let Some(text) = result_val.as_str() {
         ReplyOutput {
             content: if text.trim().is_empty() {
                 None
@@ -95,36 +95,7 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
             .map_err(|e| format!("failed to deserialize result: {e}"))?
     };
 
-    strip_caption_duplicating_content(&mut output);
-
     Ok((output, session_id))
-}
-
-/// Telegram delivers top-level RichContent separately from attachment captions.
-/// Strip captions whose trimmed text equals normalized content so an agent cannot
-/// accidentally double-post the same visible body. Content stays authoritative
-/// because it has no caption length limit.
-fn strip_caption_duplicating_content(output: &mut ReplyOutput) {
-    let content = match output
-        .content
-        .as_ref()
-        .map(right_rich_content::RichContent::normalized_text)
-    {
-        Some(content) if !content.is_empty() => content,
-        _ => return,
-    };
-    let Some(attachments) = output.attachments.as_mut() else {
-        return;
-    };
-    for att in attachments.iter_mut() {
-        if att.caption.as_deref().map(str::trim) == Some(content.as_str()) {
-            tracing::warn!(
-                path = %att.path,
-                "stripping attachment caption identical to reply content to avoid duplicate Telegram send"
-            );
-            att.caption = None;
-        }
-    }
 }
 
 /// Returns `true` when `name` is a `rightx-` skill package name (prefix "rightx-").
@@ -223,12 +194,6 @@ mod tests {
     fn rejects_string_content_in_structured_output() {
         let error = parse_reply_output(r#"{"result":{"content":"markdown"}}"#).unwrap_err();
         assert!(error.contains("deserialize"));
-    }
-
-    #[test]
-    fn strips_caption_that_duplicates_normalized_content() {
-        let (output, _) = parse_reply_output(r#"{"result":{"content":{"text":"News"},"attachments":[{"type":"photo","path":"/sandbox/outbox/a.png","caption":"News"}]}}"#).unwrap();
-        assert!(output.attachments.unwrap()[0].caption.is_none());
     }
 
     #[test]

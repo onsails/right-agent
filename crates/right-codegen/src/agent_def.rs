@@ -46,7 +46,7 @@ macro_rules! rich_schema_defs {
 pub const REPLY_SCHEMA_JSON: &str = concat!(
     r#"{"type":"object","additionalProperties":false,"properties":{"content":{"oneOf":["#,
     rich_content_schema!(),
-    r#",{"type":"null"}]},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}},"used_skill_receipts":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"package_name":{"type":"string","pattern":"^rightx-"},"message":{"type":"string","minLength":1}},"required":["package_name","message"]}}},"required":["content","used_skill_receipts"]"#,
+    r#",{"type":"null"}]},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}},"used_skill_receipts":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"package_name":{"type":"string","pattern":"^rightx-"},"message":{"type":"string","minLength":1}},"required":["package_name","message"]}}},"required":["content","used_skill_receipts"]"#,
     rich_schema_defs!(),
     "}"
 );
@@ -55,7 +55,7 @@ pub const REPLY_SCHEMA_JSON: &str = concat!(
 pub const BOOTSTRAP_SCHEMA_JSON: &str = concat!(
     r#"{"type":"object","additionalProperties":false,"properties":{"content":{"oneOf":["#,
     rich_content_schema!(),
-    r#",{"type":"null"}]},"bootstrap_complete":{"type":"boolean"},"bootstrap_stage":{"enum":["user_name","agent_name","nature","vibe","emoji","final"]},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content","bootstrap_complete","bootstrap_stage"]"#,
+    r#",{"type":"null"}]},"bootstrap_complete":{"type":"boolean"},"bootstrap_stage":{"enum":["user_name","agent_name","nature","vibe","emoji","final"]},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content","bootstrap_complete","bootstrap_stage"]"#,
     rich_schema_defs!(),
     "}"
 );
@@ -64,7 +64,7 @@ pub const BOOTSTRAP_SCHEMA_JSON: &str = concat!(
 pub const CRON_SCHEMA_JSON: &str = concat!(
     r#"{"type":"object","additionalProperties":false,"properties":{"delivery":{"oneOf":[{"type":"object","additionalProperties":false,"properties":{"kind":{"const":"notify"},"content":"#,
     rich_content_schema!(),
-    r#","attachments":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["kind","content"]},{"type":"object","additionalProperties":false,"properties":{"kind":{"const":"silent"},"reason":{"type":"string","minLength":1}},"required":["kind","reason"]}]},"run_note":{"type":"string"}},"required":["delivery","run_note"]"#,
+    r#","attachments":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["kind","content"]},{"type":"object","additionalProperties":false,"properties":{"kind":{"const":"silent"},"reason":{"type":"string","minLength":1}},"required":["kind","reason"]}]},"run_note":{"type":"string"}},"required":["delivery","run_note"]"#,
     rich_schema_defs!(),
     "}"
 );
@@ -73,7 +73,7 @@ pub const CRON_SCHEMA_JSON: &str = concat!(
 pub const BG_CONTINUATION_SCHEMA_JSON: &str = concat!(
     r#"{"type":"object","additionalProperties":false,"properties":{"delivery":{"type":"object","additionalProperties":false,"properties":{"kind":{"const":"notify"},"content":"#,
     rich_content_schema!(),
-    r#","attachments":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["kind","content"]},"run_note":{"type":"string"}},"required":["delivery","run_note"]"#,
+    r#","attachments":{"type":["array","null"],"items":{"type":"object","additionalProperties":false,"properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["kind","content"]},"run_note":{"type":"string"}},"required":["delivery","run_note"]"#,
     rich_schema_defs!(),
     "}"
 );

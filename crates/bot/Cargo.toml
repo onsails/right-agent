@@ -48,7 +48,6 @@ shlex = { workspace = true }
 tempfile = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
-pulldown-cmark = { workspace = true }
 signal-hook = { workspace = true }
 url = { workspace = true }
 rand = { workspace = true }
