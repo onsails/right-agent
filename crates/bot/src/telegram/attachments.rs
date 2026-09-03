@@ -935,12 +935,10 @@ fn attachment_error_label(att: &OutboundAttachment) -> String {
 }
 
 fn record_send_failure(report: &mut AttachmentSendReport, error: SendError, label: &str) {
+    let is_api = matches!(error, SendError::Api(_));
     let prefix = match &error {
         SendError::Skip(_) => "skipped",
-        SendError::Api(_) => {
-            tracing::error!("failed to send {label}: see SendError::Api");
-            "failed to send"
-        }
+        SendError::Api(_) => "failed to send",
         SendError::FallbackToSingles { .. } => {
             unreachable!("media-group fallback must be handled before terminal classification")
         }
@@ -954,6 +952,12 @@ fn record_send_failure(report: &mut AttachmentSendReport, error: SendError, labe
             SendFailure::Uncertain(format!("{prefix} {label}: {message}"))
         }
     };
+    if is_api {
+        let message = match &failure {
+            SendFailure::Certain(message) | SendFailure::Uncertain(message) => message,
+        };
+        tracing::error!("{message}");
+    }
     if report.failure.is_none() {
         report.failure = Some(failure);
     } else {
