@@ -5724,7 +5724,7 @@ checksum = "1e061d1b48cb8d38042de4ae0a7a6401009d6143dc80d2e2d6f31f0bdd6470c7"
 
 [[package]]
 name = "right"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -5782,7 +5782,7 @@ dependencies = [
 
 [[package]]
 name = "right-agent"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5823,7 +5823,7 @@ dependencies = [
 
 [[package]]
 name = "right-agent-config"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "miette",
  "serde",
@@ -5833,7 +5833,7 @@ dependencies = [
 
 [[package]]
 name = "right-bot"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5899,7 +5899,7 @@ dependencies = [
 
 [[package]]
 name = "right-codegen"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "dirs",
  "include_dir",
@@ -5926,7 +5926,7 @@ dependencies = [
 
 [[package]]
 name = "right-config"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "dirs",
  "miette",
@@ -5939,7 +5939,7 @@ dependencies = [
 
 [[package]]
 name = "right-dashboard"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -5963,7 +5963,7 @@ dependencies = [
 
 [[package]]
 name = "right-db"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "fs4 1.1.0",
@@ -5979,7 +5979,7 @@ dependencies = [
 
 [[package]]
 name = "right-hostpath"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "tempfile",
  "thiserror",
@@ -5987,7 +5987,7 @@ dependencies = [
 
 [[package]]
 name = "right-lifecycle"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "right-db",
@@ -6000,7 +6000,7 @@ dependencies = [
 
 [[package]]
 name = "right-mcp"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6037,7 +6037,7 @@ dependencies = [
 
 [[package]]
 name = "right-memory"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "fastrand",
@@ -6055,11 +6055,11 @@ dependencies = [
 
 [[package]]
 name = "right-platform-knobs"
-version = "0.5.1"
+version = "0.5.2"
 
 [[package]]
 name = "right-platform-store"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "futures",
  "miette",
@@ -6072,7 +6072,7 @@ dependencies = [
 
 [[package]]
 name = "right-process"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "nix 0.31.3",
  "tempfile",
@@ -6082,14 +6082,14 @@ dependencies = [
 
 [[package]]
 name = "right-prompt-safety"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "ironclaw_safety",
 ]
 
 [[package]]
 name = "right-providers"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "fs4 1.1.0",
@@ -6109,7 +6109,7 @@ dependencies = [
 
 [[package]]
 name = "right-rich-content"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "schemars",
  "serde",
@@ -6120,7 +6120,7 @@ dependencies = [
 
 [[package]]
 name = "right-runtime-state"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64 0.22.1",
  "miette",
@@ -6132,7 +6132,7 @@ dependencies = [
 
 [[package]]
 name = "right-sandbox"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "microsandbox",
@@ -6152,7 +6152,7 @@ dependencies = [
 
 [[package]]
 name = "right-stt"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "futures",
  "reqwest",
@@ -6166,7 +6166,7 @@ dependencies = [
 
 [[package]]
 name = "right-ui"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "inquire",
  "miette",

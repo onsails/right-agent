@@ -1,4 +1,15 @@
 # Changelog
+## [0.5.2] - 2026-09-03
+
+
+### Bug Fixes
+
+- **telegram**: Restore native entity detection in rich messages
+- **telegram**: Keep staged attachment files across delivery retries
+- **telegram**: Log Telegram error detail on attachment API failures
+- **deps**: Patch frankenstein to emit nested InputMedia type tag
+- **telegram**: Prevent inferred formatting in agent media
+
 ## [0.5.1] - 2026-09-01
 
 
