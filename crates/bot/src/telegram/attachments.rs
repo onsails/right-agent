@@ -1406,7 +1406,11 @@ async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<Mess
     let thread_id = (ctx.eff_thread_id != 0).then_some(ctx.eff_thread_id as i32);
     let result = send_single_attempt(ctx, &host_path, att.kind, thread_id).await;
 
-    if let Err(e) = tokio::fs::remove_file(&host_path).await
+    // Consume the staged file only on success. On an API failure the delivery
+    // layer retries the whole delivery, so the file must survive for the next
+    // attempt; terminal failures are pruned by the outbox retention sweep.
+    if result.is_ok()
+        && let Err(e) = tokio::fs::remove_file(&host_path).await
         && e.kind() != std::io::ErrorKind::NotFound
     {
         tracing::warn!("failed to remove temp file {}: {e}", host_path.display());
@@ -1609,6 +1613,40 @@ async fn run_cleanup(
         let dir = agent_dir.join(subdir);
         if dir.exists() {
             cleanup_local_dir(&dir, retention_days).await?;
+        }
+    }
+    // Cron/background deliveries stage per-run attachment dirs under
+    // `outbox/cron/<run_id>`. Files consumed by a successful send are removed
+    // by `send_single`; runs whose delivery ultimately failed leave the staged
+    // dir behind, so prune whole run dirs past retention.
+    cleanup_cron_outbox_dirs(&agent_dir.join("outbox").join("cron"), retention_days).await?;
+    Ok(())
+}
+
+async fn cleanup_cron_outbox_dirs(
+    cron_outbox: &std::path::Path,
+    retention_days: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !cron_outbox.exists() {
+        return Ok(());
+    }
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(u64::from(retention_days) * 86400);
+
+    let mut entries = tokio::fs::read_dir(cron_outbox).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let metadata = entry.metadata().await?;
+        if !metadata.is_dir() {
+            continue;
+        }
+        if let Ok(modified) = metadata.modified()
+            && modified < cutoff
+        {
+            tracing::debug!(
+                "cleaning up old cron outbox dir: {}",
+                entry.path().display()
+            );
+            let _ = tokio::fs::remove_dir_all(entry.path()).await;
         }
     }
     Ok(())
@@ -3024,6 +3062,42 @@ mod tests {
         let fwd_block = &after_fwd[..fwd_block_end];
         assert!(!fwd_block.contains("username:"));
         assert!(!fwd_block.contains("user_id:"));
+    }
+
+    #[tokio::test]
+    async fn cron_outbox_cleanup_removes_stale_run_dirs_keeps_fresh() {
+        let root = tempfile::tempdir().unwrap();
+        let cron_outbox = root.path().join("outbox").join("cron");
+        let old_dir = cron_outbox.join("old-run");
+        let fresh_dir = cron_outbox.join("fresh-run");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::create_dir_all(&fresh_dir).unwrap();
+        std::fs::write(old_dir.join("photo.png"), b"x").unwrap();
+        std::fs::write(fresh_dir.join("photo.png"), b"x").unwrap();
+        let stale_mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86400);
+        std::fs::File::open(&old_dir)
+            .unwrap()
+            .set_modified(stale_mtime)
+            .unwrap();
+
+        cleanup_cron_outbox_dirs(&cron_outbox, DEFAULT_RETENTION_DAYS)
+            .await
+            .unwrap();
+
+        assert!(!old_dir.exists(), "stale run dir must be pruned");
+        assert!(fresh_dir.exists(), "fresh run dir must survive");
+        assert!(fresh_dir.join("photo.png").exists());
+    }
+
+    #[tokio::test]
+    async fn cron_outbox_cleanup_tolerates_missing_dir() {
+        let root = tempfile::tempdir().unwrap();
+        cleanup_cron_outbox_dirs(
+            &root.path().join("outbox").join("cron"),
+            DEFAULT_RETENTION_DAYS,
+        )
+        .await
+        .unwrap();
     }
 }
 
