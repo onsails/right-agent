@@ -97,6 +97,8 @@ semver = "1.0"
 
 [patch.crates-io]
 microsandbox = { path = "vendor/microsandbox" }
+# Fork fix: nested InputMedia "type" tag in rich message blocks (upstream PR pending).
+frankenstein = { git = "https://github.com/onsails/frankenstein", rev = "ebaf83c1654982d75153b5a1448bceab24819b78" }
 
 [profile.dev]
 panic = "abort"

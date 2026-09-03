@@ -3068,6 +3068,37 @@ mod tests {
         assert!(!fwd_block.contains("user_id:"));
     }
 
+    /// The Bot API requires the nested `InputMedia*` object inside a rich media
+    /// block to carry its own `"type"` field (`InputRichBlockPhoto.photo` must
+    /// serialize as `{"type": "photo", ...}`). Telegram rejects the request
+    /// with `can't parse InputRichBlock: Can't find field "type"` otherwise.
+    #[test]
+    fn rich_media_blocks_serialize_nested_input_media_type() {
+        let path = std::path::Path::new("/tmp/attachment.bin");
+        for (kind, field, expected_type) in [
+            (OutboundKind::Photo, "photo", "photo"),
+            (OutboundKind::Document, "document", "document"),
+            (OutboundKind::Video, "video", "video"),
+            (OutboundKind::Audio, "audio", "audio"),
+            (OutboundKind::Voice, "voice_note", "voice_note"),
+            (OutboundKind::Animation, "animation", "animation"),
+        ] {
+            let message = build_single_rich_media(path, kind)
+                .unwrap_or_else(|| panic!("{kind:?} must build a rich media message"));
+            let value = serde_json::to_value(&message).unwrap();
+            assert_eq!(
+                value["blocks"][0]["type"],
+                serde_json::json!(expected_type),
+                "{kind:?} block tag"
+            );
+            assert_eq!(
+                value["blocks"][0][field]["type"],
+                serde_json::json!(expected_type),
+                "{kind:?} nested input media must carry its own type field",
+            );
+        }
+    }
+
     #[tokio::test]
     async fn cron_outbox_cleanup_removes_stale_run_dirs_keeps_fresh() {
         let root = tempfile::tempdir().unwrap();
@@ -3102,6 +3133,46 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    /// Live Bot API check: Telegram must accept a rich message carrying a
+    /// photo block — the regression where the nested `InputMediaPhoto` lacked
+    /// its `"type"` tag was only observable against the real server. Run with
+    /// `RIGHT_LIVE_TG_TOKEN` (bot token) and `RIGHT_LIVE_TG_CHAT_ID` (a test
+    /// channel/chat the bot can post to) set; never printed or logged.
+    #[tokio::test]
+    #[ignore = "live-telegram: requires RIGHT_LIVE_TG_TOKEN and RIGHT_LIVE_TG_CHAT_ID"]
+    async fn live_telegram_accepts_rich_media_block() {
+        use base64::Engine as _;
+        use frankenstein::AsyncTelegramApi;
+
+        let token = std::env::var("RIGHT_LIVE_TG_TOKEN").expect("RIGHT_LIVE_TG_TOKEN must be set");
+        let chat_id: i64 = std::env::var("RIGHT_LIVE_TG_CHAT_ID")
+            .expect("RIGHT_LIVE_TG_CHAT_ID must be set")
+            .parse()
+            .expect("RIGHT_LIVE_TG_CHAT_ID must be an integer chat id");
+
+        // 1x1 transparent PNG.
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pixel.png");
+        std::fs::write(&path, png).unwrap();
+
+        let rich_message = build_single_rich_media(&path, OutboundKind::Photo)
+            .expect("photo must build a rich media message");
+        let bot = frankenstein::client_reqwest::Bot::new(&token);
+        let params = frankenstein::methods::SendRichMessageParams::builder()
+            .chat_id(frankenstein::types::ChatId::Integer(chat_id))
+            .rich_message(rich_message)
+            .build();
+        let result = bot.send_rich_message(&params).await;
+        assert!(
+            result.is_ok(),
+            "Telegram must accept the rich media block: {:?}",
+            result.err().map(|e| format!("{e:?}"))
+        );
     }
 }
 
