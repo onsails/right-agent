@@ -1361,12 +1361,7 @@ fn build_single_rich_media(
         }),
         OutboundKind::VideoNote | OutboundKind::Sticker => return None,
     };
-    Some(
-        InputRichMessage::builder()
-            .blocks(vec![block])
-            .skip_entity_detection(true)
-            .build(),
-    )
+    Some(InputRichMessage::builder().blocks(vec![block]).build())
 }
 
 /// Send one attachment. Supported media kinds use `sendRichMessage`; sticker

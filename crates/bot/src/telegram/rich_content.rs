@@ -17,7 +17,6 @@ pub(crate) fn to_telegram(content: &RichContent) -> InputRichMessage {
             RichContentRef::Text(text) => vec![paragraph_text(text)],
             RichContentRef::Blocks(blocks) => blocks.iter().map(map_block).collect(),
         })
-        .skip_entity_detection(true)
         .build()
 }
 
@@ -391,6 +390,20 @@ mod tests {
         assert!(value["blocks"][1]["cells"][0][0].get("text").is_none());
         assert_eq!(value["blocks"][2]["text"]["type"], "url");
         assert_eq!(value["blocks"][2]["text"]["text"]["type"], "bold");
+    }
+
+    #[test]
+    fn rich_message_leaves_entity_detection_to_telegram() {
+        let content = RichContent::literal("#riskoff $ETH hit ~$11.92M").unwrap();
+        let value = serde_json::to_value(to_telegram(&content)).unwrap();
+        assert!(
+            value.get("skip_entity_detection").is_none(),
+            "disabling detection strips hashtag/cashtag entities from agent posts",
+        );
+        assert_eq!(
+            value["blocks"][0]["text"], "#riskoff $ETH hit ~$11.92M",
+            "text stays literal; only Telegram's typed detection applies",
+        );
     }
 
     #[test]

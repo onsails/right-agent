@@ -1393,9 +1393,11 @@ mod rich_content_tests {
             "#HYPE ~$18.5M"
         );
         assert!(payload.get("parse_mode").is_none());
-        assert_eq!(
-            payload["rich_message"]["skip_entity_detection"], true,
-            "typed rich text must disable Telegram entity detection",
+        assert!(
+            payload["rich_message"]
+                .get("skip_entity_detection")
+                .is_none(),
+            "rich text must let Telegram detect hashtag/cashtag entities",
         );
     }
 
