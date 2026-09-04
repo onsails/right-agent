@@ -23,6 +23,7 @@ Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw
 ## Docs
 
 - Always commit `docs/superpowers/` spec and plan files. Never leave them untracked.
+- Never put installation-specific data into persistent docs (CONTEXT.md, ARCHITECTURE.md, `docs/adr/`, `docs/superpowers/` specs and plans, `docs/architecture/`): no real agent names, sandbox names, chat ids, user identifiers, or host paths from a live installation. Use generic placeholders (`<agent>`, `example-agent`) instead.
 
 ## Verification cadence
 
