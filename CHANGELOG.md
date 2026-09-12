@@ -1,4 +1,12 @@
 # Changelog
+## [0.5.3] - 2026-09-12
+
+
+### Bug Fixes
+
+- **prompt**: Clarify RichContent links
+- **bot**: Bound foreground MCP setup
+
 ## [0.5.2] - 2026-09-03
 
 
