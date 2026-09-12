@@ -417,7 +417,8 @@ unknown fields denied and each source text capped at 32,768 UTF-16 code units
 (Telegram's length unit; the JSON-Schema `maxLength` of 32768 remains a
 code-point upper bound, so astral-heavy text hits the runtime limit first).
 It supports paragraph, heading, list, quote, code, table, and marked/link runs;
-runtime validation enforces visible content, link schemes, mark compatibility,
+literal text stays unlinked, while links require a run-level `link`. Runtime
+validation enforces visible content, link schemes, mark compatibility,
 and rectangular tables. Delivery batches top-level blocks, and deterministic
 rich-format rejection falls back to normalized plain chunks of at most 4,096
 UTF-16 units. A multi-part send that fails partway preserves every delivered

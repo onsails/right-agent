@@ -238,6 +238,21 @@ fn operating_instructions_constant_is_non_empty() {
 }
 
 #[test]
+fn operating_instructions_show_literal_and_linked_content_shapes() {
+    let instructions = crate::OPERATING_INSTRUCTIONS;
+    for guidance in [
+        r#"RichContent: `{"text":"literal"}` or"#,
+        r#"inline runs support marks and links, e.g.
+`{"text":"x","link":"https://x.com/name"}`. Literal text stays unlinked."#,
+    ] {
+        assert!(
+            instructions.contains(guidance),
+            "OPERATING_INSTRUCTIONS missing RichContent guidance {guidance}"
+        );
+    }
+}
+
+#[test]
 fn operating_instructions_document_channel_post_attachments() {
     let instructions = crate::OPERATING_INSTRUCTIONS;
     for expected in [

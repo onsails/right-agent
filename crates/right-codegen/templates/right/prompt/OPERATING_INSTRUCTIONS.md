@@ -112,10 +112,10 @@ every small decision.
 ### Formatting
 
 Standalone `content` (terminal reply, `mcp__right__send_message`, and
-`mcp__right__channel_post`) is a RichContent object: either `{"text":"literal"}`
-or `{"blocks":[...]}`. Blocks support paragraph, heading (levels 1–3), list,
-quote, code, and table; inline runs support bold, italic, strikethrough, code,
-and http/https/tg links. Use literal text when no styling is needed.
+`mcp__right__channel_post`) is RichContent: `{"text":"literal"}` or
+`{"blocks":[...]}`. Blocks support paragraph, heading (levels 1–3), list,
+quote, code, and table; inline runs support marks and links, e.g.
+`{"text":"x","link":"https://x.com/name"}`. Literal text stays unlinked.
 
 ### Forum Topics
 
