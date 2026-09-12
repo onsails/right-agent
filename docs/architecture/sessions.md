@@ -56,6 +56,9 @@ successful finish sends the learned/updated receipt, and both calls persist
 provenance. The same foreground registration is the only source of scope for
 `mcp__right__thread_search`, `mcp__right__chat_search`, and
 `mcp__right__get_messages_by_id`.
+The foreground upload of this small per-invocation MCP config is bounded to 2s.
+If it fails or times out, the worker unregisters progress, removes the host
+config, and continues the Claude turn with the base `/sandbox/mcp.json` config.
 
 Telegram transcript archiving is separate from Hindsight memory:
 

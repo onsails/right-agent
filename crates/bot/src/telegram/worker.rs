@@ -53,6 +53,8 @@ const MEDIA_GROUP_HARD_CAP_MS: u64 = 2500;
 const CC_TIMEOUT_SECS: u64 = 600;
 /// Maximum time a foreground invocation may produce no API progress after stdin is delivered.
 pub(crate) const FOREGROUND_API_PROGRESS_TIMEOUT: Duration = Duration::from_secs(20);
+/// Maximum time to upload the foreground turn's small invocation-scoped MCP config.
+const FOREGROUND_PROGRESS_MCP_UPLOAD_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Bound on `child.wait()` after we've already broken from the streaming
 /// loop. The slave should be either gone (deadline/stop SIGKILL) or about
@@ -4111,25 +4113,67 @@ async fn start_progress_invocation(
         cleanup_partial_progress(ctx, &invocation_id, Some(&local_mcp_config_path)).await;
         return None;
     };
-    if let Err(e) =
-        crate::sandbox::upload_into_dir(sandbox, &local_mcp_config_path, "/sandbox/.claude").await
-    {
+    complete_progress_invocation_setup(
+        ctx,
+        &invocation_id,
+        &local_mcp_config_path,
+        crate::sandbox::upload_into_dir(sandbox, &local_mcp_config_path, "/sandbox/.claude"),
+    )
+    .await
+}
+
+async fn complete_progress_invocation_setup(
+    ctx: &WorkerContext,
+    invocation_id: &str,
+    local_mcp_config_path: &Path,
+    upload: impl Future<Output = miette::Result<()>>,
+) -> Option<ActiveProgressInvocation> {
+    let upload_result =
+        match tokio::time::timeout(FOREGROUND_PROGRESS_MCP_UPLOAD_TIMEOUT, upload).await {
+            Ok(result) => result,
+            Err(e) => Err(miette::miette!(
+                "timed out after {}s: {e}",
+                FOREGROUND_PROGRESS_MCP_UPLOAD_TIMEOUT.as_secs()
+            )),
+        };
+    if let Err(e) = upload_result {
         tracing::warn!(invocation_id, "progress MCP config upload failed: {e:#}");
-        // Upload failed → no guest-side file landed; only the host file needs
-        // cleanup.
-        cleanup_partial_progress(ctx, &invocation_id, Some(&local_mcp_config_path)).await;
+        let sandbox_path = progress_sandbox_mcp_path(invocation_id);
+
+        ctx.progress_state.unregister(invocation_id);
+        remove_progress_config_file(local_mcp_config_path);
+
+        let internal_client = Arc::clone(&ctx.internal_client);
+        let unregister_req = right_mcp::internal_client::ProgressUnregisterRequest {
+            agent: ctx.agent_name.clone(),
+            invocation_id: invocation_id.to_owned(),
+        };
+        let unregister_invocation_id = invocation_id.to_owned();
+        std::mem::drop(tokio::spawn(async move {
+            if let Err(e) = internal_client.progress_unregister(&unregister_req).await {
+                tracing::warn!(
+                    invocation_id = unregister_invocation_id,
+                    "progress unregister failed: {e:#}"
+                );
+            }
+        }));
+        spawn_sandbox_progress_cleanup(invocation_id.to_owned(), ctx.sandbox.clone(), sandbox_path);
         return None;
     }
-    let sandbox_path = progress_sandbox_mcp_path(&invocation_id);
-    let (claude_mcp_config_path, sandbox_mcp_config_path) =
-        (sandbox_path.clone(), Some(sandbox_path));
+    let sandbox_path = progress_sandbox_mcp_path(invocation_id);
 
     Some(ActiveProgressInvocation {
-        invocation_id,
-        local_mcp_config_path,
-        claude_mcp_config_path,
-        sandbox_mcp_config_path,
+        invocation_id: invocation_id.to_owned(),
+        local_mcp_config_path: local_mcp_config_path.to_owned(),
+        claude_mcp_config_path: sandbox_path.clone(),
+        sandbox_mcp_config_path: Some(sandbox_path),
     })
+}
+
+fn foreground_mcp_config_path(active_progress: Option<&ActiveProgressInvocation>) -> String {
+    active_progress
+        .map(|active| active.claude_mcp_config_path.clone())
+        .unwrap_or_else(|| crate::sandbox::SANDBOX_MCP_JSON_PATH.to_owned())
 }
 
 async fn cleanup_partial_progress(
@@ -4303,12 +4347,7 @@ async fn invoke_cc(
     let learning_invocation_id = active_progress
         .as_ref()
         .map(|active| active.invocation_id.clone());
-    let invocation_mcp_path = Some(
-        active_progress
-            .as_ref()
-            .map(|active| active.claude_mcp_config_path.clone())
-            .unwrap_or_else(|| crate::sandbox::SANDBOX_MCP_JSON_PATH.to_owned()),
-    );
+    let invocation_mcp_path = Some(foreground_mcp_config_path(active_progress.as_ref()));
 
     let mut invocation = crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: invocation_mcp_path,
@@ -7052,6 +7091,117 @@ mod tests {
         assert_eq!(
             progress_sandbox_mcp_path("inv-1"),
             "/sandbox/.claude/mcp-inv-1.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_progress_config_upload_timeout_cleans_up_and_uses_base_config() {
+        let agent_dir = tempfile::tempdir().expect("agent dir");
+        let socket_path = agent_dir.path().join("internal.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind internal API");
+        let invocation_id = "inv-stalled-upload";
+        let (unregister_received_tx, unregister_received_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept unregister");
+            let request = read_test_http_request(&mut stream).await;
+            assert!(
+                request.starts_with("POST /progress/unregister "),
+                "timeout cleanup must unregister the invocation: {request:?}"
+            );
+            assert!(
+                request.contains(invocation_id),
+                "unregister request must name the timed-out invocation: {request:?}"
+            );
+            unregister_received_tx
+                .send(())
+                .expect("signal unregister received");
+            std::future::pending::<()>().await;
+        });
+
+        let mut ctx = worker_context_for_invoke_test(agent_dir.path());
+        ctx.internal_client = Arc::new(right_mcp::internal_client::InternalClient::new(
+            &socket_path,
+        ));
+        let local_mcp_config_path = agent_dir
+            .path()
+            .join(".claude")
+            .join(format!("mcp-{invocation_id}.json"));
+        std::fs::create_dir_all(local_mcp_config_path.parent().expect("config parent"))
+            .expect("create config parent");
+        std::fs::write(&local_mcp_config_path, "{}\n").expect("write host config");
+        ctx.progress_state
+            .register(crate::telegram::progress::ProgressTarget {
+                invocation_id: invocation_id.to_owned(),
+                token: "token".to_owned(),
+                chat_id: 42,
+                thread_id: 7,
+                agent_dir: agent_dir.path().to_path_buf(),
+                sandbox: None,
+                channel_post_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            });
+
+        let active_progress = tokio::time::timeout(
+            FOREGROUND_PROGRESS_MCP_UPLOAD_TIMEOUT + Duration::from_secs(10),
+            complete_progress_invocation_setup(
+                &ctx,
+                invocation_id,
+                &local_mcp_config_path,
+                std::future::pending::<miette::Result<()>>(),
+            ),
+        )
+        .await
+        .expect("foreground progress MCP upload must be internally bounded");
+
+        assert!(
+            active_progress.is_none(),
+            "timed-out progress must disable itself"
+        );
+        assert_eq!(
+            foreground_mcp_config_path(active_progress.as_ref()),
+            crate::sandbox::SANDBOX_MCP_JSON_PATH,
+            "the foreground turn must continue with the base MCP config"
+        );
+        assert!(
+            ctx.progress_state.get(invocation_id).is_none(),
+            "timeout cleanup must unregister the bot-local progress target"
+        );
+        assert!(
+            !local_mcp_config_path.exists(),
+            "timeout cleanup must delete the host invocation config"
+        );
+        tokio::time::timeout(Duration::from_secs(1), unregister_received_rx)
+            .await
+            .expect("background unregister request must arrive")
+            .expect("unregister receiver must remain open");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn foreground_progress_config_upload_success_uses_invocation_config() {
+        let agent_dir = tempfile::tempdir().expect("agent dir");
+        let invocation_id = "inv-uploaded";
+        let local_mcp_config_path = agent_dir
+            .path()
+            .join(".claude")
+            .join(format!("mcp-{invocation_id}.json"));
+        let ctx = worker_context_for_invoke_test(agent_dir.path());
+
+        let active_progress = complete_progress_invocation_setup(
+            &ctx,
+            invocation_id,
+            &local_mcp_config_path,
+            std::future::ready(Ok(())),
+        )
+        .await
+        .expect("successful upload must enable progress");
+
+        assert_eq!(
+            foreground_mcp_config_path(Some(&active_progress)),
+            "/sandbox/.claude/mcp-inv-uploaded.json"
+        );
+        assert_eq!(
+            active_progress.sandbox_mcp_config_path.as_deref(),
+            Some("/sandbox/.claude/mcp-inv-uploaded.json")
         );
     }
 
