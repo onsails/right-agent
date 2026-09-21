@@ -211,14 +211,45 @@ pub async fn agent_sandbox_spec_for_offline(
             })?;
         secrets.push(binding);
     }
-    agent_sandbox_spec(sandbox_name, config.network_policy, secrets)
+    let memory_mib = config.sandbox.as_ref().and_then(|s| s.memory_mib);
+    agent_sandbox_spec(sandbox_name, config.network_policy, memory_mib, secrets)
         .map_err(|e| miette::miette!("invalid sandbox spec for agent {agent}: {e:#}"))
 }
 
 async fn sandbox_spec(ctx: &BringUpCtx<'_>) -> miette::Result<SandboxSpec> {
     let secrets = secret_bindings(ctx.provider_bindings).await?;
-    agent_sandbox_spec(ctx.sandbox_name, ctx.config.network_policy, secrets)
-        .map_err(|e| miette::miette!("invalid sandbox spec for agent {}: {e:#}", ctx.agent))
+    let memory_mib = ctx.config.sandbox.as_ref().and_then(|s| s.memory_mib);
+    agent_sandbox_spec(
+        ctx.sandbox_name,
+        ctx.config.network_policy,
+        memory_mib,
+        secrets,
+    )
+    .map_err(|e| miette::miette!("invalid sandbox spec for agent {}: {e:#}", ctx.agent))
+}
+
+/// Reconcile the running sandbox's guest memory to the agent's configured
+/// target (Right's default when absent). Every change applies via a sandbox
+/// restart: live resize cannot change boot memory, which is what matters for
+/// host RSS. Memory is a sizing knob, not a correctness or security invariant,
+/// so a reconcile failure logs and leaves the sandbox at its current size
+/// rather than blocking bring-up.
+async fn reconcile_sandbox_memory(ctx: &BringUpCtx<'_>, sandbox: &SandboxHandle) {
+    let target_mib = ctx
+        .config
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.memory_mib)
+        .unwrap_or(right_sandbox::DEFAULT_MEMORY_MIB);
+    match sandbox.reconcile_memory(target_mib).await {
+        Ok(right_sandbox::MemoryReconcile::Unchanged) => {}
+        Ok(right_sandbox::MemoryReconcile::ResizedWithRestart) => {
+            tracing::info!(agent = %ctx.agent, sandbox = %ctx.sandbox_name, target_mib, "resized sandbox memory via restart");
+        }
+        Err(error) => {
+            tracing::warn!(agent = %ctx.agent, sandbox = %ctx.sandbox_name, target_mib, error = %format!("{error:#}"), "memory reconcile failed; sandbox keeps its current size");
+        }
+    }
 }
 
 /// Bring the Agent Sandbox up.
@@ -259,6 +290,8 @@ pub(crate) async fn bring_up_sandbox(
         tracing::warn!(agent = %ctx.agent, sandbox = %ctx.sandbox_name, "sandbox readiness failed: {e:#}");
         return Ok(Err(diagnose(&e)));
     }
+    reconcile_sandbox_memory(ctx, &sandbox).await;
+
     hot_reconcile_providers(ctx.agent, &[], ctx.config, ctx.provider_bindings, &sandbox)
         .await
         .map_err(|e| {

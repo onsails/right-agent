@@ -41,6 +41,7 @@ pub(crate) const PROMPT_LABELS: &[&str] = &[
     // agent_setting_menu sub-prompts
     "model (e.g. sonnet, opus, haiku — empty to clear):",
     "allowed chat ids (comma-separated, empty to clear):",
+    "sandbox memory (MiB, empty for default):",
     // learning_setup prompts
     "max daily budget usd:",
     "enable prefilter?",
@@ -1158,6 +1159,10 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         };
 
         let network_policy_display = format!("{}", config.network_policy);
+        let sandbox_memory_display = match config.sandbox.as_ref().and_then(|s| s.memory_mib) {
+            Some(mib) => format!("{mib} MiB"),
+            None => "default (4 GiB)".to_string(),
+        };
         let memory_display = format_memory_display(&config.memory, &chosen_name);
         let learning_display = format_learning_display(&config.learning);
 
@@ -1165,6 +1170,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         let opt_model = format!("model: {model_display}");
         let opt_chat_ids = format!("allowed chat ids: {chat_ids_display}");
         let opt_network_policy = format!("network policy: {network_policy_display}");
+        let opt_sandbox_memory = format!("sandbox memory: {sandbox_memory_display}");
         let opt_memory = format!("memory: {memory_display}");
         let opt_learning = format!("learning: {learning_display}");
         let stt_display = if config.stt.enabled {
@@ -1180,6 +1186,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
             opt_model.clone(),
             opt_chat_ids.clone(),
             opt_network_policy.clone(),
+            opt_sandbox_memory.clone(),
         ];
         options.push(opt_stt.clone());
         options.push(opt_memory.clone());
@@ -1261,6 +1268,20 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
             };
             update_agent_yaml_field(&agent_yaml_path, "network_policy", policy)?;
             Some("network policy")
+        } else if selection == opt_sandbox_memory {
+            let input = inquire::Text::new("sandbox memory (MiB, empty for default):")
+                .prompt()
+                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            let trimmed = input.trim();
+            if trimmed.is_empty() {
+                update_agent_yaml_sandbox_memory_mib(&agent_yaml_path, None)?;
+            } else {
+                let mib: u32 = trimmed
+                    .parse()
+                    .map_err(|e| miette::miette!("invalid memory size \"{trimmed}\": {e}"))?;
+                update_agent_yaml_sandbox_memory_mib(&agent_yaml_path, Some(mib))?;
+            }
+            Some("sandbox memory")
         } else if selection == opt_memory {
             match memory_setup(config.memory.as_ref(), &chosen_name).await? {
                 Some(new_cfg) => {
@@ -2211,6 +2232,59 @@ pub fn update_agent_yaml_sandbox_name(agent_dir: &Path, sandbox_name: &str) -> m
     Ok(())
 }
 
+/// Set or clear `sandbox.memory_mib` in agent.yaml.
+///
+/// `None` removes the key (back to Right's default); `Some(mib)` writes it.
+/// Every other `sandbox:` sub-field is preserved verbatim.
+fn update_agent_yaml_sandbox_memory_mib(
+    path: &Path,
+    memory_mib: Option<u32>,
+) -> miette::Result<()> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| miette::miette!("read {}: {e:#}", path.display()))?;
+
+    let mut sandbox_lines: Vec<String> = Vec::new();
+    let mut other_lines: Vec<String> = Vec::new();
+    let mut in_sandbox_block = false;
+    let mut had_sandbox_block = false;
+
+    for line in content.lines() {
+        if line == "sandbox:" {
+            in_sandbox_block = true;
+            had_sandbox_block = true;
+            continue;
+        }
+        if in_sandbox_block {
+            if line.starts_with("  ") {
+                // Drop any existing memory_mib line — it is rewritten below.
+                if !line.trim_start().starts_with("memory_mib:") {
+                    sandbox_lines.push(line.to_string());
+                }
+                continue;
+            }
+            in_sandbox_block = false;
+        }
+        other_lines.push(line.to_string());
+    }
+
+    let mut lines = other_lines;
+    if had_sandbox_block || memory_mib.is_some() {
+        lines.push("sandbox:".to_string());
+        if let Some(mib) = memory_mib {
+            lines.push(format!("  memory_mib: {mib}"));
+        }
+        lines.extend(sandbox_lines);
+    }
+
+    let mut output = lines.join("\n");
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    std::fs::write(path, &output)
+        .map_err(|e| miette::miette!("write {}: {e:#}", path.display()))?;
+    Ok(())
+}
+
 /// Remove the entire `memory:` block from an agent.yaml file.
 ///
 /// Used when switching from Hindsight to File: omitting the block lets the
@@ -2755,6 +2829,80 @@ mod memory_yaml_tests {
         assert!(
             content.contains("recall_budget: low"),
             "non-default budget emitted"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sandbox_memory_yaml_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_yaml(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
+        let path = dir.join("agent.yaml");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn parse(path: &std::path::Path) -> right_agent::agent::AgentConfig {
+        serde_saphyr::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn set_adds_memory_mib_and_preserves_name() {
+        let dir = tempdir().unwrap();
+        let path = write_yaml(
+            dir.path(),
+            "model: \"sonnet\"\n\nsandbox:\n  name: right-x\n",
+        );
+        update_agent_yaml_sandbox_memory_mib(&path, Some(4096)).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("memory_mib: 4096"), "got:\n{content}");
+        assert!(
+            content.contains("name: right-x"),
+            "name preserved, got:\n{content}"
+        );
+        let parsed = parse(&path);
+        assert_eq!(
+            parsed.sandbox.as_ref().and_then(|s| s.memory_mib),
+            Some(4096)
+        );
+        assert_eq!(
+            parsed.sandbox.as_ref().and_then(|s| s.name.as_deref()),
+            Some("right-x")
+        );
+    }
+
+    #[test]
+    fn clear_removes_memory_mib_and_preserves_other_subfields() {
+        let dir = tempdir().unwrap();
+        let path = write_yaml(
+            dir.path(),
+            "sandbox:\n  name: right-x\n  memory_mib: 8192\n",
+        );
+        update_agent_yaml_sandbox_memory_mib(&path, None).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("memory_mib"), "got:\n{content}");
+        assert!(
+            content.contains("name: right-x"),
+            "name preserved, got:\n{content}"
+        );
+        let parsed = parse(&path);
+        assert_eq!(parsed.sandbox.as_ref().and_then(|s| s.memory_mib), None);
+    }
+
+    #[test]
+    fn set_creates_block_when_absent() {
+        let dir = tempdir().unwrap();
+        let path = write_yaml(dir.path(), "model: \"sonnet\"\n");
+        update_agent_yaml_sandbox_memory_mib(&path, Some(2048)).unwrap();
+
+        let parsed = parse(&path);
+        assert_eq!(
+            parsed.sandbox.as_ref().and_then(|s| s.memory_mib),
+            Some(2048)
         );
     }
 }

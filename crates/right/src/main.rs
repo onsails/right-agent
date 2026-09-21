@@ -4813,6 +4813,7 @@ mod tests {
             config: Some(AgentConfig {
                 sandbox: Some(SandboxConfig {
                     name: None,
+                    memory_mib: None,
                     providers: Vec::new(),
                 }),
                 telegram_token: Some("redacted-test-token".to_owned()),

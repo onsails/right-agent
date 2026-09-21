@@ -37,6 +37,7 @@ fn make_bot_agent(name: &str, token: &str) -> AgentDef {
         debug: None,
         sandbox: Some(SandboxConfig {
             name: None,
+            memory_mib: None,
             providers: vec![],
         }),
         telegram_token: Some(token.to_string()),
@@ -73,6 +74,7 @@ fn make_agent_no_token(name: &str) -> AgentDef {
         debug: None,
         sandbox: Some(SandboxConfig {
             name: None,
+            memory_mib: None,
             providers: vec![],
         }),
         telegram_token: None,
@@ -123,6 +125,7 @@ fn make_agent_with_restart(name: &str, token: &str, restart: RestartPolicy) -> A
         debug: None,
         sandbox: Some(SandboxConfig {
             name: None,
+            memory_mib: None,
             providers: vec![],
         }),
         telegram_token: Some(token.to_string()),

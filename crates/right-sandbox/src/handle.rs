@@ -275,6 +275,77 @@ impl SandboxHandle {
         })
     }
 
+    /// Reconcile this sandbox's guest memory limit to `target_mib`.
+    ///
+    /// No-op when the sandbox is already at the target. Every real change is
+    /// restart-backed: the SDK's live resize can only move hotplugged memory
+    /// *above* boot memory (the runtime clamps a shrink to boot), and on macOS
+    /// freed pages are never returned to the host (balloon inflate is
+    /// unimplemented; `MADV_DONTNEED` is a no-op). So a changed memory limit is
+    /// persisted, then the sandbox is stopped and started to re-boot at the new
+    /// boot memory, which preserves the writable layer.
+    pub async fn reconcile_memory(&self, target_mib: u32) -> Result<MemoryReconcile, SandboxError> {
+        if target_mib == 0 {
+            return Err(SandboxError::InvalidSpec {
+                field: "resources.memory_mib",
+                reason: "must be at least 1".to_owned(),
+            });
+        }
+        let fresh = Sandbox::get(&self.name)
+            .await
+            .map_err(|e| get_error(&self.name, e))?;
+        let plan = fresh
+            .modify()
+            .memory_mib(target_mib)
+            .dry_run()
+            .await
+            .map_err(|source| operation_error(&self.name, "plan memory resize", source))?;
+        if !plan.conflicts.is_empty() {
+            let details = plan
+                .conflicts
+                .iter()
+                .map(|conflict| format!("{}: {}", conflict.field, conflict.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(SandboxError::MemoryResize {
+                name: self.name.clone(),
+                reason: details,
+            });
+        }
+        let has_memory_change = plan
+            .changes
+            .iter()
+            .any(|change| matches!(change, PlannedChange::Config(cfg) if cfg.field == "memory"));
+        if !has_memory_change {
+            return Ok(MemoryReconcile::Unchanged);
+        }
+
+        // Persist the new boot memory without a live op, then stop/start so the
+        // guest actually boots at it. This mirrors the SDK's own restart-backed
+        // apply (`stop` + `refresh().start_detached().detach()`).
+        fresh
+            .modify()
+            .memory_mib(target_mib)
+            .next_start()
+            .apply()
+            .await
+            .map_err(|source| operation_error(&self.name, "persist memory resize", source))?;
+        fresh
+            .stop()
+            .await
+            .map_err(|source| operation_error(&self.name, "stop for memory resize", source))?;
+        let refreshed = fresh
+            .refresh()
+            .await
+            .map_err(|source| operation_error(&self.name, "refresh after memory stop", source))?;
+        let started = refreshed
+            .start_detached()
+            .await
+            .map_err(|source| operation_error(&self.name, "start after memory resize", source))?;
+        started.detach().await;
+        Ok(MemoryReconcile::ResizedWithRestart)
+    }
+
     /// Apply one store-backed provider binding to this sandbox.
     ///
     /// Existing bindings first replace their complete host allow-list through
@@ -648,6 +719,15 @@ impl std::fmt::Debug for SandboxHandle {
             .field("name", &self.name)
             .finish_non_exhaustive()
     }
+}
+
+/// Outcome of reconciling a sandbox's memory limit to a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryReconcile {
+    /// Already at the target; nothing was changed.
+    Unchanged,
+    /// Applied via a stop/start; the writable layer was preserved.
+    ResizedWithRestart,
 }
 
 /// A point-in-time health snapshot of a running sandbox.

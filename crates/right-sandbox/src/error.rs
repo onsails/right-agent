@@ -227,6 +227,10 @@ pub enum SandboxError {
         env_var: String,
         details: String,
     },
+
+    /// A memory resize plan carried conflicts that must be resolved first.
+    #[error("sandbox '{name}': memory resize failed: {reason}")]
+    MemoryResize { name: String, reason: String },
 }
 
 impl SandboxError {
@@ -260,7 +264,8 @@ impl SandboxError {
             | Self::ExecStdin { .. }
             | Self::SecretApplyUnsupported { .. }
             | Self::SecretAdditionUnsupported { .. }
-            | Self::SecretApplyConflict { .. } => None,
+            | Self::SecretApplyConflict { .. }
+            | Self::MemoryResize { .. } => None,
         }
     }
 }

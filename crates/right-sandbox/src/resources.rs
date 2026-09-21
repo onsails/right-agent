@@ -11,16 +11,17 @@ use crate::error::SandboxError;
 /// Default vCPU count per Agent Sandbox.
 pub const DEFAULT_CPUS: u8 = 2;
 
-/// Default memory limit per Agent Sandbox, in MiB (8 GiB).
-pub const DEFAULT_MEMORY_MIB: u32 = 8 * 1024;
+/// Default memory limit per Agent Sandbox, in MiB (4 GiB).
+pub const DEFAULT_MEMORY_MIB: u32 = 4 * 1024;
 
 /// Default writable-layer size per Agent Sandbox, in MiB (16 GiB).
 pub const DEFAULT_WRITABLE_LAYER_MIB: u32 = 16 * 1024;
 
-/// Per-agent resource sizing (`sandbox.resources` in the agent config).
+/// Per-agent resource sizing. Memory is overridable per agent via the
+/// `sandbox.memory_mib` key in agent.yaml; vCPU and writable-layer sizing are
+/// Right defaults only for now.
 ///
-/// The defaults are Right's, applied at create; every field is overridable
-/// per agent.
+/// The defaults are Right's, applied at create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resources {
     /// vCPU count.
@@ -76,7 +77,7 @@ mod tests {
     fn defaults_are_rights_own_not_the_sdks() {
         let resources = Resources::default();
         assert_eq!(resources.cpus, 2);
-        assert_eq!(resources.memory_mib, 8192);
+        assert_eq!(resources.memory_mib, 4096);
         assert_eq!(resources.writable_layer_mib, 16384);
     }
 

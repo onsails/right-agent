@@ -50,9 +50,11 @@ See: `docs/architecture/lifecycle.md` (Voice transcription).
 Sandboxes are **persistent** — never deleted automatically. They live as
 long as the agent lives, run detached, and survive bot restarts.
 
-Egress policy and initial resources are create-time. Provider values rotate
-live; a missing binding may be added by SDK-managed restart, which preserves
-the persistent sandbox filesystem.
+Egress policy, vCPU, and writable-layer sizing are create-time. Memory is
+reconcilable: a changed `memory_mib` applies via a sandbox restart, which
+preserves the filesystem. Provider values rotate live; a missing binding may
+be added by SDK-managed restart, which preserves the persistent sandbox
+filesystem.
 
 Live-microVM coverage is CI-explicit: tests that boot a real sandbox use
 `#[ignore = "ci-msb: ..."]` with a `ci_msb_` test-name prefix (enforced by

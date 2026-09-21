@@ -69,14 +69,19 @@ pub fn egress_for(network_policy: NetworkPolicy) -> Egress {
 /// Build the create-time specification for an agent's sandbox.
 /// `secrets` are the agent's resolved provider bindings. Credential values are
 /// private/redacted and enter only the SDK's scoped resolver; durable sandbox
-/// configuration receives source identities and placeholders.
+/// configuration receives source identities and placeholders. `memory_mib`
+/// overrides the per-agent memory limit; `None` uses Right's default.
 pub fn agent_sandbox_spec(
     sandbox_name: &str,
     network_policy: NetworkPolicy,
+    memory_mib: Option<u32>,
     secrets: Vec<SecretBinding>,
 ) -> Result<SandboxSpec, SandboxError> {
     let mut spec = SandboxSpec::new(sandbox_name, DEFAULT_SANDBOX_IMAGE);
     spec.resources = Resources::default();
+    if let Some(memory_mib) = memory_mib {
+        spec.resources.memory_mib = memory_mib;
+    }
     spec.egress = egress_for(network_policy);
     spec.secrets = secrets;
     // Deliberately no create-time `user` or `workdir`. Neither exists in the
@@ -100,7 +105,7 @@ mod tests {
     /// this is a real boot failure a pilot migration hit, not a style choice.
     #[test]
     fn spec_does_not_pin_a_guest_user_the_image_lacks() {
-        let spec = agent_sandbox_spec("right-finance", NetworkPolicy::Permissive, Vec::new())
+        let spec = agent_sandbox_spec("right-finance", NetworkPolicy::Permissive, None, Vec::new())
             .expect("defaults are a valid spec");
         assert_eq!(spec.image, DEFAULT_SANDBOX_IMAGE);
         assert_eq!(
@@ -116,8 +121,13 @@ mod tests {
 
     #[test]
     fn restrictive_policy_allows_only_the_claude_domains() {
-        let spec = agent_sandbox_spec("right-finance", NetworkPolicy::Restrictive, Vec::new())
-            .expect("restrictive is a valid spec");
+        let spec = agent_sandbox_spec(
+            "right-finance",
+            NetworkPolicy::Restrictive,
+            None,
+            Vec::new(),
+        )
+        .expect("restrictive is a valid spec");
         let Egress::Restrictive { allow } = spec.egress else {
             panic!("restrictive policy must produce restrictive egress");
         };
@@ -144,8 +154,20 @@ mod tests {
 
     #[test]
     fn invalid_name_is_rejected_before_any_sdk_call() {
-        let error = agent_sandbox_spec("", NetworkPolicy::Permissive, Vec::new())
+        let error = agent_sandbox_spec("", NetworkPolicy::Permissive, None, Vec::new())
             .expect_err("an empty name cannot be created");
         assert!(matches!(error, SandboxError::InvalidSpec { .. }));
+    }
+
+    #[test]
+    fn explicit_memory_overrides_the_default() {
+        let spec = agent_sandbox_spec(
+            "right-finance",
+            NetworkPolicy::Permissive,
+            Some(2048),
+            Vec::new(),
+        )
+        .expect("explicit memory is a valid spec");
+        assert_eq!(spec.resources.memory_mib, 2048);
     }
 }

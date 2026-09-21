@@ -43,7 +43,7 @@ pub use exec::{
     STDIN_CHUNK_BYTES, Stdin,
 };
 pub use fs::{FsEntryInfo, FsEntryKind};
-pub use handle::{DEFAULT_READY_TIMEOUT, SandboxHandle, SandboxHealthReport};
+pub use handle::{DEFAULT_READY_TIMEOUT, MemoryReconcile, SandboxHandle, SandboxHealthReport};
 pub use names::{MAX_SANDBOX_NAME_BYTES, fit_sandbox_name, resolve_sandbox_name, sandbox_name};
 pub use phase::SandboxPhase;
 pub use resources::{DEFAULT_CPUS, DEFAULT_MEMORY_MIB, DEFAULT_WRITABLE_LAYER_MIB, Resources};

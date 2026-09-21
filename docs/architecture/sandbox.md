@@ -64,6 +64,11 @@ Bot startup (bring_up_sandbox, crates/bot/src/sandbox_supervisor.rs):
   ├─ wait_ready (DEFAULT_READY_TIMEOUT, 120s) — covers only the attach race
   │   (Created/Starting); create/start already block until the guest agent
   │   is serving
+  ├─ reconcile_sandbox_memory — after the guest is ready, apply the agent's
+  │   `memory_mib` (Right's 4 GiB default when absent); a changed size is
+  │   persisted then stop/started so the guest re-boots at the new boot
+  │   memory (preserves the filesystem); a reconcile failure logs and leaves
+  │   the sandbox at its current size, it does not fail bring-up
   ├─ hot_reconcile_providers — after the guest is ready, re-resolve every
   │   credential-bearing provider from `providers.db` and apply it to the live
   │   sandbox through a scoped in-process resolver; existing bindings rotate
@@ -87,7 +92,11 @@ Bot startup (bring_up_sandbox, crates/bot/src/sandbox_supervisor.rs):
 
 Create-time state:
   ├─ egress policy — the SDK cannot change network policy on a running VM
-  └─ initial resources (cpus, memory, writable layer)
+  └─ vCPU and writable-layer sizing
+
+Reconcilable state:
+  └─ guest memory — `sandbox.memory_mib` (4 GiB default) is applied on every
+     bring-up; a change is restart-backed and preserves the filesystem
 
 Provider state:
   ├─ existing bindings diff complete allowed-host sets: shrink removals while

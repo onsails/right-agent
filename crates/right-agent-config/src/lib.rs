@@ -348,6 +348,9 @@ pub struct SandboxConfig {
     /// New agents (created via `right agent init`) get the derived name
     /// written here explicitly.
     pub name: Option<String>,
+    /// Guest memory limit in MiB. Absent means Right's default (4 GiB).
+    /// Override per agent; a shrink applies via a sandbox restart.
+    pub memory_mib: Option<u32>,
     /// Providers attached to this sandbox. Empty by default. Per-agent source of truth.
     pub providers: Vec<ProviderEntry>,
 }
@@ -369,6 +372,8 @@ struct SandboxConfigRaw {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
+    memory_mib: Option<u32>,
+    #[serde(default)]
     providers: Vec<ProviderEntry>,
 }
 
@@ -388,6 +393,7 @@ impl TryFrom<SandboxConfigRaw> for SandboxConfig {
         }
         Ok(SandboxConfig {
             name: raw.name,
+            memory_mib: raw.memory_mib,
             providers: raw.providers,
         })
     }
@@ -1086,6 +1092,20 @@ prefilter_enabled: false
         let yaml = "sandbox: { name: right-alpha }";
         let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert!(cfg.sandbox.unwrap().providers.is_empty());
+    }
+
+    #[test]
+    fn sandbox_memory_mib_is_optional_and_defaults_to_none() {
+        let absent: AgentConfig = serde_saphyr::from_str("sandbox: { name: right-alpha }").unwrap();
+        assert_eq!(
+            absent.sandbox.as_ref().and_then(|s| s.memory_mib),
+            None,
+            "absent memory_mib means Right's default, not a parsed value"
+        );
+
+        let set: AgentConfig =
+            serde_saphyr::from_str("sandbox: { name: right-alpha, memory_mib: 4096 }").unwrap();
+        assert_eq!(set.sandbox.as_ref().and_then(|s| s.memory_mib), Some(4096));
     }
 
     #[test]
