@@ -1,4 +1,15 @@
 # Changelog
+## [0.5.4] - 2026-09-21
+
+
+### Bug Fixes
+
+- **memory**: Migrate bank probe off removed /profile endpoint ([#228](https://github.com/onsails/right-agent/pull/228))
+
+### Features
+
+- **sandbox**: Default 4 GiB memory with per-agent override
+
 ## [0.5.3] - 2026-09-12
 
 
