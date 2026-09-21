@@ -39,7 +39,7 @@ jobs:
       # target/devenv (~18 GB) + an incremental rebuild on top need it on the
       # smaller VM, where the hand-rolled rm -rf left too little headroom.
       - name: Free up runner disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
+        uses: jlumbroso/free-disk-space@v2.0.0
         with:
           tool-cache: true
           android: true
@@ -154,7 +154,7 @@ jobs:
       # model cache plus a full target/ leave little headroom on the 72 GB
       # runner variant.
       - name: Free up runner disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
+        uses: jlumbroso/free-disk-space@v2.0.0
         with:
           tool-cache: true
           android: true
@@ -250,7 +250,7 @@ jobs:
           lfs: true
       - uses: onsails/nix-action@v2.2.0
       - name: Free up runner disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
+        uses: jlumbroso/free-disk-space@v2.0.0
         with:
           tool-cache: true
           android: true
