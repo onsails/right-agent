@@ -9,7 +9,7 @@ pub enum ErrorKind {
     Transient,   // 5xx, timeout, connect error
     RateLimited, // 429
     Auth,        // 401, 403
-    Client,      // 400, 404, 422 (caller bug or upstream API drift)
+    Client,      // 400, 404, 410, 422 (caller bug or upstream API drift)
     Malformed,   // response body parse error
     Quota,       // 402 — Hindsight insufficient credits (recoverable on top-up)
 }
@@ -23,7 +23,7 @@ impl MemoryError {
                 401 | 403 => ErrorKind::Auth,
                 402 => ErrorKind::Quota,
                 429 => ErrorKind::RateLimited,
-                400 | 404 | 422 => ErrorKind::Client,
+                400 | 404 | 410 | 422 => ErrorKind::Client,
                 _ => ErrorKind::Transient,
             },
             MemoryError::HindsightTimeout => ErrorKind::Transient,
@@ -72,6 +72,7 @@ mod tests {
     fn classify_client() {
         assert_eq!(h(400).classify(), ErrorKind::Client);
         assert_eq!(h(404).classify(), ErrorKind::Client);
+        assert_eq!(h(410).classify(), ErrorKind::Client);
         assert_eq!(h(422).classify(), ErrorKind::Client);
     }
 

@@ -62,7 +62,9 @@ pub struct ReflectResponse {
     pub text: String,
 }
 
-/// Bank profile (returned by GET /profile, auto-creates if absent).
+/// Bank profile returned by `PUT /v1/default/banks/{bank_id}` (create-or-update),
+/// and as an item of `GET /v1/default/banks`. Only the fields we consume are
+/// modeled; `serde` ignores the rest.
 #[derive(Debug, Deserialize)]
 pub struct BankProfile {
     pub bank_id: String,
@@ -337,22 +339,25 @@ impl HindsightClient {
             .map_err(MemoryError::from_reqwest)
     }
 
-    /// Get the bank profile, creating the bank if it doesn't exist.
+    /// Ensure the bank exists, returning its profile.
+    ///
+    /// The legacy `GET /v1/default/banks/{id}/profile` endpoint was removed by
+    /// Hindsight (HTTP 410). Its replacement is `PUT /v1/default/banks/{id}`,
+    /// which auto-fills missing fields with defaults on a new bank. Disposition
+    /// and reflect mission are now bank configuration (`PATCH .../config`); we
+    /// send an empty body, so they are never touched.
     pub async fn get_or_create_bank(&self) -> Result<BankProfile, MemoryError> {
-        let url = format!(
-            "{}/v1/default/banks/{}/profile",
-            self.base_url, self.bank_id
-        );
+        let url = format!("{}/v1/default/banks/{}", self.base_url, self.bank_id);
 
         let resp = self
             .http
-            .get(&url)
+            .put(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&serde_json::json!({}))
             .timeout(RECALL_TIMEOUT)
             .send()
             .await
             .map_err(MemoryError::from_reqwest)?;
-
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -745,10 +750,11 @@ mod tests {
         assert_eq!(profile.bank_id, "test-bank");
         assert_eq!(profile.name.as_deref(), Some("Test Bank"));
 
-        let (method_line, auth, _body) = handle.await.unwrap();
-        assert!(method_line.starts_with("GET"));
-        assert!(method_line.contains("/v1/default/banks/test-bank/profile"));
+        let (method_line, auth, body) = handle.await.unwrap();
+        assert!(method_line.starts_with("PUT"));
+        assert!(method_line.contains("/v1/default/banks/test-bank"));
         assert!(auth.to_lowercase().contains("bearer hs_testkey"));
+        assert_eq!(body.trim(), "{}");
     }
 
     #[tokio::test]
