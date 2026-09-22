@@ -32,7 +32,7 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v6
       # Determinate Nix + devenv + FlakeHub cache, matching tests.yml.
-      - uses: onsails/nix-action@v2.2.0
+      - uses: onsails/nix-action@v2.3.0
       - name: Build site (Bun, in the devenv site profile)
         env:
           # Prefer repository variables; fall back to secrets because this is
