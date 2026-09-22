@@ -31,7 +31,7 @@ jobs:
       # in one step, with impatient-networking defaults (faster CI substituter
       # retries) and parallel substitution. Replaces cachix/install-nix-action
       # + a manual `nix profile add nixpkgs#devenv` step.
-      - uses: onsails/nix-action@v2.2.0
+      - uses: onsails/nix-action@v2.3.0
       # Reclaim ~30-40 GB of root-fs space. GitHub hands out two structurally
       # different VM types for ubuntu-latest — a ~145 GB single-disk runner and
       # a ~72 GB runner — so we cannot rely on a fat /mnt being present. We
@@ -149,7 +149,7 @@ jobs:
           lfs: true
       # Same Determinate Nix + Devenv + FlakeHub Cache combo as the workspace
       # job. Replaces cachix/install-nix-action + manual devenv install.
-      - uses: onsails/nix-action@v2.2.0
+      - uses: onsails/nix-action@v2.3.0
       # Same aggressive root-fs cleanup as the workspace job: the whisper
       # model cache plus a full target/ leave little headroom on the 72 GB
       # runner variant.
@@ -248,7 +248,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           lfs: true
-      - uses: onsails/nix-action@v2.2.0
+      - uses: onsails/nix-action@v2.3.0
       - name: Free up runner disk space
         uses: jlumbroso/free-disk-space@v2.0.0
         with:
