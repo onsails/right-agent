@@ -214,9 +214,9 @@ fn format_cache_line(
             .saturating_add(t.cache_read_tokens);
         if let Some(p) = pricing::lookup(model) {
             any_priced = true;
-            // Cached reads cost 10% of regular input, so 90% of the fresh-input
-            // rate is saved per cached token.
-            total_savings_usd += t.cache_read_tokens as f64 * p.input_per_mtok * 0.9 / 1_000_000.0;
+            total_savings_usd += t.cache_read_tokens as f64
+                * (p.input_per_mtok - p.cache_read_per_mtok)
+                / 1_000_000.0;
         }
     }
 
