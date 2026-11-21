@@ -94,6 +94,7 @@ arc-swap = "1.0"
 secrecy = { version = "0.10", features = ["serde"] }
 zeroize = "1.8"
 semver = "1.0"
+llm-prices = "1.8.0"
 
 [patch.crates-io]
 microsandbox = { path = "vendor/microsandbox" }

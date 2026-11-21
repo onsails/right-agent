@@ -36,6 +36,7 @@ notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 const_format = { workspace = true }
 uuid = { workspace = true }
+llm-prices = { workspace = true }
 
 [dev-dependencies]
 right-db = { path = "../right-db", version = "*", features = ["test-support"] }
